@@ -40,6 +40,7 @@
 #include <Xm/CutPaste.h>
 #include <Xm/Protocols.h>
 #include <Xm/MwmUtil.h>
+#include <Xm/SeparatoG.h>
 #include <Dt/Session.h>
 #include <Dt/Dt.h>
 
@@ -58,9 +59,11 @@ typedef struct {
     XtAppContext app_context;
     Widget       shell;
     Widget       main_form;
+    Widget       content_form;
     Widget       key_focus_proxy;
     Widget       display_label;
     Widget       display_menu;
+    Widget       keypad;
     SessionData *session_data;
 
     char         exec_path[PATH_MAX];
@@ -77,6 +80,7 @@ typedef struct {
     bool         show_thousands;
     char         decimal_char;
     char         thousands_char;
+    int          mode; /* 0=basic, 1=scientific */
 
     /* Widgets for keyboard activation */
     Widget       btn_digits[10];
@@ -90,6 +94,8 @@ typedef struct {
     Widget       btn_sign;
     Widget       btn_back;
     Widget       btn_ac;
+    Widget       view_mode_basic_btn;
+    Widget       view_mode_sci_btn;
 
     XtIntervalId copy_flash_id;
     char         copy_flash_backup[MAX_DISPLAY_LEN];
@@ -113,6 +119,16 @@ static void cb_display_copy(Widget w, XtPointer client_data, XtPointer call_data
 static void cb_display_paste(Widget w, XtPointer client_data, XtPointer call_data);
 static void copy_flash_reset(XtPointer client_data, XtIntervalId *id);
 static void paste_flash_reset(XtPointer client_data, XtIntervalId *id);
+static void rebuild_keypad(AppState *app);
+static void set_mode(AppState *app, int mode, Boolean from_menu);
+static void cb_mode_toggle(Widget w, XtPointer client_data, XtPointer call_data);
+static void clear_button_refs(AppState *app);
+static Widget create_key_button(Widget parent, const char *name, const char *label,
+                                Widget top_widget, Boolean align_top,
+                                int col, int col_span, int col_step,
+                                XtCallbackProc cb, XtPointer data);
+static void rebuild_keypad(AppState *app);
+static void set_mode(AppState *app, int mode, Boolean from_menu);
 
 /* -------------------------------------------------------------------------
  * Helpers
@@ -273,12 +289,14 @@ static void load_view_state(AppState *app)
     if (!app) return;
     int val = config_read_int_map(VIEW_STATE_FILENAME, "show_thousands", 1);
     app->show_thousands = (val != 0);
+    app->mode = config_read_int_map(VIEW_STATE_FILENAME, "mode", app->mode);
 }
 
 static void save_view_state(const AppState *app)
 {
     if (!app) return;
     config_write_int_map(VIEW_STATE_FILENAME, "show_thousands", app->show_thousands ? 1 : 0);
+    config_write_int_map(VIEW_STATE_FILENAME, "mode", app->mode);
 }
 
 static void format_number(AppState *app, double value, char *out, size_t out_len)
@@ -646,6 +664,166 @@ static void reformat_display(AppState *app)
     app->entering_new = false;
 }
 
+static void set_mode(AppState *app, int mode, Boolean from_menu)
+{
+    if (!app) return;
+    if (mode != 0 && mode != 1) mode = 0;
+    if (app->mode == mode && from_menu) return;
+    app->mode = mode;
+
+    Boolean basic_set = (mode == 0) ? True : False;
+    Boolean sci_set   = (mode == 1) ? True : False;
+    if (app->view_mode_basic_btn) {
+        XtVaSetValues(app->view_mode_basic_btn, XmNset, basic_set, NULL);
+    }
+    if (app->view_mode_sci_btn) {
+        XtVaSetValues(app->view_mode_sci_btn, XmNset, sci_set, NULL);
+    }
+
+    save_view_state(app);
+    if (app->session_data) {
+        session_data_set_int(app->session_data, "mode", mode);
+    }
+
+    rebuild_keypad(app);
+
+    /* Adjust shell width roughly based on column count */
+    int cols = (app->mode == 1) ? 10 : 4;
+    Dimension desired_w = (Dimension)(cols * 60 + 40);
+    XtVaSetValues(app->shell,
+                  XmNwidth, desired_w,
+                  XmNminWidth, (Dimension)(cols * 50),
+                  NULL);
+}
+
+static void rebuild_keypad(AppState *app)
+{
+    if (!app || !app->content_form || !app->display_label) return;
+
+    if (app->keypad && XtIsWidget(app->keypad)) {
+        XtDestroyWidget(app->keypad);
+        app->keypad = NULL;
+    }
+    clear_button_refs(app);
+
+    Arg pad_args[4];
+    int pn = 0;
+    int base_cols = 4 + ((app->mode == 1) ? 6 : 0);
+    int col_step = 25;
+    XtSetArg(pad_args[pn], XmNfractionBase, base_cols * col_step); pn++;
+    Widget keypad = XmCreateForm(app->content_form, "keypadForm", pad_args, pn);
+    XtVaSetValues(keypad,
+                  XmNtopAttachment,    XmATTACH_WIDGET,
+                  XmNtopWidget,        app->display_label,
+                  XmNtopOffset,        8,
+                  XmNleftAttachment,   XmATTACH_FORM,
+                  XmNrightAttachment,  XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  NULL);
+    XtManageChild(keypad);
+    app->keypad = keypad;
+
+    Widget row_anchor = NULL;
+    Widget row_top = NULL;
+    int offset = (app->mode == 1) ? 6 : 0;
+
+    /* extra scientific dummy columns (6) */
+    if (offset > 0) {
+        for (int i = 0; i < offset; ++i) {
+            char name[32];
+            snprintf(name, sizeof(name), "sciR1C%d", i);
+            create_key_button(keypad, name, "?", row_anchor, False, i, 1, col_step, NULL, NULL);
+        }
+    }
+
+    /* Row 1 */
+    row_anchor = create_key_button(keypad, "backBtn", "◀", NULL, False, offset + 0, 1, col_step, cb_backspace, NULL);
+    app->btn_back = row_anchor;
+    row_top = row_anchor;
+    if (offset > 0) {
+        for (int i = 0; i < offset; ++i) {
+            char name[32];
+            snprintf(name, sizeof(name), "sciR1bC%d", i);
+            create_key_button(keypad, name, "?", row_top, True, i, 1, col_step, NULL, NULL);
+        }
+    }
+    app->btn_ac = create_key_button(keypad, "acBtn",   "AC",   row_top, True, offset + 1, 1, col_step, cb_clear, NULL);
+    app->btn_percent = create_key_button(keypad, "percentBtn", "%", row_top, True, offset + 2, 1, col_step, cb_percent, NULL);
+    app->btn_div = create_key_button(keypad, "divBtn", "/", row_top, True, offset + 3, 1, col_step, cb_operator, (XtPointer)(uintptr_t)'/');
+    if (app->btn_back && app->btn_ac) {
+        Dimension ac_h = 0;
+        XtVaGetValues(app->btn_ac, XmNheight, &ac_h, NULL);
+        if (ac_h > 0) {
+            XtVaSetValues(app->btn_back, XmNheight, ac_h, NULL);
+        }
+    }
+
+    /* Row 2 */
+    row_anchor = create_key_button(keypad, "sevenBtn", "7", row_anchor, False, offset + 0, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'7');
+    app->btn_digits[7] = row_anchor;
+    row_top = row_anchor;
+    if (offset > 0) {
+        for (int i = 0; i < offset; ++i) {
+            char name[32];
+            snprintf(name, sizeof(name), "sciR2C%d", i);
+            create_key_button(keypad, name, "?", row_top, True, i, 1, col_step, NULL, NULL);
+        }
+    }
+    app->btn_digits[8] = create_key_button(keypad, "eightBtn", "8", row_top, True, offset + 1, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'8');
+    app->btn_digits[9] = create_key_button(keypad, "nineBtn",  "9", row_top, True, offset + 2, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'9');
+    app->btn_mul = create_key_button(keypad, "mulBtn",   "*", row_top, True, offset + 3, 1, col_step, cb_operator, (XtPointer)(uintptr_t)'*');
+
+    /* Row 3 */
+    row_anchor = create_key_button(keypad, "fourBtn", "4", row_anchor, False, offset + 0, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'4');
+    app->btn_digits[4] = row_anchor;
+    row_top = row_anchor;
+    if (offset > 0) {
+        for (int i = 0; i < offset; ++i) {
+            char name[32];
+            snprintf(name, sizeof(name), "sciR3C%d", i);
+            create_key_button(keypad, name, "?", row_top, True, i, 1, col_step, NULL, NULL);
+        }
+    }
+    app->btn_digits[5] = create_key_button(keypad, "fiveBtn", "5", row_top, True, offset + 1, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'5');
+    app->btn_digits[6] = create_key_button(keypad, "sixBtn",  "6", row_top, True, offset + 2, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'6');
+    app->btn_minus = create_key_button(keypad, "minusBtn","-", row_top, True, offset + 3, 1, col_step, cb_operator, (XtPointer)(uintptr_t)'-');
+
+    /* Row 4 */
+    row_anchor = create_key_button(keypad, "oneBtn", "1", row_anchor, False, offset + 0, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'1');
+    app->btn_digits[1] = row_anchor;
+    row_top = row_anchor;
+    if (offset > 0) {
+        for (int i = 0; i < offset; ++i) {
+            char name[32];
+            snprintf(name, sizeof(name), "sciR4C%d", i);
+            create_key_button(keypad, name, "?", row_top, True, i, 1, col_step, NULL, NULL);
+        }
+    }
+    app->btn_digits[2] = create_key_button(keypad, "twoBtn", "2", row_top, True, offset + 1, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'2');
+    app->btn_digits[3] = create_key_button(keypad, "threeBtn", "3", row_top, True, offset + 2, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'3');
+    app->btn_plus = create_key_button(keypad, "plusBtn", "+", row_top, True, offset + 3, 1, col_step, cb_operator, (XtPointer)(uintptr_t)'+');
+
+    /* Row 5 */
+    char decimal_label[2] = {app->decimal_char, '\0'};
+    row_anchor = create_key_button(keypad, "signBtn", "+/-", row_anchor, False, offset + 0, 1, col_step, cb_toggle_sign, NULL);
+    app->btn_sign = row_anchor;
+    row_top = row_anchor;
+    if (offset > 0) {
+        for (int i = 0; i < offset; ++i) {
+            char name[32];
+            snprintf(name, sizeof(name), "sciR5C%d", i);
+            create_key_button(keypad, name, "?", row_top, True, i, 1, col_step, NULL, NULL);
+        }
+    }
+    app->btn_digits[0] = create_key_button(keypad, "zeroBtn", "0", row_top, True, offset + 1, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'0');
+    app->btn_decimal = create_key_button(keypad, "decimalBtn", decimal_label, row_top, True, offset + 2, 1, col_step, cb_decimal, NULL);
+    Widget eq_btn = create_key_button(keypad, "eqBtn", "=", row_top, True, offset + 3, 1, col_step, cb_equals, NULL);
+    app->btn_eq = eq_btn;
+    XtVaSetValues(eq_btn, XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 6, NULL);
+
+    ensure_keyboard_focus(app);
+}
+
 static void copy_flash_reset(XtPointer client_data, XtIntervalId *id)
 {
     (void)id;
@@ -672,6 +850,22 @@ static void paste_flash_reset(XtPointer client_data, XtIntervalId *id)
         set_display(app, app->paste_flash_backup);
         app->paste_flash_backup[0] = '\0';
     }
+}
+
+static void clear_button_refs(AppState *app)
+{
+    if (!app) return;
+    memset(app->btn_digits, 0, sizeof(app->btn_digits));
+    app->btn_decimal = NULL;
+    app->btn_eq = NULL;
+    app->btn_plus = NULL;
+    app->btn_minus = NULL;
+    app->btn_mul = NULL;
+    app->btn_div = NULL;
+    app->btn_percent = NULL;
+    app->btn_sign = NULL;
+    app->btn_back = NULL;
+    app->btn_ac = NULL;
 }
 
 static void display_button_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont)
@@ -709,6 +903,18 @@ static void cb_display_paste(Widget w, XtPointer client_data, XtPointer call_dat
     AppState *app = (AppState *)client_data;
     clipboard_paste(app);
     ensure_keyboard_focus(app);
+}
+
+static void cb_mode_toggle(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)call_data;
+    AppState *app = g_app;
+    if (!app) return;
+    Boolean set = False;
+    XtVaGetValues(w, XmNset, &set, NULL);
+    if (!set) return;
+    int mode = (int)(intptr_t)client_data;
+    set_mode(app, mode, True);
 }
 
 /* -------------------------------------------------------------------------
@@ -879,6 +1085,7 @@ static void capture_and_save_session(AppState *app)
     session_capture_geometry(app->shell, app->session_data, "x", "y", "w", "h");
     session_data_set(app->session_data, "display", app->display);
     session_data_set_int(app->session_data, "show_thousands", app->show_thousands ? 1 : 0);
+    session_data_set_int(app->session_data, "mode", app->mode);
     session_save(app->shell, app->session_data, app->exec_path);
     save_view_state(app);
 }
@@ -1195,15 +1402,15 @@ static void focus_handler(Widget w, XtPointer client_data, XEvent *event, Boolea
 
 static Widget create_key_button(Widget parent, const char *name, const char *label,
                                 Widget top_widget, Boolean align_top,
-                                int col, int col_span,
+                                int col, int col_span, int col_step,
                                 XtCallbackProc cb, XtPointer data)
 {
     Arg args[12];
     int n = 0;
     XtSetArg(args[n], XmNleftAttachment,  XmATTACH_POSITION); n++;
-    XtSetArg(args[n], XmNleftPosition,    col * 25); n++;
+    XtSetArg(args[n], XmNleftPosition,    col * col_step); n++;
     XtSetArg(args[n], XmNrightAttachment, XmATTACH_POSITION); n++;
-    XtSetArg(args[n], XmNrightPosition,   (col + col_span) * 25); n++;
+    XtSetArg(args[n], XmNrightPosition,   (col + col_span) * col_step); n++;
     XtSetArg(args[n], XmNleftOffset,      4); n++;
     XtSetArg(args[n], XmNrightOffset,     4); n++;
     if (top_widget) {
@@ -1281,6 +1488,7 @@ static void build_ui(AppState *app)
                   XmNbottomAttachment, XmATTACH_FORM,
                   NULL);
     XtManageChild(content_form);
+    app->content_form = content_form;
 
     /* Window menu */
     Widget window_pane = XmCreatePulldownMenu(menubar, "windowMenu", NULL, 0);
@@ -1334,6 +1542,35 @@ static void build_ui(AppState *app)
         NULL
     );
     XtAddCallback(thousand_toggle, XmNvalueChangedCallback, cb_toggle_thousands, NULL);
+
+    XtVaCreateManagedWidget(
+        "viewSeparator",
+        xmSeparatorGadgetClass, view_pane,
+        NULL
+    );
+
+    Widget mode_basic = XtVaCreateManagedWidget(
+        "modeBasic",
+        xmToggleButtonWidgetClass, view_pane,
+        XmNlabelString, XmStringCreateLocalized("Basic"),
+        XmNindicatorType, XmONE_OF_MANY,
+        XmNvisibleWhenOff, True,
+        XmNset, (app->mode == 0) ? True : False,
+        NULL
+    );
+    Widget mode_sci = XtVaCreateManagedWidget(
+        "modeScientific",
+        xmToggleButtonWidgetClass, view_pane,
+        XmNlabelString, XmStringCreateLocalized("Scientific"),
+        XmNindicatorType, XmONE_OF_MANY,
+        XmNvisibleWhenOff, True,
+        XmNset, (app->mode == 1) ? True : False,
+        NULL
+    );
+    app->view_mode_basic_btn = mode_basic;
+    app->view_mode_sci_btn   = mode_sci;
+    XtAddCallback(mode_basic, XmNvalueChangedCallback, cb_mode_toggle, (XtPointer)(intptr_t)0);
+    XtAddCallback(mode_sci,   XmNvalueChangedCallback, cb_mode_toggle, (XtPointer)(intptr_t)1);
 
     /* Help menu */
     Widget help_pane = XmCreatePulldownMenu(menubar, "helpMenu", NULL, 0);
@@ -1398,6 +1635,7 @@ static void build_ui(AppState *app)
     Arg pad_args[4];
     int pn = 0;
     XtSetArg(pad_args[pn], XmNfractionBase, 100); pn++;
+    int col_step = 25;
     Widget keypad = XmCreateForm(content_form, "keypadForm", pad_args, pn);
     XtVaSetValues(keypad,
                   XmNtopAttachment,    XmATTACH_WIDGET,
@@ -1408,16 +1646,17 @@ static void build_ui(AppState *app)
                   XmNbottomAttachment, XmATTACH_FORM,
                   NULL);
     XtManageChild(keypad);
+    app->keypad = keypad;
 
     Widget row_anchor = NULL;
     Widget row_top = NULL;
     /* Row 1 */
-    row_anchor = create_key_button(keypad, "backBtn", "◀", NULL, False, 0, 1, cb_backspace, NULL);
+    row_anchor = create_key_button(keypad, "backBtn", "◀", NULL, False, 0, 1, col_step, cb_backspace, NULL);
     app->btn_back = row_anchor;
     row_top = row_anchor;
-    app->btn_ac = create_key_button(keypad, "acBtn",   "AC",   row_top, True, 1, 1, cb_clear, NULL);
-    app->btn_percent = create_key_button(keypad, "percentBtn", "%", row_top, True, 2, 1, cb_percent, NULL);
-    app->btn_div = create_key_button(keypad, "divBtn", "/", row_top, True, 3, 1, cb_operator, (XtPointer)(uintptr_t)'/');
+    app->btn_ac = create_key_button(keypad, "acBtn",   "AC",   row_top, True, 1, 1, col_step, cb_clear, NULL);
+    app->btn_percent = create_key_button(keypad, "percentBtn", "%", row_top, True, 2, 1, col_step, cb_percent, NULL);
+    app->btn_div = create_key_button(keypad, "divBtn", "/", row_top, True, 3, 1, col_step, cb_operator, (XtPointer)(uintptr_t)'/');
     /* Match Back height to AC height */
     if (app->btn_back && app->btn_ac) {
         Dimension ac_h = 0;
@@ -1428,39 +1667,42 @@ static void build_ui(AppState *app)
     }
 
     /* Row 2 */
-    row_anchor = create_key_button(keypad, "sevenBtn", "7", row_anchor, False, 0, 1, cb_digit, (XtPointer)(uintptr_t)'7');
+    row_anchor = create_key_button(keypad, "sevenBtn", "7", row_anchor, False, 0, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'7');
     app->btn_digits[7] = row_anchor;
     row_top = row_anchor;
-    app->btn_digits[8] = create_key_button(keypad, "eightBtn", "8", row_top, True, 1, 1, cb_digit, (XtPointer)(uintptr_t)'8');
-    app->btn_digits[9] = create_key_button(keypad, "nineBtn",  "9", row_top, True, 2, 1, cb_digit, (XtPointer)(uintptr_t)'9');
-    app->btn_mul = create_key_button(keypad, "mulBtn",   "*", row_top, True, 3, 1, cb_operator, (XtPointer)(uintptr_t)'*');
+    app->btn_digits[8] = create_key_button(keypad, "eightBtn", "8", row_top, True, 1, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'8');
+    app->btn_digits[9] = create_key_button(keypad, "nineBtn",  "9", row_top, True, 2, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'9');
+    app->btn_mul = create_key_button(keypad, "mulBtn",   "*", row_top, True, 3, 1, col_step, cb_operator, (XtPointer)(uintptr_t)'*');
 
     /* Row 3 */
-    row_anchor = create_key_button(keypad, "fourBtn", "4", row_anchor, False, 0, 1, cb_digit, (XtPointer)(uintptr_t)'4');
+    row_anchor = create_key_button(keypad, "fourBtn", "4", row_anchor, False, 0, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'4');
     app->btn_digits[4] = row_anchor;
     row_top = row_anchor;
-    app->btn_digits[5] = create_key_button(keypad, "fiveBtn", "5", row_top, True, 1, 1, cb_digit, (XtPointer)(uintptr_t)'5');
-    app->btn_digits[6] = create_key_button(keypad, "sixBtn",  "6", row_top, True, 2, 1, cb_digit, (XtPointer)(uintptr_t)'6');
-    app->btn_minus = create_key_button(keypad, "minusBtn","-", row_top, True, 3, 1, cb_operator, (XtPointer)(uintptr_t)'-');
+    app->btn_digits[5] = create_key_button(keypad, "fiveBtn", "5", row_top, True, 1, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'5');
+    app->btn_digits[6] = create_key_button(keypad, "sixBtn",  "6", row_top, True, 2, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'6');
+    app->btn_minus = create_key_button(keypad, "minusBtn","-", row_top, True, 3, 1, col_step, cb_operator, (XtPointer)(uintptr_t)'-');
 
     /* Row 4 */
-    row_anchor = create_key_button(keypad, "oneBtn", "1", row_anchor, False, 0, 1, cb_digit, (XtPointer)(uintptr_t)'1');
+    row_anchor = create_key_button(keypad, "oneBtn", "1", row_anchor, False, 0, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'1');
     app->btn_digits[1] = row_anchor;
     row_top = row_anchor;
-    app->btn_digits[2] = create_key_button(keypad, "twoBtn", "2", row_top, True, 1, 1, cb_digit, (XtPointer)(uintptr_t)'2');
-    app->btn_digits[3] = create_key_button(keypad, "threeBtn", "3", row_top, True, 2, 1, cb_digit, (XtPointer)(uintptr_t)'3');
-    app->btn_plus = create_key_button(keypad, "plusBtn", "+", row_top, True, 3, 1, cb_operator, (XtPointer)(uintptr_t)'+');
+    app->btn_digits[2] = create_key_button(keypad, "twoBtn", "2", row_top, True, 1, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'2');
+    app->btn_digits[3] = create_key_button(keypad, "threeBtn", "3", row_top, True, 2, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'3');
+    app->btn_plus = create_key_button(keypad, "plusBtn", "+", row_top, True, 3, 1, col_step, cb_operator, (XtPointer)(uintptr_t)'+');
 
     /* Row 5 */
     char decimal_label[2] = {app->decimal_char, '\0'};
-    row_anchor = create_key_button(keypad, "signBtn", "+/-", row_anchor, False, 0, 1, cb_toggle_sign, NULL);
+    row_anchor = create_key_button(keypad, "signBtn", "+/-", row_anchor, False, 0, 1, col_step, cb_toggle_sign, NULL);
     app->btn_sign = row_anchor;
     row_top = row_anchor;
-    app->btn_digits[0] = create_key_button(keypad, "zeroBtn", "0", row_top, True, 1, 1, cb_digit, (XtPointer)(uintptr_t)'0');
-    app->btn_decimal = create_key_button(keypad, "decimalBtn", decimal_label, row_top, True, 2, 1, cb_decimal, NULL);
-    Widget eq_btn = create_key_button(keypad, "eqBtn", "=", row_top, True, 3, 1, cb_equals, NULL);
+    app->btn_digits[0] = create_key_button(keypad, "zeroBtn", "0", row_top, True, 1, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'0');
+    app->btn_decimal = create_key_button(keypad, "decimalBtn", decimal_label, row_top, True, 2, 1, col_step, cb_decimal, NULL);
+    Widget eq_btn = create_key_button(keypad, "eqBtn", "=", row_top, True, 3, 1, col_step, cb_equals, NULL);
     app->btn_eq = eq_btn;
     XtVaSetValues(eq_btn, XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 6, NULL);
+
+    /* placeholder to allow future dynamic rebuilds */
+    rebuild_keypad(app);
 }
 
 /* -------------------------------------------------------------------------
@@ -1477,6 +1719,7 @@ int main(int argc, char *argv[])
 
     init_locale_settings(&app);
     app.show_thousands = true;
+    app.mode = 0; /* basic by default */
     load_view_state(&app);
 
     char *session_id = session_parse_argument(&argc, argv);
@@ -1509,10 +1752,14 @@ int main(int argc, char *argv[])
             if (session_data_has(app.session_data, "show_thousands")) {
                 app.show_thousands = session_data_get_int(app.session_data, "show_thousands", app.show_thousands ? 1 : 0) != 0;
             }
+            if (session_data_has(app.session_data, "mode")) {
+                app.mode = session_data_get_int(app.session_data, "mode", app.mode);
+            }
         }
     }
 
     build_ui(&app);
+    set_mode(&app, app.mode, False);
 
     if (app.session_data) {
         if (!session_apply_geometry(app.shell, app.session_data, "x", "y", "w", "h")) {

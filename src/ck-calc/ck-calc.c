@@ -23,6 +23,7 @@
 #include <stdint.h>
 #include <locale.h>
 #include <X11/keysym.h>
+#include <X11/Xatom.h>
 
 #include <X11/Intrinsic.h>
 #include <X11/StringDefs.h>
@@ -36,6 +37,7 @@
 #include <Xm/ToggleB.h>
 #include <Xm/DialogS.h>
 #include <Xm/DrawingA.h>
+#include <Xm/CutPaste.h>
 #include <Xm/Protocols.h>
 #include <Xm/MwmUtil.h>
 #include <Dt/Session.h>
@@ -58,6 +60,7 @@ typedef struct {
     Widget       main_form;
     Widget       key_focus_proxy;
     Widget       display_label;
+    Widget       display_menu;
     SessionData *session_data;
 
     char         exec_path[PATH_MAX];
@@ -87,6 +90,12 @@ typedef struct {
     Widget       btn_sign;
     Widget       btn_back;
     Widget       btn_ac;
+
+    XtIntervalId copy_flash_id;
+    char         copy_flash_backup[MAX_DISPLAY_LEN];
+    XtIntervalId paste_flash_id;
+    char         paste_flash_backup[MAX_DISPLAY_LEN];
+
 } AppState;
 
 static AppState *g_app = NULL;
@@ -97,6 +106,13 @@ static void key_press_handler(Widget w, XtPointer client_data, XEvent *event, Bo
 static void ensure_keyboard_focus(AppState *app);
 static void focus_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont);
 static void reformat_display(AppState *app);
+static void clipboard_copy(AppState *app);
+static void clipboard_paste(AppState *app);
+static void display_button_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont);
+static void cb_display_copy(Widget w, XtPointer client_data, XtPointer call_data);
+static void cb_display_paste(Widget w, XtPointer client_data, XtPointer call_data);
+static void copy_flash_reset(XtPointer client_data, XtIntervalId *id);
+static void paste_flash_reset(XtPointer client_data, XtIntervalId *id);
 
 /* -------------------------------------------------------------------------
  * Helpers
@@ -630,6 +646,201 @@ static void reformat_display(AppState *app)
     app->entering_new = false;
 }
 
+static void copy_flash_reset(XtPointer client_data, XtIntervalId *id)
+{
+    (void)id;
+    AppState *app = (AppState *)client_data;
+    if (!app) return;
+    if (app->copy_flash_id) {
+        app->copy_flash_id = 0;
+    }
+    if (app->copy_flash_backup[0]) {
+        set_display(app, app->copy_flash_backup);
+        app->copy_flash_backup[0] = '\0';
+    }
+}
+
+static void paste_flash_reset(XtPointer client_data, XtIntervalId *id)
+{
+    (void)id;
+    AppState *app = (AppState *)client_data;
+    if (!app) return;
+    if (app->paste_flash_id) {
+        app->paste_flash_id = 0;
+    }
+    if (app->paste_flash_backup[0]) {
+        set_display(app, app->paste_flash_backup);
+        app->paste_flash_backup[0] = '\0';
+    }
+}
+
+static void display_button_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont)
+{
+    (void)w;
+    (void)cont;
+    AppState *app = (AppState *)client_data;
+    if (!app || !event) return;
+
+    if (event->type == ButtonPress) {
+        XButtonEvent *bev = &event->xbutton;
+        if (bev->button == Button3) {
+            /* Show context menu on right click */
+            if (app->display_menu) {
+                XmMenuPosition(app->display_menu, bev);
+                XtManageChild(app->display_menu);
+            }
+        }
+    }
+}
+
+static void cb_display_copy(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)call_data;
+    AppState *app = (AppState *)client_data;
+    clipboard_copy(app);
+    ensure_keyboard_focus(app);
+}
+
+static void cb_display_paste(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)call_data;
+    AppState *app = (AppState *)client_data;
+    clipboard_paste(app);
+    ensure_keyboard_focus(app);
+}
+
+/* -------------------------------------------------------------------------
+ * Clipboard helpers (copy/paste current value)
+ * ------------------------------------------------------------------------- */
+
+static void clipboard_copy(AppState *app)
+{
+    if (!app || !app->shell) return;
+    if (app->copy_flash_id) {
+        XtRemoveTimeOut(app->copy_flash_id);
+        app->copy_flash_id = 0;
+    }
+    double val = current_input(app);
+    strncpy(app->copy_flash_backup, app->display, sizeof(app->copy_flash_backup) - 1);
+    app->copy_flash_backup[sizeof(app->copy_flash_backup) - 1] = '\0';
+
+    set_display(app, "COPIED");
+    app->copy_flash_id = XtAppAddTimeOut(app->app_context, 500, copy_flash_reset, (XtPointer)app);
+
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%.12g", val);
+
+    Display *dpy = XtDisplay(app->shell);
+    if (!dpy || !XtIsRealized(app->shell)) return;
+    Window win = XtWindow(app->shell);
+    long item_id = 0;
+    XmString label = XmStringCreateLocalized("ck-calc");
+    int status = XmClipboardStartCopy(dpy, win, label, CurrentTime, NULL, NULL, &item_id);
+    if (label) XmStringFree(label);
+    if (status != ClipboardSuccess) return;
+    status = XmClipboardCopy(dpy, win, item_id, "STRING", buf, (int)strlen(buf), 0, NULL);
+    XmClipboardEndCopy(dpy, win, item_id);
+    (void)status;
+}
+
+static void clipboard_paste(AppState *app)
+{
+    if (!app || !app->shell) return;
+
+    if (app->paste_flash_id) {
+        XtRemoveTimeOut(app->paste_flash_id);
+        app->paste_flash_id = 0;
+    }
+
+    Display *dpy = XtDisplay(app->shell);
+    if (!dpy || !XtIsRealized(app->shell)) return;
+    Window win = XtWindow(app->shell);
+    Time ts = XtLastTimestampProcessed(dpy);
+
+    fprintf(stderr, "[ck-calc] paste: starting\n");
+
+    char data[512];
+    unsigned long out_len = 0;
+    long private_id = 0;
+    int status = XmClipboardStartRetrieve(dpy, win, ts);
+    if (status == ClipboardSuccess || status == ClipboardTruncate) {
+        fprintf(stderr, "[ck-calc] paste: start retrieve ok (%d)\n", status);
+        status = XmClipboardRetrieve(dpy, win, "STRING", data, sizeof(data)-1, (unsigned long *)&out_len, &private_id);
+        if (status != ClipboardSuccess && status != ClipboardTruncate) {
+            fprintf(stderr, "[ck-calc] paste: STRING failed, trying COMPOUND_TEXT (%d)\n", status);
+            status = XmClipboardRetrieve(dpy, win, "COMPOUND_TEXT", data, sizeof(data)-1, (unsigned long *)&out_len, &private_id);
+        }
+        if (status != ClipboardSuccess && status != ClipboardTruncate) {
+            fprintf(stderr, "[ck-calc] paste: COMPOUND_TEXT failed, trying UTF8_STRING (%d)\n", status);
+            status = XmClipboardRetrieve(dpy, win, "UTF8_STRING", data, sizeof(data)-1, (unsigned long *)&out_len, &private_id);
+        }
+        XmClipboardEndRetrieve(dpy, win);
+    }
+
+    if (status != ClipboardSuccess && status != ClipboardTruncate) {
+        /* Fallback to cut buffer 0 */
+        int bytes = 0;
+        char *buf = XFetchBuffer(dpy, &bytes, 0);
+        if (!buf || bytes <= 0) {
+            if (buf) XFree(buf);
+            return;
+        }
+        size_t copy_len = (bytes < (int)sizeof(data)-1) ? (size_t)bytes : sizeof(data)-1;
+        memcpy(data, buf, copy_len);
+        data[copy_len] = '\0';
+        XFree(buf);
+        fprintf(stderr, "[ck-calc] paste: fallback cut buffer len=%zu data='%s'\n", copy_len, data);
+    } else {
+        data[(out_len < sizeof(data)-1) ? out_len : (sizeof(data)-1)] = '\0';
+        fprintf(stderr, "[ck-calc] paste: retrieved len=%lu data='%s'\n", out_len, data);
+    }
+
+    char cleaned[128];
+    size_t pos = 0;
+    char decimal_seen = 0;
+    for (size_t i = 0; data[i] && pos + 1 < sizeof(cleaned); ++i) {
+        char c = data[i];
+        if (c == '\0' || c == '\n' || c == '\r' || c == '\t' || c == ' ') continue;
+        if (c == app->thousands_char) continue;
+        if (c == ',' || c == '.') {
+            if (decimal_seen) continue;
+            cleaned[pos++] = '.';
+            decimal_seen = 1;
+            continue;
+        }
+        if (c == '+' || c == '-' || (c >= '0' && c <= '9') || c == 'e' || c == 'E') {
+            cleaned[pos++] = c;
+        }
+    }
+    cleaned[pos] = '\0';
+
+    fprintf(stderr, "[ck-calc] paste: cleaned='%s'\n", cleaned);
+
+    if (pos == 0) {
+        fprintf(stderr, "[ck-calc] paste: nothing to parse\n");
+        return;
+    }
+
+    char *endptr = NULL;
+    double val = strtod(cleaned, &endptr);
+    if (!endptr || endptr == cleaned) {
+        fprintf(stderr, "[ck-calc] paste: strtod failed\n");
+        return;
+    }
+    /* allow trailing garbage: ignore after parsed number */
+
+    fprintf(stderr, "[ck-calc] paste: parsed=%f\n", val);
+    set_display_from_double(app, val);
+    strncpy(app->paste_flash_backup, app->display, sizeof(app->paste_flash_backup) - 1);
+    app->paste_flash_backup[sizeof(app->paste_flash_backup) - 1] = '\0';
+    app->paste_flash_id = XtAppAddTimeOut(app->app_context, 500, paste_flash_reset, (XtPointer)app);
+    set_display(app, "PASTED");
+    app->entering_new = false;
+    ensure_keyboard_focus(app);
+}
+
 static void cb_toggle_thousands(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
@@ -833,6 +1044,18 @@ static void key_press_handler(Widget w, XtPointer client_data, XEvent *event, Bo
     KeyCode kc_kp_enter = (dpy && app->shell) ? XKeysymToKeycode(dpy, XK_KP_Enter) : 0;
     KeyCode kc_return   = (dpy && app->shell) ? XKeysymToKeycode(dpy, XK_Return)   : 0;
 
+    fprintf(stderr, "[ck-calc] key: code=%u sym=%lu state=0x%x buf='%c'\n",
+            (unsigned int)kc,
+            (unsigned long)sym,
+            (unsigned int)event->xkey.state,
+            (keybuf[0] >= 32 && keybuf[0] < 127) ? keybuf[0] : ' ');
+
+    /* Explicit keypad enter handling (some layouts map to keycode 108) */
+    if (sym == XK_KP_Enter || (kc_kp_enter && kc == kc_kp_enter) || kc == 108) {
+        activate_button(app->btn_eq, event);
+        return;
+    }
+
     /* Numpad without NumLock (KP_End, KP_Down, ...) to digits */
     int kp_digit = -1;
     switch (sym) {
@@ -869,7 +1092,7 @@ static void key_press_handler(Widget w, XtPointer client_data, XEvent *event, Bo
     }
 
     /* Enter/Return via keycode fallback (some layouts may not map keysym) */
-    if ((kc_kp_enter && kc == kc_kp_enter) || (kc_return && kc == kc_return)) {
+    if ((kc_return && kc == kc_return)) {
         activate_button(app->btn_eq, event);
         return;
     }
@@ -1140,7 +1363,6 @@ static void build_ui(AppState *app)
         XmNalignment,      XmALIGNMENT_END,
         XmNrecomputeSize,  False,
         XmNtopAttachment,  XmATTACH_FORM,
-        XmNtopOffset,      0,
         XmNleftAttachment, XmATTACH_FORM,
         XmNrightAttachment,XmATTACH_FORM,
         XmNheight,         36,
@@ -1150,6 +1372,27 @@ static void build_ui(AppState *app)
     );
     app->display_label = display_label;
     update_display(app);
+
+    XtSetSensitive(display_label, True);
+    XtAddEventHandler(display_label, ButtonPressMask, True, display_button_handler, (XtPointer)app);
+
+    /* Context menu for display (Copy/Paste) */
+    Widget menu = XmCreatePopupMenu(display_label, "displayPopup", NULL, 0);
+    app->display_menu = menu;
+    Widget copy_item = XtVaCreateManagedWidget(
+        "copyItem",
+        xmPushButtonWidgetClass, menu,
+        XmNlabelString, XmStringCreateLocalized("Copy"),
+        NULL
+    );
+    Widget paste_item = XtVaCreateManagedWidget(
+        "pasteItem",
+        xmPushButtonWidgetClass, menu,
+        XmNlabelString, XmStringCreateLocalized("Paste"),
+        NULL
+    );
+    XtAddCallback(copy_item, XmNactivateCallback, cb_display_copy, (XtPointer)app);
+    XtAddCallback(paste_item, XmNactivateCallback, cb_display_paste, (XtPointer)app);
 
     /* Keypad */
     Arg pad_args[4];

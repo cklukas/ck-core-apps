@@ -147,9 +147,9 @@ static Widget g_about_shell = NULL;
 
 static const char *SCI_LABELS[5][6] = {
     { "(", ")", "mc",  "m+",   "m-",  "mr" },
-    { "2nd", "x^2", "x^3", "x^y",  "e^x", "10^x" },
+    { "2nd", "x^2", "x^3", "x^y",  "e^x","10^x" },
     { "1/x", "sqrt(x)", "3rd root(x)", "y root x", "ln", "log10" },
-    { "x!",  "sin", "cos", "tan",  "e",   "EE" },
+    { "x!",  "sqrt", "3rd_root", "y root x",  "e",   "EE" },
     { "Rand", "sinh", "cosh", "tanh", "pi",  "Rad" }
 };
 
@@ -186,6 +186,22 @@ static void set_shift_state(AppState *app, KeySym sym, Boolean down);
 static void ensure_scientific_font(AppState *app);
 static void apply_scientific_button_font(AppState *app, Widget button);
 static void cleanup_scientific_font(AppState *app);
+static void register_scientific_button(AppState *app,
+                                       Widget button,
+                                       Widget stash[],
+                                       size_t *count,
+                                       size_t capacity,
+                                       Dimension height,
+                                       Boolean flushed);
+static void flush_scientific_extra_buttons(AppState *app,
+                                           Widget stash[],
+                                           size_t *count,
+                                           Dimension height);
+static bool build_smaller_xlfd(const char *base,
+                                int pixel_step,
+                                int point_step,
+                                char *out,
+                                size_t out_size);
 static void formula_mode_update_display(AppState *app);
 static void formula_mode_prepare_for_edit(AppState *app);
 static void formula_mode_seed_with_last_result(AppState *app);
@@ -231,27 +247,62 @@ static void set_display_from_double(AppState *app, double value)
 static void ensure_scientific_font(AppState *app)
 {
     if (!app || app->sci_font_list) return;
+    Widget ref = app->btn_back ? app->btn_back : app->display_label;
+    if (!ref) return;
+
+    XmFontList font_list = NULL;
+    XtVaGetValues(ref, XmNfontList, &font_list, NULL);
+    if (!font_list) return;
+
     Display *dpy = app->shell ? XtDisplay(app->shell) : NULL;
     if (!dpy) return;
 
-    const char *patterns[] = {
-        "-*-helvetica-medium-r-normal--12-*-*-*-*-*-*-*-*",
-        "-*-helvetica-medium-r-normal--10-*-*-*-*-*-*-*-*",
-        "fixed"
-    };
-    XFontStruct *font_struct = NULL;
-    for (size_t i = 0; i < sizeof(patterns)/sizeof(patterns[0]); ++i) {
-        font_struct = XLoadQueryFont(dpy, patterns[i]);
-        if (font_struct) break;
-    }
-    if (!font_struct) return;
+    XmFontContext ctx = NULL;
+    if (!XmFontListInitFontContext(&ctx, font_list)) return;
 
-    app->sci_font_list = XmFontListCreate(font_struct, XmSTRING_DEFAULT_CHARSET);
-    if (!app->sci_font_list) {
-        XFreeFont(dpy, font_struct);
+    XmStringCharSet charset = NULL;
+    XFontStruct *font = NULL;
+    char base_font[512] = {0};
+    if (XmFontListGetNextFont(ctx, &charset, &font) && font) {
+        unsigned long value = 0;
+        if (XGetFontProperty(font, XA_FONT, &value)) {
+            char *name = XGetAtomName(dpy, (Atom)value);
+            if (name) {
+                strncpy(base_font, name, sizeof(base_font) - 1);
+                XFree(name);
+            }
+        }
+    }
+    XmFontListFreeFontContext(ctx);
+
+    if (!base_font[0]) return;
+
+    const struct {
+        int pixel_step;
+        int point_step;
+    } adjustments[] = {
+        { 2, 20 },
+        { 1, 10 },
+        { 1, 1 }
+    };
+
+    char smaller[512];
+    for (size_t i = 0; i < sizeof(adjustments)/sizeof(adjustments[0]); ++i) {
+        if (!build_smaller_xlfd(base_font, adjustments[i].pixel_step, adjustments[i].point_step,
+                                smaller, sizeof(smaller))) {
+            continue;
+        }
+        XFontStruct *font_struct = XLoadQueryFont(dpy, smaller);
+        if (!font_struct) continue;
+        XmFontList new_list = XmFontListCreate(font_struct, XmSTRING_DEFAULT_CHARSET);
+        if (!new_list) {
+            XFreeFont(dpy, font_struct);
+            continue;
+        }
+        app->sci_font_list = new_list;
+        app->sci_font_struct = font_struct;
         return;
     }
-    app->sci_font_struct = font_struct;
 }
 
 static void apply_scientific_button_font(AppState *app, Widget button)
@@ -275,6 +326,130 @@ static void cleanup_scientific_font(AppState *app)
         app->sci_font_struct = NULL;
     }
 }
+
+static void register_scientific_button(AppState *app,
+                                       Widget button,
+                                       Widget stash[],
+                                       size_t *count,
+                                       size_t capacity,
+                                       Dimension height,
+                                       Boolean flushed)
+{
+    if (!button || !stash || !count || capacity == 0) return;
+    if (flushed) {
+        if (height > 0) {
+            XtVaSetValues(button, XmNheight, height, NULL);
+        }
+        if (app && app->sci_font_list) {
+            apply_scientific_button_font(app, button);
+        }
+        return;
+    }
+    if (*count < capacity) {
+        stash[(*count)++] = button;
+    }
+}
+
+static void flush_scientific_extra_buttons(AppState *app,
+                                           Widget stash[],
+                                           size_t *count,
+                                           Dimension height)
+{
+    if (!app || !stash || !count || *count == 0) return;
+    for (size_t i = 0; i < *count; ++i) {
+        Widget button = stash[i];
+        if (!button) continue;
+        if (height > 0) {
+            XtVaSetValues(button, XmNheight, height, NULL);
+        }
+        if (app->sci_font_list) {
+            apply_scientific_button_font(app, button);
+        }
+    }
+    *count = 0;
+}
+
+static char *duplicate_segment(const char *start, size_t len)
+{
+    char *res = malloc(len + 1);
+    if (!res) return NULL;
+    memcpy(res, start, len);
+    res[len] = '\0';
+    return res;
+}
+
+static bool build_smaller_xlfd(const char *base,
+                                int pixel_step,
+                                int point_step,
+                                char *out,
+                                size_t out_size)
+{
+    if (!base || !out || out_size == 0) return false;
+    const size_t MAX_TOKENS = 64;
+    char *tokens[MAX_TOKENS];
+    size_t count = 0;
+    const char *cur = base;
+    bool success = true;
+    while (*cur && count < MAX_TOKENS) {
+        if (*cur == '-') {
+            char *seg = strdup("");
+            if (!seg) { success = false; break; }
+            tokens[count++] = seg;
+            cur++;
+            continue;
+        }
+        const char *start = cur;
+        while (*cur && *cur != '-') cur++;
+        size_t len = cur - start;
+        char *seg = duplicate_segment(start, len);
+        if (!seg) { success = false; break; }
+        tokens[count++] = seg;
+        if (*cur == '-') cur++;
+    }
+    if (!success) {
+        for (size_t i = 0; i < count; ++i) free(tokens[i]);
+        return false;
+    }
+    if (count <= 8) {
+        for (size_t i = 0; i < count; ++i) free(tokens[i]);
+        return false;
+    }
+    int pixel = atoi(tokens[7]);
+    int point = atoi(tokens[8]);
+    int new_pixel = pixel - pixel_step;
+    int new_point = point - point_step;
+    if (new_pixel < 1) new_pixel = 1;
+    if (new_point < 1) new_point = 1;
+    char buffer[32];
+    snprintf(buffer, sizeof(buffer), "%d", new_pixel);
+    free(tokens[7]);
+    tokens[7] = strdup(buffer);
+    snprintf(buffer, sizeof(buffer), "%d", new_point);
+    free(tokens[8]);
+    tokens[8] = strdup(buffer);
+    size_t pos = 0;
+    char *ptr = out;
+    for (size_t i = 0; i < count; ++i) {
+        if (pos + 1 >= out_size) {
+            for (size_t j = 0; j < count; ++j) free(tokens[j]);
+            return false;
+        }
+        ptr[pos++] = '-';
+        size_t len = strlen(tokens[i]);
+        if (pos + len >= out_size) {
+            for (size_t j = 0; j < count; ++j) free(tokens[j]);
+            return false;
+        }
+        memcpy(ptr + pos, tokens[i], len);
+        pos += len;
+    }
+    ptr[pos] = '\0';
+    for (size_t i = 0; i < count; ++i) {
+        free(tokens[i]);
+    }
+    return true;
+}
+
 
 static void reset_state(AppState *app)
 {
@@ -986,8 +1161,6 @@ static void rebuild_keypad(AppState *app)
 {
     if (!app || !app->content_form || !app->display_label) return;
 
-    ensure_scientific_font(app);
-
     if (app->keypad && XtIsWidget(app->keypad)) {
         XtDestroyWidget(app->keypad);
         app->keypad = NULL;
@@ -1014,6 +1187,11 @@ static void rebuild_keypad(AppState *app)
     Widget row_anchor = NULL;
     Widget row_top = NULL;
     int offset = (app->mode == 1) ? 6 : 0;
+    Widget sci_extra_buttons[64] = { 0 };
+    const size_t sci_extra_capacity = sizeof(sci_extra_buttons) / sizeof(sci_extra_buttons[0]);
+    size_t sci_extra_count = 0;
+    Dimension sci_extra_height = 0;
+    Boolean sci_extra_flushed = False;
 
     /* extra scientific columns (6) */
     if (offset > 0) {
@@ -1021,7 +1199,7 @@ static void rebuild_keypad(AppState *app)
             char name[32];
             snprintf(name, sizeof(name), "sciR1C%d", i);
             Widget sci_button = create_key_button(keypad, name, get_sci_label(0, i), row_anchor, False, i, 1, col_step, NULL, NULL);
-            apply_scientific_button_font(app, sci_button);
+            register_scientific_button(app, sci_button, sci_extra_buttons, &sci_extra_count, sci_extra_capacity, sci_extra_height, sci_extra_flushed);
             assign_sci_button_ref(app, name, sci_button);
         }
     }
@@ -1035,7 +1213,7 @@ static void rebuild_keypad(AppState *app)
             char name[32];
             snprintf(name, sizeof(name), "sciR1bC%d", i);
             Widget sci_button = create_key_button(keypad, name, get_sci_label(0, i), row_top, True, i, 1, col_step, NULL, NULL);
-            apply_scientific_button_font(app, sci_button);
+            register_scientific_button(app, sci_button, sci_extra_buttons, &sci_extra_count, sci_extra_capacity, sci_extra_height, sci_extra_flushed);
             assign_sci_button_ref(app, name, sci_button);
         }
     }
@@ -1049,6 +1227,16 @@ static void rebuild_keypad(AppState *app)
             XtVaSetValues(app->btn_back, XmNheight, ac_h, NULL);
         }
     }
+    if (sci_extra_height == 0 && app->btn_back) {
+        Dimension back_h = 0;
+        XtVaGetValues(app->btn_back, XmNheight, &back_h, NULL);
+        if (back_h > 0) {
+            sci_extra_height = back_h;
+            ensure_scientific_font(app);
+            flush_scientific_extra_buttons(app, sci_extra_buttons, &sci_extra_count, sci_extra_height);
+            sci_extra_flushed = True;
+        }
+    }
 
     /* Row 2 */
     row_anchor = create_key_button(keypad, "sevenBtn", "7", row_anchor, False, offset + 0, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'7');
@@ -1059,7 +1247,7 @@ static void rebuild_keypad(AppState *app)
             char name[32];
             snprintf(name, sizeof(name), "sciR2C%d", i);
             Widget sci_button = create_key_button(keypad, name, get_sci_label(1, i), row_top, True, i, 1, col_step, (i == 0) ? cb_second_toggle : NULL, NULL);
-            apply_scientific_button_font(app, sci_button);
+            register_scientific_button(app, sci_button, sci_extra_buttons, &sci_extra_count, sci_extra_capacity, sci_extra_height, sci_extra_flushed);
             assign_sci_button_ref(app, name, sci_button);
             if (i == 0) {
                 app->btn_second = sci_button;
@@ -1082,7 +1270,7 @@ static void rebuild_keypad(AppState *app)
             char name[32];
             snprintf(name, sizeof(name), "sciR3C%d", i);
             Widget sci_button = create_key_button(keypad, name, get_sci_label(2, i), row_top, True, i, 1, col_step, NULL, NULL);
-            apply_scientific_button_font(app, sci_button);
+            register_scientific_button(app, sci_button, sci_extra_buttons, &sci_extra_count, sci_extra_capacity, sci_extra_height, sci_extra_flushed);
             assign_sci_button_ref(app, name, sci_button);
         }
     }
@@ -1099,7 +1287,7 @@ static void rebuild_keypad(AppState *app)
             char name[32];
             snprintf(name, sizeof(name), "sciR4C%d", i);
             Widget sci_button = create_key_button(keypad, name, get_sci_label(3, i), row_top, True, i, 1, col_step, NULL, NULL);
-            apply_scientific_button_font(app, sci_button);
+            register_scientific_button(app, sci_button, sci_extra_buttons, &sci_extra_count, sci_extra_capacity, sci_extra_height, sci_extra_flushed);
             assign_sci_button_ref(app, name, sci_button);
         }
     }
@@ -1117,7 +1305,7 @@ static void rebuild_keypad(AppState *app)
             char name[32];
             snprintf(name, sizeof(name), "sciR5C%d", i);
             Widget sci_button = create_key_button(keypad, name, get_sci_label(4, i), row_top, True, i, 1, col_step, NULL, NULL);
-            apply_scientific_button_font(app, sci_button);
+            register_scientific_button(app, sci_button, sci_extra_buttons, &sci_extra_count, sci_extra_capacity, sci_extra_height, sci_extra_flushed);
             assign_sci_button_ref(app, name, sci_button);
         }
     }
@@ -1360,15 +1548,15 @@ static void assign_sci_button_ref(AppState *app, const char *name, Widget button
         app->btn_sci_exp = button;
     } else if (strcmp(name, "sciR1bC5") == 0) {
         app->btn_sci_10x = button;
-    } else if (strcmp(name, "sciR2C4") == 0) {
+    } else if (strcmp(name, "sciR3C4") == 0) {
         app->btn_sci_ln = button;
-    } else if (strcmp(name, "sciR2C5") == 0) {
+    } else if (strcmp(name, "sciR3C5") == 0) {
         app->btn_sci_log10 = button;
-    } else if (strcmp(name, "sciR3C1") == 0) {
+    } else if (strcmp(name, "sciR4C1") == 0) {
         app->btn_sci_sin = button;
-    } else if (strcmp(name, "sciR3C2") == 0) {
+    } else if (strcmp(name, "sciR4C2") == 0) {
         app->btn_sci_cos = button;
-    } else if (strcmp(name, "sciR3C3") == 0) {
+    } else if (strcmp(name, "sciR4C3") == 0) {
         app->btn_sci_tan = button;
     } else if (strcmp(name, "sciR5C1") == 0) {
         app->btn_sci_sinh = button;

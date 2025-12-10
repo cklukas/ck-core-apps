@@ -35,8 +35,8 @@ $(BIN_DIR)/ck-load: src/ck-load/ck-load.c src/ck-load/vertical_meter.c src/ck-lo
 	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-load/ck-load.c src/ck-load/vertical_meter.c src/shared/session_utils.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
 
 # ck-mixer
-$(BIN_DIR)/ck-mixer: src/ck-mixer/ck-mixer.c | $(BIN_DIR)
-	$(CC) $(CFLAGS) $(CDE_CFLAGS) $< -o $@ $(CDE_LDFLAGS) $(CDE_LIBS) -lasound
+$(BIN_DIR)/ck-mixer: src/ck-mixer/ck-mixer.c src/shared/session_utils.c src/shared/session_utils.h | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-mixer/ck-mixer.c src/shared/session_utils.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS) -lasound
 
 # ck-clock (does not depend on CDE, only Motif/X11 + cairo)
 $(BIN_DIR)/ck-clock: src/ck-clock/ck-clock.c | $(BIN_DIR)

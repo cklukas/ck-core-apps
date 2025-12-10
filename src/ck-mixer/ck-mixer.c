@@ -17,6 +17,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <limits.h>
+#include <unistd.h>
 
 #include <X11/Intrinsic.h>
 #include <X11/StringDefs.h>
@@ -29,8 +31,12 @@
 #include <Xm/PushB.h>
 #include <Xm/ComboBox.h>      /* If not available on your system, we can switch to OptionMenu later */
 #include <Xm/SeparatoG.h>
+#include <Xm/Protocols.h>
+#include <X11/Xlib.h>
+#include <Dt/Session.h>
 
 #include <alsa/asoundlib.h>
+#include "../shared/session_utils.h"
 
 /* -------------------------------------------------------------------------
  * Types
@@ -88,7 +94,6 @@ typedef struct AppState {
 
     /* Top bar widgets */
     Widget           device_combo;
-    Widget           use_default_toggle;
 
     /* Area that holds all control columns */
     Widget           controls_container;      /* e.g. a horizontal RowColumn */
@@ -101,19 +106,110 @@ typedef struct AppState {
     size_t           num_devices;
     int              current_device_index;    /* -1 if none selected */
 
-    /* Configuration (e.g. app-local default device) */
-    char             default_device_name[64]; /* ALSA name of default, empty if none */
-
     /* ALSA poll integration */
     XtInputId       *mixer_input_ids;
     int              mixer_input_count;
 
     /* Prevent callback recursion when updating UI from ALSA events */
     bool             updating_from_alsa;
+
+    /* Session handling */
+    SessionData     *session_data;
+    char             exec_path[PATH_MAX];
 } AppState;
 
 /* Simple global pointer so callbacks can see AppState without reshaping everything */
 static AppState *g_app = NULL;
+static Dimension g_mute_control_height = 0; /* cache height to keep spacer consistent */
+
+#define MIN_COLUMN_WIDTH 90
+#define MIN_WINDOW_HEIGHT 320
+
+/* Normalize column widths and center inner widgets after creation */
+static void normalize_column_layout(AppState *app, MixerDevice *dev)
+{
+    if (!app || !dev) return;
+
+    Dimension max_w = 0;
+
+    /* First pass: compute needed width per column based on text + mute + slider */
+    for (size_t i = 0; i < dev->num_controls; ++i) {
+        MixerControl *ctrl = &dev->controls[i];
+        Dimension label_w = 0, value_w = 0, mute_w = 0, scale_w = 24;
+
+        XtVaGetValues(ctrl->label_widget, XmNwidth, &label_w, NULL);
+        XtVaGetValues(ctrl->value_label_widget, XmNwidth, &value_w, NULL);
+        if (ctrl->mute_toggle_widget) {
+            XtVaGetValues(ctrl->mute_toggle_widget, XmNwidth, &mute_w, NULL);
+        }
+        XtVaGetValues(ctrl->scale_widget, XmNwidth, &scale_w, NULL);
+        if (scale_w == 0) scale_w = 24;
+
+        Dimension text_w = label_w;
+        if (value_w > text_w) text_w = value_w;
+        if (mute_w > text_w)  text_w = mute_w;
+
+        Dimension candidate = text_w + 16; /* padding around text */
+        if (candidate < scale_w + 16) candidate = scale_w + 16;
+        if (candidate < MIN_COLUMN_WIDTH) candidate = MIN_COLUMN_WIDTH;
+
+        if (candidate > max_w) max_w = candidate;
+    }
+
+    /* Second pass: enforce width and center slider/mute widgets */
+    for (size_t i = 0; i < dev->num_controls; ++i) {
+        MixerControl *ctrl = &dev->controls[i];
+        XtVaSetValues(ctrl->column_form, XmNwidth, max_w, NULL);
+
+        Dimension scale_w = 0;
+        XtVaGetValues(ctrl->scale_widget, XmNwidth, &scale_w, NULL);
+        if (scale_w == 0) scale_w = 24;
+        Dimension pad = (max_w > scale_w) ? (max_w - scale_w) / 2 : 0;
+
+        XtVaSetValues(ctrl->scale_widget,
+                      XmNleftAttachment,  XmATTACH_FORM,
+                      XmNrightAttachment, XmATTACH_FORM,
+                      XmNleftOffset,      pad,
+                      XmNrightOffset,     pad,
+                      NULL);
+
+        if (ctrl->mute_toggle_widget) {
+            Dimension mute_w = 0;
+            XtVaGetValues(ctrl->mute_toggle_widget, XmNwidth, &mute_w, NULL);
+            if (mute_w == 0) mute_w = scale_w;
+            Dimension mpad = (max_w > mute_w) ? (max_w - mute_w) / 2 : pad;
+            XtVaSetValues(ctrl->mute_toggle_widget,
+                          XmNleftAttachment,  XmATTACH_FORM,
+                          XmNrightAttachment, XmATTACH_FORM,
+                          XmNleftOffset,      mpad,
+                          XmNrightOffset,     mpad,
+                          NULL);
+        }
+    }
+
+    /* Ask container/shell to widen to fit all columns */
+    if (max_w > 0 && dev->num_controls > 0) {
+        Dimension total_width = (Dimension)(dev->num_controls * max_w);
+        /* add spacing (6 between columns) and margins (approx) */
+        total_width += (Dimension)((dev->num_controls - 1) * 6 + 16);
+
+        XtVaSetValues(app->controls_container, XmNwidth, total_width, NULL);
+
+        Dimension shell_w = 0, shell_h = 0;
+        XtVaGetValues(app->top_level_shell,
+                      XmNwidth, &shell_w,
+                      XmNheight,&shell_h,
+                      NULL);
+        if (shell_w < total_width + 32 || shell_h < MIN_WINDOW_HEIGHT) {
+            Dimension desired_w = (shell_w < total_width + 32) ? total_width + 32 : shell_w;
+            Dimension desired_h = (shell_h < MIN_WINDOW_HEIGHT) ? MIN_WINDOW_HEIGHT : shell_h;
+            XtMakeResizeRequest(app->top_level_shell,
+                                desired_w,
+                                desired_h,
+                                NULL, NULL);
+        }
+    }
+}
 
 /* -------------------------------------------------------------------------
  * Function prototypes
@@ -121,9 +217,6 @@ static AppState *g_app = NULL;
 
 /* Entry / app setup */
 static void app_init_state(AppState *app);
-static void app_load_config(AppState *app);
-static void app_save_config(const AppState *app);
-
 /* ALSA-related functions */
 static int  alsa_enumerate_devices(AppState *app);
 static int  alsa_open_device(MixerDevice *dev);
@@ -136,12 +229,14 @@ static void ui_create_main_window(AppState *app, int *argc, char **argv);
 static void ui_build_device_list(AppState *app);
 static void ui_select_initial_device(AppState *app);
 static void ui_rebuild_controls_for_current_device(AppState *app);
+static void ui_register_wm_protocols(AppState *app);
 
 /* Callbacks */
 static void cb_device_selection(Widget w, XtPointer client_data, XtPointer call_data);
-static void cb_use_default_toggled(Widget w, XtPointer client_data, XtPointer call_data);
 static void cb_scale_value_changed(Widget w, XtPointer client_data, XtPointer call_data);
 static void cb_mute_toggled(Widget w, XtPointer client_data, XtPointer call_data);
+static void cb_wm_delete(Widget w, XtPointer client_data, XtPointer call_data);
+static void cb_wm_save(Widget w, XtPointer client_data, XtPointer call_data);
 
 /* ALSA monitoring & integration with Xt */
 static void alsa_register_poll_descriptors(AppState *app);
@@ -152,7 +247,7 @@ static void app_set_status(AppState *app, const char *text);
 static MixerDevice *app_get_current_device(AppState *app);
 static int  volume_to_percent(const MixerControl *ctrl, long v);
 static long percent_to_volume(const MixerControl *ctrl, int percent);
-static void get_config_path(char *buf, size_t len);
+static void init_exec_path(AppState *app, const char *argv0);
 
 /* -------------------------------------------------------------------------
  * main
@@ -164,8 +259,11 @@ int main(int argc, char **argv)
     app_init_state(&app);
     g_app = &app;
 
-    /* Load config (e.g. app-local default device) */
-    app_load_config(&app);
+    /* Session handling */
+    char *session_id = session_parse_argument(&argc, argv);
+    app.session_data = session_data_create(session_id);
+    free(session_id);
+    init_exec_path(&app, argv[0]);
 
     /* Enumerate mixer devices via ALSA */
     if (alsa_enumerate_devices(&app) <= 0) {
@@ -179,7 +277,7 @@ int main(int argc, char **argv)
     /* Build device list (top-left combo box) */
     ui_build_device_list(&app);
 
-    /* Select initial device (e.g. from config or first device) */
+    /* Select initial device (from session if available, else first) */
     ui_select_initial_device(&app);
 
     /* Register ALSA poll descriptors with Xt event loop */
@@ -213,61 +311,47 @@ static void app_init_state(AppState *app)
     app->updating_from_alsa = false;
 }
 
-static void get_config_path(char *buf, size_t len)
+static void init_exec_path(AppState *app, const char *argv0)
 {
-    const char *home = getenv("HOME");
-    if (!home || !*home) {
-        home = ".";
-    }
-    snprintf(buf, len, "%s/.ck-mixer.conf", home);
-}
+    if (!app) return;
+    memset(app->exec_path, 0, sizeof(app->exec_path));
 
-static void app_load_config(AppState *app)
-{
-    char path[512];
-    get_config_path(path, sizeof(path));
-
-    FILE *f = fopen(path, "r");
-    if (!f) {
+    ssize_t len = readlink("/proc/self/exe", app->exec_path,
+                           sizeof(app->exec_path) - 1);
+    if (len > 0) {
+        app->exec_path[len] = '\0';
         return;
     }
 
-    char line[256];
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "default_device=", 15) == 0) {
-            char *value = line + 15;
-            /* Trim newline */
-            char *nl = strchr(value, '\n');
-            if (nl) *nl = '\0';
-            strncpy(app->default_device_name, value,
-                    sizeof(app->default_device_name) - 1);
-            app->default_device_name[sizeof(app->default_device_name) - 1] = '\0';
+    if (argv0 && argv0[0]) {
+        if (argv0[0] == '/') {
+            strncpy(app->exec_path, argv0, sizeof(app->exec_path) - 1);
+            app->exec_path[sizeof(app->exec_path) - 1] = '\0';
+            return;
         }
-    }
 
-    fclose(f);
+        if (strchr(argv0, '/')) {
+            char cwd[PATH_MAX];
+            if (getcwd(cwd, sizeof(cwd))) {
+                size_t cwd_len = strlen(cwd);
+                size_t argv_len = strlen(argv0);
+                size_t needed = cwd_len + 1 + argv_len + 1;
+                if (needed <= sizeof(app->exec_path)) {
+                    memcpy(app->exec_path, cwd, cwd_len);
+                    app->exec_path[cwd_len] = '/';
+                    memcpy(app->exec_path + cwd_len + 1, argv0, argv_len);
+                    app->exec_path[cwd_len + 1 + argv_len] = '\0';
+                    return;
+                }
+            }
+        }
+
+        strncpy(app->exec_path, argv0, sizeof(app->exec_path) - 1);
+        app->exec_path[sizeof(app->exec_path) - 1] = '\0';
+    }
 }
 
-static void app_save_config(const AppState *app)
-{
-    char path[512];
-    get_config_path(path, sizeof(path));
-
-    FILE *f = fopen(path, "w");
-    if (!f) {
-        fprintf(stderr, "ck-mixer: failed to write config file %s\n", path);
-        return;
-    }
-
-    if (app->default_device_name[0] != '\0') {
-        fprintf(f, "default_device=%s\n", app->default_device_name);
-    } else {
-        /* Could just leave it empty, but we explicitly clear it */
-        fprintf(f, "default_device=\n");
-    }
-
-    fclose(f);
-}
+/* No config file needed; session data holds geometry and last device index */
 
 /* -------------------------------------------------------------------------
  * ALSA device & controls
@@ -601,6 +685,10 @@ static void ui_create_main_window(AppState *app, int *argc, char **argv)
               XmNiconName, "Volume",
               NULL);
 
+    /* Restore geometry from session, if available */
+    if (app->session_data && session_load(app->top_level_shell, app->session_data)) {
+        session_apply_geometry(app->top_level_shell, app->session_data, "x", "y", "w", "h");
+    }
 
     app->main_form = XtVaCreateManagedWidget(
         "mainForm",
@@ -625,20 +713,6 @@ static void ui_create_main_window(AppState *app, int *argc, char **argv)
         NULL
     );
 
-
-    /* Use as default toggle (to the right of combo) */
-    app->use_default_toggle = XtVaCreateManagedWidget(
-        "useDefaultToggle",
-        xmToggleButtonWidgetClass,
-        app->main_form,
-        XmNlabelString,      XmStringCreateLocalized("Use this device as default"),
-        XmNtopAttachment,    XmATTACH_FORM,
-        XmNleftAttachment,   XmATTACH_WIDGET,
-        XmNleftWidget,       app->device_combo,
-        XmNmarginWidth,      8,
-        NULL
-    );
-
     /* Separator below top bar */
     Widget sep = XtVaCreateManagedWidget(
         "topSeparator",
@@ -651,7 +725,7 @@ static void ui_create_main_window(AppState *app, int *argc, char **argv)
         NULL
     );
 
-    /* Controls container: horizontal row of columns */
+    /* Controls container: tight horizontal RowColumn so columns size to content */
     app->controls_container = XtVaCreateManagedWidget(
         "controlsContainer",
         xmRowColumnWidgetClass,
@@ -663,7 +737,7 @@ static void ui_create_main_window(AppState *app, int *argc, char **argv)
         XmNbottomAttachment, XmATTACH_FORM,
         XmNorientation,      XmHORIZONTAL,
         XmNpacking,          XmPACK_TIGHT,
-        XmNspacing,          8,
+        XmNspacing,          6,
         XmNmarginWidth,      8,
         XmNmarginHeight,     8,
         NULL
@@ -672,11 +746,26 @@ static void ui_create_main_window(AppState *app, int *argc, char **argv)
     /* Optional: status bar at bottom in future (for now, just stderr) */
     app->status_label = NULL;
 
-    /* Register callbacks for top-level controls */
-    XtAddCallback(app->use_default_toggle, XmNvalueChangedCallback,
-                  cb_use_default_toggled, (XtPointer)app);
-
     /* Device combo callbacks will be set after ui_build_device_list() */
+
+    ui_register_wm_protocols(app);
+}
+
+static void ui_register_wm_protocols(AppState *app)
+{
+    if (!app || !app->top_level_shell) return;
+
+    Atom wm_delete = XmInternAtom(XtDisplay(app->top_level_shell),
+                                  "WM_DELETE_WINDOW", False);
+    XmAddWMProtocolCallback(app->top_level_shell, wm_delete,
+                            cb_wm_delete, (XtPointer)app);
+    XmActivateWMProtocol(app->top_level_shell, wm_delete);
+
+    Atom wm_save = XmInternAtom(XtDisplay(app->top_level_shell),
+                                "WM_SAVE_YOURSELF", False);
+    XmAddWMProtocolCallback(app->top_level_shell, wm_save,
+                            cb_wm_save, (XtPointer)app);
+    XmActivateWMProtocol(app->top_level_shell, wm_save);
 }
 
 static void ui_build_device_list(AppState *app)
@@ -700,13 +789,10 @@ static void ui_select_initial_device(AppState *app)
     if (!app || app->num_devices == 0) return;
 
     int index = 0;
-
-    if (app->default_device_name[0] != '\0') {
-        for (size_t i = 0; i < app->num_devices; ++i) {
-            if (strcmp(app->devices[i].alsa_name, app->default_device_name) == 0) {
-                index = (int)i;
-                break;
-            }
+    if (app->session_data) {
+        int saved = session_data_get_int(app->session_data, "device_index", 0);
+        if (saved >= 0 && (size_t)saved < app->num_devices) {
+            index = saved;
         }
     }
 
@@ -727,14 +813,6 @@ static void ui_select_initial_device(AppState *app)
     XtVaSetValues(app->device_combo,
               XmNselectedPosition, pos,
               NULL);
-
-
-    /* Update "use default" toggle */
-    Boolean is_default =
-        (app->default_device_name[0] != '\0' &&
-         strcmp(app->default_device_name, dev->alsa_name) == 0)
-        ? True : False;
-    XmToggleButtonSetState(app->use_default_toggle, is_default, False);
 
     ui_rebuild_controls_for_current_device(app);
 }
@@ -766,16 +844,13 @@ static void ui_rebuild_controls_for_current_device(AppState *app)
     for (size_t i = 0; i < dev->num_controls; ++i) {
         MixerControl *ctrl = &dev->controls[i];
 
-        /* Column container: vertical RowColumn */
+        /* Column container: Form to let the scale stretch vertically */
         Widget col = XtVaCreateManagedWidget(
             "controlColumn",
-            xmRowColumnWidgetClass,
+            xmFormWidgetClass,
             app->controls_container,
-            XmNorientation,  XmVERTICAL,
-            XmNpacking,      XmPACK_TIGHT,
-            XmNspacing,      2,
-            XmNisAligned,    True,
-            XmNentryAlignment, XmALIGNMENT_CENTER,
+            XmNmarginWidth,   4,
+            XmNmarginHeight,  4,
             NULL
         );
 
@@ -788,11 +863,59 @@ static void ui_rebuild_controls_for_current_device(AppState *app)
             xmLabelWidgetClass,
             col,
             XmNlabelString, s_name,
+            XmNtopAttachment,    XmATTACH_FORM,
+            XmNleftAttachment,   XmATTACH_FORM,
+            XmNrightAttachment,  XmATTACH_FORM,
+            XmNalignment,        XmALIGNMENT_CENTER,
             NULL
         );
         XmStringFree(s_name);
 
-        /* Value label: e.g. "75%" */
+        Widget mute_toggle = NULL;
+        Widget bottom_anchor = NULL;
+        if (ctrl->has_playback_switch) {
+            mute_toggle = XtVaCreateManagedWidget(
+                "muteToggle",
+                xmToggleButtonWidgetClass,
+                col,
+                XmNlabelString, XmStringCreateLocalized("Mute"),
+                XmNbottomAttachment, XmATTACH_FORM,
+                XmNleftAttachment,   XmATTACH_FORM,
+                XmNrightAttachment,  XmATTACH_FORM,
+                NULL
+            );
+            ctrl->mute_toggle_widget = mute_toggle;
+            /* ALSA switch: 1 = on (unmuted), 0 = off (muted) */
+            Boolean mute_state = (ctrl->cur_mute_state == 0) ? True : False;
+            XmToggleButtonSetState(ctrl->mute_toggle_widget, mute_state, False);
+
+            XtAddCallback(ctrl->mute_toggle_widget, XmNvalueChangedCallback,
+                          cb_mute_toggled, (XtPointer)ctrl);
+
+            XtVaGetValues(mute_toggle, XmNheight, &g_mute_control_height, NULL);
+            if (g_mute_control_height == 0) {
+                g_mute_control_height = 28; /* fallback if theme reports zero now */
+            }
+            bottom_anchor = mute_toggle;
+        } else {
+            /* Spacer toggle to reserve identical height even with custom fonts */
+            Dimension spacer_h = (g_mute_control_height > 0) ? g_mute_control_height : 28;
+            Widget spacer = XtVaCreateManagedWidget(
+                "muteSpacer",
+                xmLabelWidgetClass,
+                col,
+                XmNlabelString,      XmStringCreateLocalized(""),
+                XmNrecomputeSize,    False,
+                XmNheight,           spacer_h,
+                XmNbottomAttachment, XmATTACH_FORM,
+                XmNleftAttachment,   XmATTACH_FORM,
+                XmNrightAttachment,  XmATTACH_FORM,
+                NULL
+            );
+            bottom_anchor = spacer;
+        }
+
+        /* Value label: e.g. "75%" placed above mute/spacer */
         long v = ctrl->cur_playback_value;
         int percent = volume_to_percent(ctrl, v);
         char buf[16];
@@ -802,7 +925,13 @@ static void ui_rebuild_controls_for_current_device(AppState *app)
             "valueLabel",
             xmLabelWidgetClass,
             col,
-            XmNlabelString, s_val,
+            XmNlabelString,     s_val,
+            XmNalignment,       XmALIGNMENT_CENTER,
+            XmNleftAttachment,  XmATTACH_FORM,
+            XmNrightAttachment, XmATTACH_FORM,
+            XmNbottomAttachment, bottom_anchor ? XmATTACH_WIDGET : XmATTACH_FORM,
+            XmNbottomWidget,     bottom_anchor ? bottom_anchor : NULL,
+            XmNbottomOffset,     bottom_anchor ? 2 : 0,
             NULL
         );
         XmStringFree(s_val);
@@ -819,6 +948,14 @@ static void ui_rebuild_controls_for_current_device(AppState *app)
             XmNshowValue,           False,
             XmNprocessingDirection, XmMAX_ON_TOP,
             XmNscaleWidth,          24,   /* adjust to taste */
+            XmNtopAttachment,       XmATTACH_WIDGET,
+            XmNtopWidget,           ctrl->label_widget,
+            XmNtopOffset,           4,
+            XmNleftAttachment,      XmATTACH_FORM,
+            XmNrightAttachment,     XmATTACH_FORM,
+            XmNbottomAttachment,    XmATTACH_WIDGET,
+            XmNbottomWidget,        ctrl->value_label_widget,
+            XmNbottomOffset,        4,
             NULL
         );
 
@@ -828,23 +965,11 @@ static void ui_rebuild_controls_for_current_device(AppState *app)
         XtAddCallback(ctrl->scale_widget, XmNdragCallback,
                       cb_scale_value_changed, (XtPointer)ctrl);
 
-        /* Mute toggle (if supported) */
-        if (ctrl->has_playback_switch) {
-            ctrl->mute_toggle_widget = XtVaCreateManagedWidget(
-                "muteToggle",
-                xmToggleButtonWidgetClass,
-                col,
-                XmNlabelString, XmStringCreateLocalized("Mute"),
-                NULL
-            );
-            /* ALSA switch: 1 = on (unmuted), 0 = off (muted) */
-            Boolean mute_state = (ctrl->cur_mute_state == 0) ? True : False;
-            XmToggleButtonSetState(ctrl->mute_toggle_widget, mute_state, False);
+        /* Mute toggle callback already set above if created */
 
-            XtAddCallback(ctrl->mute_toggle_widget, XmNvalueChangedCallback,
-                          cb_mute_toggled, (XtPointer)ctrl);
-        }
     }
+
+    normalize_column_layout(app, dev);
 
     app_set_status(app, dev->display_name);
 }
@@ -852,6 +977,29 @@ static void ui_rebuild_controls_for_current_device(AppState *app)
 /* -------------------------------------------------------------------------
  * Callbacks
  * ------------------------------------------------------------------------- */
+
+static void cb_wm_delete(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)call_data;
+    AppState *app = (AppState *)client_data;
+    if (!app) return;
+    XtAppSetExitFlag(app->app_context);
+}
+
+static void cb_wm_save(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)call_data;
+    AppState *app = (AppState *)client_data;
+    if (!app || !app->session_data) return;
+
+    session_capture_geometry(app->top_level_shell, app->session_data, "x", "y", "w", "h");
+    if (app->current_device_index >= 0) {
+        session_data_set_int(app->session_data, "device_index", app->current_device_index);
+    }
+    session_save(app->top_level_shell, app->session_data, app->exec_path);
+}
 
 static void cb_device_selection(Widget w, XtPointer client_data, XtPointer call_data)
 {
@@ -889,38 +1037,10 @@ static void cb_device_selection(Widget w, XtPointer client_data, XtPointer call_
         return;
     }
 
-    /* Update "use default" toggle */
-    Boolean is_default =
-        (app->default_device_name[0] != '\0' &&
-         strcmp(app->default_device_name, new_dev->alsa_name) == 0)
-        ? True : False;
-    XmToggleButtonSetState(app->use_default_toggle, is_default, False);
-
     ui_rebuild_controls_for_current_device(app);
 
     /* Re-register ALSA poll descriptors for the new device */
     alsa_register_poll_descriptors(app);
-}
-
-static void cb_use_default_toggled(Widget w, XtPointer client_data, XtPointer call_data)
-{
-    (void)call_data;
-    AppState *app = (AppState *)client_data;
-    if (!app) return;
-
-    MixerDevice *dev = app_get_current_device(app);
-    if (!dev) return;
-
-    Boolean state = XmToggleButtonGetState(w);
-    if (state) {
-        strncpy(app->default_device_name, dev->alsa_name,
-                sizeof(app->default_device_name) - 1);
-        app->default_device_name[sizeof(app->default_device_name) - 1] = '\0';
-    } else {
-        app->default_device_name[0] = '\0';
-    }
-
-    app_save_config(app);
 }
 
 static void cb_scale_value_changed(Widget w, XtPointer client_data, XtPointer call_data)

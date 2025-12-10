@@ -24,6 +24,7 @@
 #include <locale.h>
 #include <X11/keysym.h>
 #include <X11/Xatom.h>
+#include <X11/Xlib.h>
 
 #include <X11/Intrinsic.h>
 #include <X11/StringDefs.h>
@@ -48,6 +49,7 @@
 #include "../shared/about_dialog.h"
 #include "../shared/config_utils.h"
 #include "../shared/cde_palette.h"
+#include "formula_eval.h"
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -77,6 +79,9 @@ typedef struct {
     bool         has_pending_value;
     bool         entering_new;
     bool         error_state;
+    FormulaCtx   formula_ctx;
+    bool         formula_showing_result;
+    double       formula_last_result;
 
     bool         show_thousands;
     char         decimal_char;
@@ -96,6 +101,8 @@ typedef struct {
     Pixel        second_bg_active;
     Boolean      second_color_cached;
     Boolean      second_border_prev_active;
+    XmFontList   sci_font_list;
+    XFontStruct *sci_font_struct;
 
     /* Widgets for keyboard activation */
     Widget       btn_digits[10];
@@ -111,6 +118,16 @@ typedef struct {
     Widget       btn_ac;
     Widget       view_mode_basic_btn;
     Widget       view_mode_sci_btn;
+    Widget       btn_sci_exp;
+    Widget       btn_sci_10x;
+    Widget       btn_sci_ln;
+    Widget       btn_sci_log10;
+    Widget       btn_sci_sin;
+    Widget       btn_sci_cos;
+    Widget       btn_sci_tan;
+    Widget       btn_sci_sinh;
+    Widget       btn_sci_cosh;
+    Widget       btn_sci_tanh;
 
     XtIntervalId copy_flash_id;
     char         copy_flash_backup[MAX_DISPLAY_LEN];
@@ -156,6 +173,7 @@ static void cb_display_paste(Widget w, XtPointer client_data, XtPointer call_dat
 static void cb_second_toggle(Widget w, XtPointer client_data, XtPointer call_data);
 static void cb_second_arm(Widget w, XtPointer client_data, XtPointer call_data);
 static void second_button_mouse_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont);
+static void assign_sci_button_ref(AppState *app, const char *name, Widget button);
 static void copy_flash_reset(XtPointer client_data, XtIntervalId *id);
 static void paste_flash_reset(XtPointer client_data, XtIntervalId *id);
 static void rebuild_keypad(AppState *app);
@@ -165,10 +183,19 @@ static void clear_button_refs(AppState *app);
 static Boolean is_second_active(const AppState *app);
 static void update_second_button_state(AppState *app);
 static void set_shift_state(AppState *app, KeySym sym, Boolean down);
+static void ensure_scientific_font(AppState *app);
+static void apply_scientific_button_font(AppState *app, Widget button);
+static void cleanup_scientific_font(AppState *app);
+static void formula_mode_update_display(AppState *app);
+static void formula_mode_prepare_for_edit(AppState *app);
+static void formula_mode_seed_with_last_result(AppState *app);
 static Widget create_key_button(Widget parent, const char *name, const char *label,
                                 Widget top_widget, Boolean align_top,
                                 int col, int col_span, int col_step,
                                 XtCallbackProc cb, XtPointer data);
+static Dimension get_desired_width(const AppState *app);
+static void log_mode_width(AppState *app, const char *context);
+static void apply_current_mode_width(AppState *app);
 static void apply_wm_hints(AppState *app);
 static void lock_shell_dimensions(AppState *app);
 
@@ -201,6 +228,54 @@ static void set_display_from_double(AppState *app, double value)
     update_display(app);
 }
 
+static void ensure_scientific_font(AppState *app)
+{
+    if (!app || app->sci_font_list) return;
+    Display *dpy = app->shell ? XtDisplay(app->shell) : NULL;
+    if (!dpy) return;
+
+    const char *patterns[] = {
+        "-*-helvetica-medium-r-normal--12-*-*-*-*-*-*-*-*",
+        "-*-helvetica-medium-r-normal--10-*-*-*-*-*-*-*-*",
+        "fixed"
+    };
+    XFontStruct *font_struct = NULL;
+    for (size_t i = 0; i < sizeof(patterns)/sizeof(patterns[0]); ++i) {
+        font_struct = XLoadQueryFont(dpy, patterns[i]);
+        if (font_struct) break;
+    }
+    if (!font_struct) return;
+
+    app->sci_font_list = XmFontListCreate(font_struct, XmSTRING_DEFAULT_CHARSET);
+    if (!app->sci_font_list) {
+        XFreeFont(dpy, font_struct);
+        return;
+    }
+    app->sci_font_struct = font_struct;
+}
+
+static void apply_scientific_button_font(AppState *app, Widget button)
+{
+    if (!app || !button || !app->sci_font_list) return;
+    XtVaSetValues(button, XmNfontList, app->sci_font_list, NULL);
+}
+
+static void cleanup_scientific_font(AppState *app)
+{
+    if (!app) return;
+    if (app->sci_font_list) {
+        XmFontListFree(app->sci_font_list);
+        app->sci_font_list = NULL;
+    }
+    if (app->sci_font_struct) {
+        Display *dpy = app->shell ? XtDisplay(app->shell) : NULL;
+        if (dpy) {
+            XFreeFont(dpy, app->sci_font_struct);
+        }
+        app->sci_font_struct = NULL;
+    }
+}
+
 static void reset_state(AppState *app)
 {
     if (!app) return;
@@ -211,6 +286,9 @@ static void reset_state(AppState *app)
     app->has_pending_value = false;
     app->entering_new      = true;
     app->error_state       = false;
+    formula_clear(&app->formula_ctx);
+    app->formula_showing_result = false;
+    app->formula_last_result = 0.0;
     set_display(app, "0");
 }
 
@@ -472,6 +550,16 @@ static void cb_digit(Widget w, XtPointer client_data, XtPointer call_data)
     (void)call_data;
     AppState *app = g_app;
     if (!app) return;
+    if (app->mode == 1) {
+        if (app->error_state) reset_state(app);
+        formula_mode_prepare_for_edit(app);
+        char digit = (char)(uintptr_t)client_data;
+        if (formula_append_char(&app->formula_ctx, digit)) {
+            formula_mode_update_display(app);
+        }
+        ensure_keyboard_focus(app);
+        return;
+    }
     if (app->error_state) reset_state(app);
 
     char digit = (char)(uintptr_t)client_data;
@@ -504,6 +592,15 @@ static void cb_decimal(Widget w, XtPointer client_data, XtPointer call_data)
     (void)call_data;
     AppState *app = g_app;
     if (!app) return;
+    if (app->mode == 1) {
+        if (app->error_state) reset_state(app);
+        formula_mode_prepare_for_edit(app);
+        if (formula_append_char(&app->formula_ctx, '.')) {
+            formula_mode_update_display(app);
+        }
+        ensure_keyboard_focus(app);
+        return;
+    }
     if (app->error_state) reset_state(app);
 
     if (app->entering_new) {
@@ -532,6 +629,17 @@ static void cb_backspace(Widget w, XtPointer client_data, XtPointer call_data)
     (void)call_data;
     AppState *app = g_app;
     if (!app) return;
+    if (app->mode == 1) {
+        if (app->error_state) {
+            reset_state(app);
+            return;
+        }
+        formula_mode_prepare_for_edit(app);
+        formula_backspace(&app->formula_ctx);
+        formula_mode_update_display(app);
+        ensure_keyboard_focus(app);
+        return;
+    }
     if (app->error_state) {
         reset_state(app);
         return;
@@ -565,6 +673,10 @@ static void cb_toggle_sign(Widget w, XtPointer client_data, XtPointer call_data)
     (void)call_data;
     AppState *app = g_app;
     if (!app) return;
+    if (app->mode == 1) {
+        ensure_keyboard_focus(app);
+        return;
+    }
     if (app->error_state) {
         reset_state(app);
         return;
@@ -594,6 +706,10 @@ static void cb_percent(Widget w, XtPointer client_data, XtPointer call_data)
     (void)call_data;
     AppState *app = g_app;
     if (!app) return;
+    if (app->mode == 1) {
+        ensure_keyboard_focus(app);
+        return;
+    }
     if (app->error_state) {
         reset_state(app);
         return;
@@ -666,6 +782,18 @@ static void cb_operator(Widget w, XtPointer client_data, XtPointer call_data)
     (void)call_data;
     AppState *app = g_app;
     if (!app) return;
+    if (app->mode == 1) {
+        if (app->error_state) reset_state(app);
+        if (app->formula_showing_result) {
+            formula_mode_seed_with_last_result(app);
+        }
+        char op = (char)(uintptr_t)client_data;
+        if (formula_append_char(&app->formula_ctx, op)) {
+            formula_mode_update_display(app);
+        }
+        ensure_keyboard_focus(app);
+        return;
+    }
     if (app->error_state) reset_state(app);
 
     char op = (char)(uintptr_t)client_data;
@@ -697,6 +825,28 @@ static void cb_equals(Widget w, XtPointer client_data, XtPointer call_data)
     (void)call_data;
     AppState *app = g_app;
     if (!app) return;
+    if (app->mode == 1) {
+        if (app->error_state) {
+            reset_state(app);
+            return;
+        }
+        if (formula_is_empty(&app->formula_ctx)) {
+            ensure_keyboard_focus(app);
+            return;
+        }
+        double result = 0.0;
+        if (formula_evaluate(&app->formula_ctx, &result)) {
+            formula_clear(&app->formula_ctx);
+            app->formula_last_result = result;
+            app->formula_showing_result = true;
+            set_display_from_double(app, result);
+        } else {
+            formula_clear(&app->formula_ctx);
+            set_error(app);
+        }
+        ensure_keyboard_focus(app);
+        return;
+    }
     if (app->error_state) {
         reset_state(app);
         return;
@@ -755,12 +905,60 @@ static void reformat_display(AppState *app)
     app->entering_new = false;
 }
 
+static void formula_mode_update_display(AppState *app)
+{
+    if (!app) return;
+    const char *formula = formula_text(&app->formula_ctx);
+    if (!formula || !*formula) {
+        set_display(app, "0");
+        return;
+    }
+
+    char buf[MAX_DISPLAY_LEN];
+    size_t pos = 0;
+    for (const char *p = formula; *p && pos + 1 < sizeof(buf); ++p) {
+        char ch = *p;
+        if (ch == '.' && app->decimal_char != '.') {
+            ch = app->decimal_char;
+        }
+        buf[pos++] = ch;
+    }
+    buf[pos] = '\0';
+    set_display(app, buf);
+}
+
+static void formula_mode_prepare_for_edit(AppState *app)
+{
+    if (!app) return;
+    if (app->formula_showing_result) {
+        formula_clear(&app->formula_ctx);
+        app->formula_showing_result = false;
+    }
+}
+
+static void formula_mode_seed_with_last_result(AppState *app)
+{
+    if (!app) return;
+    char tmp[64];
+    int needed = snprintf(tmp, sizeof(tmp), "%.12g", app->formula_last_result);
+    formula_clear(&app->formula_ctx);
+    if (needed > 0) {
+        formula_append_str(&app->formula_ctx, tmp);
+    }
+    app->formula_showing_result = false;
+}
+
 static void set_mode(AppState *app, int mode, Boolean from_menu)
 {
     if (!app) return;
+    int prev_mode = app->mode;
     if (mode != 0 && mode != 1) mode = 0;
-    if (app->mode == mode && from_menu) return;
+    if (prev_mode == mode && from_menu) return;
     app->mode = mode;
+    if (mode == 1 && prev_mode != 1) {
+        formula_clear(&app->formula_ctx);
+        app->formula_showing_result = false;
+    }
 
     Boolean basic_set = (mode == 0) ? True : False;
     Boolean sci_set   = (mode == 1) ? True : False;
@@ -778,21 +976,17 @@ static void set_mode(AppState *app, int mode, Boolean from_menu)
 
     rebuild_keypad(app);
 
-    /* Adjust shell width; let height follow natural layout */
-    int cols = (app->mode == 1) ? 10 : 4;
-    Dimension desired_w = (Dimension)(cols * 60 + 40);
-    XtVaSetValues(app->shell,
-                  XmNwidth, desired_w,
-                  XmNminWidth, (Dimension)(cols * 50),
-                  XmNmaxWidth, desired_w,
-                  NULL);
+    apply_current_mode_width(app);
     apply_wm_hints(app);
     lock_shell_dimensions(app);
+    log_mode_width(app, "set_mode");
 }
 
 static void rebuild_keypad(AppState *app)
 {
     if (!app || !app->content_form || !app->display_label) return;
+
+    ensure_scientific_font(app);
 
     if (app->keypad && XtIsWidget(app->keypad)) {
         XtDestroyWidget(app->keypad);
@@ -826,7 +1020,9 @@ static void rebuild_keypad(AppState *app)
         for (int i = 0; i < offset; ++i) {
             char name[32];
             snprintf(name, sizeof(name), "sciR1C%d", i);
-            create_key_button(keypad, name, get_sci_label(0, i), row_anchor, False, i, 1, col_step, NULL, NULL);
+            Widget sci_button = create_key_button(keypad, name, get_sci_label(0, i), row_anchor, False, i, 1, col_step, NULL, NULL);
+            apply_scientific_button_font(app, sci_button);
+            assign_sci_button_ref(app, name, sci_button);
         }
     }
 
@@ -838,7 +1034,9 @@ static void rebuild_keypad(AppState *app)
         for (int i = 0; i < offset; ++i) {
             char name[32];
             snprintf(name, sizeof(name), "sciR1bC%d", i);
-            create_key_button(keypad, name, get_sci_label(0, i), row_top, True, i, 1, col_step, NULL, NULL);
+            Widget sci_button = create_key_button(keypad, name, get_sci_label(0, i), row_top, True, i, 1, col_step, NULL, NULL);
+            apply_scientific_button_font(app, sci_button);
+            assign_sci_button_ref(app, name, sci_button);
         }
     }
     app->btn_ac = create_key_button(keypad, "acBtn",   "AC",   row_top, True, offset + 1, 1, col_step, cb_clear, NULL);
@@ -860,14 +1058,14 @@ static void rebuild_keypad(AppState *app)
         for (int i = 0; i < offset; ++i) {
             char name[32];
             snprintf(name, sizeof(name), "sciR2C%d", i);
+            Widget sci_button = create_key_button(keypad, name, get_sci_label(1, i), row_top, True, i, 1, col_step, (i == 0) ? cb_second_toggle : NULL, NULL);
+            apply_scientific_button_font(app, sci_button);
+            assign_sci_button_ref(app, name, sci_button);
             if (i == 0) {
-                Widget sci_button = create_key_button(keypad, name, get_sci_label(1, i), row_top, True, i, 1, col_step, cb_second_toggle, NULL);
                 app->btn_second = sci_button;
                 XtAddEventHandler(sci_button, ButtonPressMask, False, second_button_mouse_handler, NULL);
                 XtAddEventHandler(sci_button, ButtonReleaseMask, False, second_button_mouse_handler, NULL);
                 XtAddCallback(sci_button, XmNarmCallback, cb_second_arm, NULL);
-            } else {
-                create_key_button(keypad, name, get_sci_label(1, i), row_top, True, i, 1, col_step, NULL, NULL);
             }
         }
     }
@@ -883,7 +1081,9 @@ static void rebuild_keypad(AppState *app)
         for (int i = 0; i < offset; ++i) {
             char name[32];
             snprintf(name, sizeof(name), "sciR3C%d", i);
-            create_key_button(keypad, name, get_sci_label(2, i), row_top, True, i, 1, col_step, NULL, NULL);
+            Widget sci_button = create_key_button(keypad, name, get_sci_label(2, i), row_top, True, i, 1, col_step, NULL, NULL);
+            apply_scientific_button_font(app, sci_button);
+            assign_sci_button_ref(app, name, sci_button);
         }
     }
     app->btn_digits[5] = create_key_button(keypad, "fiveBtn", "5", row_top, True, offset + 1, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'5');
@@ -898,7 +1098,9 @@ static void rebuild_keypad(AppState *app)
         for (int i = 0; i < offset; ++i) {
             char name[32];
             snprintf(name, sizeof(name), "sciR4C%d", i);
-            create_key_button(keypad, name, get_sci_label(3, i), row_top, True, i, 1, col_step, NULL, NULL);
+            Widget sci_button = create_key_button(keypad, name, get_sci_label(3, i), row_top, True, i, 1, col_step, NULL, NULL);
+            apply_scientific_button_font(app, sci_button);
+            assign_sci_button_ref(app, name, sci_button);
         }
     }
     app->btn_digits[2] = create_key_button(keypad, "twoBtn", "2", row_top, True, offset + 1, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'2');
@@ -914,7 +1116,9 @@ static void rebuild_keypad(AppState *app)
         for (int i = 0; i < offset; ++i) {
             char name[32];
             snprintf(name, sizeof(name), "sciR5C%d", i);
-            create_key_button(keypad, name, get_sci_label(4, i), row_top, True, i, 1, col_step, NULL, NULL);
+            Widget sci_button = create_key_button(keypad, name, get_sci_label(4, i), row_top, True, i, 1, col_step, NULL, NULL);
+            apply_scientific_button_font(app, sci_button);
+            assign_sci_button_ref(app, name, sci_button);
         }
     }
     app->btn_digits[0] = create_key_button(keypad, "zeroBtn", "0", row_top, True, offset + 1, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'0');
@@ -967,6 +1171,41 @@ static void rebuild_keypad(AppState *app)
     }
 
     update_second_button_state(app);
+}
+
+static Dimension get_desired_width(const AppState *app)
+{
+    if (!app) return 0;
+    int cols = (app->mode == 1) ? 10 : 4;
+    return (Dimension)(cols * 60 + 40);
+}
+
+static void log_mode_width(AppState *app, const char *context)
+{
+    if (!app || !context) return;
+    Dimension desired = get_desired_width(app);
+    Dimension current = 0;
+    if (app->shell) {
+        XtVaGetValues(app->shell, XmNwidth, &current, NULL);
+    }
+    fprintf(stderr,
+            "[ck-calc] %s mode=%d desired_width=%u current_width=%u\n",
+            context,
+            app->mode,
+            (unsigned int)desired,
+            (unsigned int)current);
+}
+
+static void apply_current_mode_width(AppState *app)
+{
+    if (!app || !app->shell) return;
+    Dimension desired_w = get_desired_width(app);
+    XtVaSetValues(app->shell,
+                  XmNwidth,     desired_w,
+                  XmNminWidth,  desired_w,
+                  XmNmaxWidth,  desired_w,
+                  NULL);
+    log_mode_width(app, "apply_current_mode_width");
 }
 
 static void apply_wm_hints(AppState *app)
@@ -1028,11 +1267,15 @@ static void lock_shell_dimensions(AppState *app)
     Dimension desired_h = form_h;
     if (app->chrome_inited) desired_h += app->chrome_dy;
 
+    int cols = (app->mode == 1) ? 10 : 4;
+    Dimension desired_w = (Dimension)(cols * 60 + 40);
+
     XtVaSetValues(app->shell,
-                  XmNminWidth,  shell_w,
-                  XmNmaxWidth,  shell_w,
-                  XmNminHeight, desired_h,
-                  XmNmaxHeight, desired_h,
+                  XmNwidth,      desired_w,
+                  XmNminWidth,   desired_w,
+                  XmNmaxWidth,   desired_w,
+                  XmNminHeight,  desired_h,
+                  XmNmaxHeight,  desired_h,
                   NULL);
 }
 
@@ -1056,12 +1299,84 @@ static void clear_button_refs(AppState *app)
     app->second_thickness_cached = False;
     app->second_shadow_thickness = 0;
     app->second_border_prev_active = False;
+    app->btn_sci_exp = NULL;
+    app->btn_sci_10x = NULL;
+    app->btn_sci_ln = NULL;
+    app->btn_sci_log10 = NULL;
+    app->btn_sci_sin = NULL;
+    app->btn_sci_cos = NULL;
+    app->btn_sci_tan = NULL;
+    app->btn_sci_sinh = NULL;
+    app->btn_sci_cosh = NULL;
+    app->btn_sci_tanh = NULL;
 }
 
 static Boolean is_second_active(const AppState *app)
 {
     if (!app) return False;
     return (app->shift_left_down || app->shift_right_down || app->second_mouse_pressed) ? True : False;
+}
+
+static void assign_sci_button_ref(AppState *app, const char *name, Widget button);
+static void set_button_label(Widget btn, const char *label)
+{
+    if (!btn || !label) return;
+    XmString xms = XmStringCreateLocalized((char *)label);
+    XtVaSetValues(btn, XmNlabelString, xms, NULL);
+    XmStringFree(xms);
+}
+
+static void refresh_second_button_labels(AppState *app, Boolean active)
+{
+    if (!app) return;
+    struct {
+        Widget      btn;
+        const char  *normal;
+        const char  *alt;
+    } swaps[] = {
+        { app->btn_sci_exp,  "e^x",     "y^x"     },
+        { app->btn_sci_10x,  "10^x",    "2^x"     },
+        { app->btn_sci_ln,   "ln",      "log y"   },
+        { app->btn_sci_log10,"log10",   "log 2"   },
+        { app->btn_sci_sin,  "sin",     "sin^-1"  },
+        { app->btn_sci_cos,  "cos",     "cos^-1"  },
+        { app->btn_sci_tan,  "tan",     "tan^-1"  },
+        { app->btn_sci_sinh, "sinh",    "sinh^-1" },
+        { app->btn_sci_cosh, "cosh",    "cosh^-1" },
+        { app->btn_sci_tanh, "tanh",    "tanh^-1" },
+    };
+    for (size_t i = 0; i < sizeof(swaps)/sizeof(swaps[0]); ++i) {
+        Widget btn = swaps[i].btn;
+        if (btn) {
+            set_button_label(btn, active ? swaps[i].alt : swaps[i].normal);
+        }
+    }
+}
+
+static void assign_sci_button_ref(AppState *app, const char *name, Widget button)
+{
+    if (!app || !name || !button) return;
+    if (strcmp(name, "sciR1bC4") == 0) {
+        app->btn_sci_exp = button;
+    } else if (strcmp(name, "sciR1bC5") == 0) {
+        app->btn_sci_10x = button;
+    } else if (strcmp(name, "sciR2C4") == 0) {
+        app->btn_sci_ln = button;
+    } else if (strcmp(name, "sciR2C5") == 0) {
+        app->btn_sci_log10 = button;
+    } else if (strcmp(name, "sciR3C1") == 0) {
+        app->btn_sci_sin = button;
+    } else if (strcmp(name, "sciR3C2") == 0) {
+        app->btn_sci_cos = button;
+    } else if (strcmp(name, "sciR3C3") == 0) {
+        app->btn_sci_tan = button;
+    } else if (strcmp(name, "sciR5C1") == 0) {
+        app->btn_sci_sinh = button;
+    } else if (strcmp(name, "sciR5C2") == 0) {
+        app->btn_sci_cosh = button;
+    } else if (strcmp(name, "sciR5C3") == 0) {
+        app->btn_sci_tanh = button;
+    }
 }
 
 static void update_second_button_state(AppState *app)
@@ -1116,6 +1431,7 @@ static void update_second_button_state(AppState *app)
                   XmNshadowThickness, app->second_shadow_thickness,
                   XmNbackground, bg,
                   NULL);
+    refresh_second_button_labels(app, active);
     if (app->second_border_prev_active != active) {
         fprintf(stderr, "[ck-calc] 2nd border %s (top=%lu bottom=%lu bg=%lu)\n",
                 active ? "pressed" : "released",
@@ -2073,6 +2389,7 @@ int main(int argc, char *argv[])
 
     build_ui(&app);
     set_mode(&app, app.mode, False);
+    log_mode_width(&app, "startup");
     apply_wm_hints(&app);
 
     if (app.session_data) {
@@ -2082,6 +2399,9 @@ int main(int argc, char *argv[])
     } else {
         center_shell_on_screen(app.shell);
     }
+
+    apply_current_mode_width(&app);
+    lock_shell_dimensions(&app);
 
     Dimension init_h = 0;
     XtVaGetValues(app.shell, XmNheight, &init_h, NULL);
@@ -2122,6 +2442,7 @@ int main(int argc, char *argv[])
 
     XtAppMainLoop(app.app_context);
 
+    cleanup_scientific_font(&app);
     session_data_free(app.session_data);
     return 0;
 }

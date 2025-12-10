@@ -23,11 +23,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <limits.h>
+#include <X11/Xlib.h>
+#include <Xm/Protocols.h>
+#include <Dt/Session.h>
 #include <Xm/Xm.h>
 #include <Xm/Form.h>
 #include <Xm/LabelG.h>
 
 #include "vertical_meter.h"
+#include "../shared/session_utils.h"
 
 #define NUM_METERS 6
 
@@ -45,11 +50,13 @@ enum {
 
 /* Maxima in "percent" units for all meters */
 #define PERCENT_MAX 100
-/* Allow load to go up to 400% (4x all cores fully loaded) */
-#define LOAD_PERCENT_MAX 400
+#define LOAD_PERCENT_DEFAULT_MAX 100
 
 static Widget meters[NUM_METERS];
+static Widget value_labels[NUM_METERS];
 static XtAppContext app_context;
+static SessionData *session_data = NULL;
+static char g_exec_path[PATH_MAX] = "ck-load";
 
 /* ---------- Helper: CPU usage from /proc/stat ---------- */
 
@@ -141,7 +148,8 @@ read_cpu_usage_percent(int *out_percent)
 /* ---------- Helper: RAM + swap usage from /proc/meminfo ---------- */
 
 static int
-read_mem_and_swap_percent(int *out_ram_percent, int *out_swap_percent)
+read_mem_and_swap_percent(int *out_ram_percent, int *out_swap_percent,
+                          double *out_ram_used_gb, double *out_swap_used_gb)
 {
     FILE *fp = fopen("/proc/meminfo", "r");
     if (!fp) return -1;
@@ -169,12 +177,18 @@ read_mem_and_swap_percent(int *out_ram_percent, int *out_swap_percent)
 
     fclose(fp);
 
+    if (out_ram_used_gb)  *out_ram_used_gb  = 0.0;
+    if (out_swap_used_gb) *out_swap_used_gb = 0.0;
+
     if (mem_total > 0 && mem_available > 0) {
         unsigned long mem_used = mem_total - mem_available;
         double ram_percent = 100.0 * (double)mem_used / (double)mem_total;
         if (ram_percent < 0.0) ram_percent = 0.0;
         if (ram_percent > 100.0) ram_percent = 100.0;
         *out_ram_percent = (int)(ram_percent + 0.5);
+        if (out_ram_used_gb) {
+            *out_ram_used_gb = (double)mem_used / (1024.0 * 1024.0);
+        }
     } else {
         *out_ram_percent = 0;
     }
@@ -185,6 +199,9 @@ read_mem_and_swap_percent(int *out_ram_percent, int *out_swap_percent)
         if (swap_percent < 0.0) swap_percent = 0.0;
         if (swap_percent > 100.0) swap_percent = 100.0;
         *out_swap_percent = (int)(swap_percent + 0.5);
+        if (out_swap_used_gb) {
+            *out_swap_used_gb = (double)swap_used / (1024.0 * 1024.0);
+        }
     } else {
         *out_swap_percent = 0;
     }
@@ -195,7 +212,8 @@ read_mem_and_swap_percent(int *out_ram_percent, int *out_swap_percent)
 /* ---------- Helper: load averages from /proc/loadavg ---------- */
 
 static int
-read_load_percent(int *out_l1, int *out_l5, int *out_l15)
+read_load_percent(int *out_l1, int *out_l5, int *out_l15,
+                  double *out_raw_l1, double *out_raw_l5, double *out_raw_l15)
 {
     FILE *fp = fopen("/proc/loadavg", "r");
     if (!fp) return -1;
@@ -207,6 +225,10 @@ read_load_percent(int *out_l1, int *out_l5, int *out_l15)
     }
     fclose(fp);
 
+    if (out_raw_l1) *out_raw_l1 = l1;
+    if (out_raw_l5) *out_raw_l5 = l5;
+    if (out_raw_l15) *out_raw_l15 = l15;
+
     long n_cpus = sysconf(_SC_NPROCESSORS_ONLN);
     if (n_cpus <= 0) n_cpus = 1;
 
@@ -216,10 +238,9 @@ read_load_percent(int *out_l1, int *out_l5, int *out_l15)
     int p5  = (int)(l5  * scale + 0.5);
     int p15 = (int)(l15 * scale + 0.5);
 
-    /* Cap at LOAD_PERCENT_MAX */
-    if (p1  < 0) p1  = 0;   if (p1  > LOAD_PERCENT_MAX) p1  = LOAD_PERCENT_MAX;
-    if (p5  < 0) p5  = 0;   if (p5  > LOAD_PERCENT_MAX) p5  = LOAD_PERCENT_MAX;
-    if (p15 < 0) p15 = 0;   if (p15 > LOAD_PERCENT_MAX) p15 = LOAD_PERCENT_MAX;
+    if (p1  < 0) p1  = 0;
+    if (p5  < 0) p5  = 0;
+    if (p15 < 0) p15 = 0;
 
     *out_l1 = p1;
     *out_l5 = p5;
@@ -238,24 +259,132 @@ update_meters_cb(XtPointer client_data, XtIntervalId *id)
     int cpu_percent;
     int ram_percent, swap_percent;
     int load1_percent, load5_percent, load15_percent;
+    int load_max = LOAD_PERCENT_DEFAULT_MAX;
+    double ram_used_gb = 0.0, swap_used_gb = 0.0;
+    double load1_raw = 0.0, load5_raw = 0.0, load15_raw = 0.0;
 
     if (read_cpu_usage_percent(&cpu_percent) == 0) {
         VerticalMeterSetValue(meters[METER_CPU], cpu_percent);
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%d%%", cpu_percent);
+        XmString s = XmStringCreateLocalized(buf);
+        XtVaSetValues(value_labels[METER_CPU], XmNlabelString, s, NULL);
+        XmStringFree(s);
     }
 
-    if (read_mem_and_swap_percent(&ram_percent, &swap_percent) == 0) {
+    if (read_mem_and_swap_percent(&ram_percent, &swap_percent,
+                                  &ram_used_gb, &swap_used_gb) == 0) {
         VerticalMeterSetValue(meters[METER_RAM],  ram_percent);
         VerticalMeterSetValue(meters[METER_SWAP], swap_percent);
+
+        char buf_ram[32];
+        snprintf(buf_ram, sizeof(buf_ram), "%.1f GB", ram_used_gb);
+        XmString s_ram = XmStringCreateLocalized(buf_ram);
+        XtVaSetValues(value_labels[METER_RAM], XmNlabelString, s_ram, NULL);
+        XmStringFree(s_ram);
+
+        char buf_swap[32];
+        snprintf(buf_swap, sizeof(buf_swap), "%.1f GB", swap_used_gb);
+        XmString s_swap = XmStringCreateLocalized(buf_swap);
+        XtVaSetValues(value_labels[METER_SWAP], XmNlabelString, s_swap, NULL);
+        XmStringFree(s_swap);
     }
 
-    if (read_load_percent(&load1_percent, &load5_percent, &load15_percent) == 0) {
+    if (read_load_percent(&load1_percent, &load5_percent, &load15_percent,
+                          &load1_raw, &load5_raw, &load15_raw) == 0) {
+        /* Dynamically raise the maximum if any load value exceeds the default.
+           Keep all three load meters on the same scale. */
+        if (load1_percent > load_max) load_max = load1_percent;
+        if (load5_percent > load_max) load_max = load5_percent;
+        if (load15_percent > load_max) load_max = load15_percent;
+
+        VerticalMeterSetMaximum(meters[METER_LOAD1],  load_max);
+        VerticalMeterSetMaximum(meters[METER_LOAD5],  load_max);
+        VerticalMeterSetMaximum(meters[METER_LOAD15], load_max);
+
+        VerticalMeterSetDefaultMaximum(meters[METER_LOAD1],  LOAD_PERCENT_DEFAULT_MAX);
+        VerticalMeterSetDefaultMaximum(meters[METER_LOAD5],  LOAD_PERCENT_DEFAULT_MAX);
+        VerticalMeterSetDefaultMaximum(meters[METER_LOAD15], LOAD_PERCENT_DEFAULT_MAX);
+
         VerticalMeterSetValue(meters[METER_LOAD1],  load1_percent);
         VerticalMeterSetValue(meters[METER_LOAD5],  load5_percent);
         VerticalMeterSetValue(meters[METER_LOAD15], load15_percent);
+
+        char buf1[32], buf5[32], buf15[32];
+        snprintf(buf1, sizeof(buf1), "%.2f", load1_raw);
+        snprintf(buf5, sizeof(buf5), "%.2f", load5_raw);
+        snprintf(buf15, sizeof(buf15), "%.2f", load15_raw);
+
+        XmString s1 = XmStringCreateLocalized(buf1);
+        XmString s5 = XmStringCreateLocalized(buf5);
+        XmString s15 = XmStringCreateLocalized(buf15);
+        XtVaSetValues(value_labels[METER_LOAD1],  XmNlabelString, s1,  NULL);
+        XtVaSetValues(value_labels[METER_LOAD5],  XmNlabelString, s5,  NULL);
+        XtVaSetValues(value_labels[METER_LOAD15], XmNlabelString, s15, NULL);
+        XmStringFree(s1);
+        XmStringFree(s5);
+        XmStringFree(s15);
     }
 
     /* Re-arm timer */
     XtAppAddTimeOut(app_context, UPDATE_INTERVAL_MS, update_meters_cb, NULL);
+}
+
+static void wm_delete_callback(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)call_data;
+    XtAppContext app = (XtAppContext)client_data;
+    XtAppSetExitFlag(app);
+}
+
+/* ---------- Session handling ---------- */
+
+static void init_exec_path(const char *argv0)
+{
+    ssize_t len = readlink("/proc/self/exe", g_exec_path,
+                           sizeof(g_exec_path) - 1);
+    if (len > 0) {
+        g_exec_path[len] = '\0';
+        return;
+    }
+
+    if (argv0 && argv0[0]) {
+        if (argv0[0] == '/') {
+            strncpy(g_exec_path, argv0, sizeof(g_exec_path) - 1);
+            g_exec_path[sizeof(g_exec_path) - 1] = '\0';
+            return;
+        }
+
+        if (strchr(argv0, '/')) {
+            char cwd[PATH_MAX];
+            if (getcwd(cwd, sizeof(cwd))) {
+                size_t cwd_len = strlen(cwd);
+                size_t argv_len = strlen(argv0);
+                size_t needed = cwd_len + 1 + argv_len + 1;
+                if (needed <= sizeof(g_exec_path)) {
+                    memcpy(g_exec_path, cwd, cwd_len);
+                    g_exec_path[cwd_len] = '/';
+                    memcpy(g_exec_path + cwd_len + 1, argv0, argv_len);
+                    g_exec_path[cwd_len + 1 + argv_len] = '\0';
+                    return;
+                }
+            }
+        }
+
+        strncpy(g_exec_path, argv0, sizeof(g_exec_path) - 1);
+        g_exec_path[sizeof(g_exec_path) - 1] = '\0';
+    }
+}
+
+static void session_save_cb(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)client_data;
+    (void)call_data;
+    if (!session_data) return;
+
+    session_capture_geometry(w, session_data, "x", "y", "w", "h");
+    session_save(w, session_data, g_exec_path);
 }
 
 /* ---------- Main + UI setup ---------- */
@@ -284,6 +413,12 @@ main(int argc, char *argv[])
         NULL,
         NULL
     );
+
+    /* Session handling: parse -session, remember exec path */
+    char *session_id = session_parse_argument(&argc, argv);
+    session_data = session_data_create(session_id);
+    free(session_id);
+    init_exec_path(argv[0]);
 
     /* Main form, fractional positions used for equal-width columns */
     main_form = XtVaCreateManagedWidget(
@@ -339,25 +474,67 @@ main(int argc, char *argv[])
             XmNtopWidget,        label,
             XmNleftAttachment,   XmATTACH_FORM,
             XmNrightAttachment,  XmATTACH_FORM,
+            NULL
+        );
+
+        /* Value label at the bottom */
+        Widget value_label = XtVaCreateManagedWidget(
+            "valueLabel",
+            xmLabelGadgetClass, col_form,
+            XmNalignment,      XmALIGNMENT_CENTER,
             XmNbottomAttachment, XmATTACH_FORM,
+            XmNleftAttachment, XmATTACH_FORM,
+            XmNrightAttachment,XmATTACH_FORM,
+            NULL
+        );
+        XmString initial = XmStringCreateLocalized("-");
+        XtVaSetValues(value_label, XmNlabelString, initial, NULL);
+        XmStringFree(initial);
+
+        /* Meter sits above the value label */
+        XtVaSetValues(
+            meter,
+            XmNbottomAttachment, XmATTACH_WIDGET,
+            XmNbottomWidget,     value_label,
+            XmNbottomOffset,     2,
             NULL
         );
 
         /* Configure meter maxima and cell height */
         if (i == METER_LOAD1 || i == METER_LOAD5 || i == METER_LOAD15) {
-            VerticalMeterSetMaximum(meter, LOAD_PERCENT_MAX);
+            VerticalMeterSetMaximum(meter, LOAD_PERCENT_DEFAULT_MAX);
+            VerticalMeterSetDefaultMaximum(meter, LOAD_PERCENT_DEFAULT_MAX);
         } else {
             VerticalMeterSetMaximum(meter, PERCENT_MAX);
         }
         VerticalMeterSetCellHeight(meter, 4); /* 0 = square cells in your implementation */
 
         meters[i] = meter;
+        value_labels[i] = value_label;
     }
 
     /* Set an application icon or window title if desired */
     XtVaSetValues(toplevel,
                   XmNtitle, "System Load",
                   NULL);
+
+    /* Session restore (geometry) */
+    if (session_data && session_load(toplevel, session_data)) {
+        session_apply_geometry(toplevel, session_data, "x", "y", "w", "h");
+    }
+
+    /* WM protocol handling */
+    Atom wm_delete = XmInternAtom(XtDisplay(toplevel),
+                                  "WM_DELETE_WINDOW", False);
+    XmAddWMProtocolCallback(toplevel, wm_delete,
+                            wm_delete_callback, (XtPointer)app_context);
+    XmActivateWMProtocol(toplevel, wm_delete);
+
+    Atom wm_save = XmInternAtom(XtDisplay(toplevel),
+                                "WM_SAVE_YOURSELF", False);
+    XmAddWMProtocolCallback(toplevel, wm_save,
+                            session_save_cb, NULL);
+    XmActivateWMProtocol(toplevel, wm_save);
 
     XtRealizeWidget(toplevel);
 

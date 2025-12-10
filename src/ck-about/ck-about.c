@@ -9,13 +9,15 @@
 #include <Dt/Dt.h>        /* CDE version info */
 #include <Dt/Session.h>   /* CDE session management */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <limits.h>
 #include <unistd.h>
 
+#include "../shared/session_utils.h"
 /* ---------- Globals for session handling ---------- */
 
-static char  *g_session_id  = NULL;  /* from -session <id> */
+static SessionData *g_session_data = NULL;
 static Widget g_notebook    = NULL;  /* set to the Notebook widget */
 static char   g_exec_path[PATH_MAX] = "ck-about"; /* absolute path to executable */
 
@@ -122,17 +124,6 @@ static int get_cde_fields(LsbField fields[], int max_fields)
 
 /* ---------- Session handling helpers ---------- */
 
-/* Parse -session <id> from argv, store in g_session_id */
-static void parse_session_arg(int *argc, char **argv)
-{
-    for (int i = 1; i < *argc - 1; ++i) {
-        if (strcmp(argv[i], "-session") == 0) {
-            g_session_id = argv[i+1];
-            break;
-        }
-    }
-}
-
 /* Resolve executable path (for session restart command) */
 static void init_exec_path(const char *argv0)
 {
@@ -153,70 +144,23 @@ static void init_exec_path(const char *argv0)
         if (strchr(argv0, '/')) {
             char cwd[PATH_MAX];
             if (getcwd(cwd, sizeof(cwd))) {
-                snprintf(g_exec_path, sizeof(g_exec_path), "%s/%s", cwd, argv0);
-                return;
+                size_t cwd_len = strlen(cwd);
+                size_t argv_len = strlen(argv0);
+                size_t needed = cwd_len + 1 + argv_len + 1; /* '/' + '\0' */
+
+                if (needed <= sizeof(g_exec_path)) {
+                    memcpy(g_exec_path, cwd, cwd_len);
+                    g_exec_path[cwd_len] = '/';
+                    memcpy(g_exec_path + cwd_len + 1, argv0, argv_len);
+                    g_exec_path[cwd_len + 1 + argv_len] = '\0';
+                    return;
+                }
             }
         }
 
         strncpy(g_exec_path, argv0, sizeof(g_exec_path) - 1);
         g_exec_path[sizeof(g_exec_path) - 1] = '\0';
     }
-}
-
-/* Restore window geometry + current tab from CDE session state */
-static Boolean restore_session_state(Widget toplevel, Widget notebook)
-{
-    if (!g_session_id)
-        return False;
-
-    char *path = NULL;
-
-    if (!DtSessionRestorePath(toplevel, &path, g_session_id)) {
-        return False;
-    }
-
-    FILE *fp = fopen(path, "r");
-    if (!fp) {
-        XtFree(path);
-        return False;
-    }
-
-    int x = 0, y = 0, w = 0, h = 0, page = 1;
-    char key[32];
-    Boolean geometry_restored = False;
-
-    while (fscanf(fp, "%31s", key) == 1) {
-        if (strcmp(key, "x") == 0)      fscanf(fp, "%d", &x);
-        else if (strcmp(key, "y") == 0) fscanf(fp, "%d", &y);
-        else if (strcmp(key, "w") == 0) fscanf(fp, "%d", &w);
-        else if (strcmp(key, "h") == 0) fscanf(fp, "%d", &h);
-        else if (strcmp(key, "page") == 0) fscanf(fp, "%d", &page);
-        else {
-            /* unknown token: skip remainder of line */
-            char buf[256];
-            fgets(buf, sizeof(buf), fp);
-        }
-    }
-    fclose(fp);
-
-    if (w > 0 && h > 0) {
-        XtVaSetValues(toplevel,
-                      XmNx,      (Position)x,
-                      XmNy,      (Position)y,
-                      XmNwidth,  (Dimension)w,
-                      XmNheight, (Dimension)h,
-                      NULL);
-        geometry_restored = True;
-    }
-
-    if (page >= 1 && notebook) {
-        XtVaSetValues(notebook,
-                      XmNcurrentPageNumber, page,
-                      NULL);
-    }
-
-    XtFree(path);
-    return geometry_restored;
 }
 
 /* Center shell on screen (used when no session geometry is restored) */
@@ -251,59 +195,18 @@ static void center_shell_on_screen(Widget toplevel)
 /* Callback for WM_SAVE_YOURSELF: save geometry + current tab and set restart cmd */
 void session_save_callback(Widget w, XtPointer client_data, XtPointer call_data)
 {
-    char *savePath = NULL;
-    char *saveFile = NULL;
+    (void)client_data;
+    (void)call_data;
+    if (!g_session_data) return;
 
-    /* Ask CDE where to save our session file */
-    if (!DtSessionSavePath(w, &savePath, &saveFile)) {
-        return;
-    }
-
-    FILE *fp = fopen(savePath, "w");
-    if (!fp) {
-        XtFree(savePath);
-        XtFree(saveFile);
-        return;
-    }
-
-    /* 1) get window geometry */
-    Position x, y;
-    Dimension width, height;
-    XtVaGetValues(w,
-                  XmNx,     &x,
-                  XmNy,     &y,
-                  XmNwidth, &width,
-                  XmNheight,&height,
-                  NULL);
-
-    /* 2) get current notebook page */
-    int page = 1;
+    session_capture_geometry(w, g_session_data, "x", "y", "w", "h");
     if (g_notebook) {
-        XtVaGetValues(g_notebook,
-                      XmNcurrentPageNumber, &page,
-                      NULL);
+        int page = 1;
+        XtVaGetValues(g_notebook, XmNcurrentPageNumber, &page, NULL);
+        session_data_set_int(g_session_data, "page", page);
     }
 
-    /* 3) write state file (simple text format) */
-    fprintf(fp, "x %d\n", (int)x);
-    fprintf(fp, "y %d\n", (int)y);
-    fprintf(fp, "w %u\n", (unsigned)width);
-    fprintf(fp, "h %u\n", (unsigned)height);
-    fprintf(fp, "page %d\n", page);
-    fclose(fp);
-
-    /* 4) tell the session manager how to restart us: ck-about -session <id> */
-    char *cmd_argv[3];
-    int   cmd_argc = 0;
-
-    cmd_argv[cmd_argc++] = g_exec_path;
-    cmd_argv[cmd_argc++] = "-session";
-    cmd_argv[cmd_argc++] = saveFile;   /* session id */
-
-    XSetCommand(XtDisplay(w), XtWindow(w), cmd_argv, cmd_argc);
-
-    XtFree(savePath);
-    XtFree(saveFile);
+    session_save(w, g_session_data, g_exec_path);
 }
 
 /* ---------- main ---------- */
@@ -317,7 +220,9 @@ int main(int argc, char *argv[])
     Boolean restored_geometry = False;
 
     /* Parse -session argument, if any */
-    parse_session_arg(&argc, argv);
+    char *session_id = session_parse_argument(&argc, argv);
+    g_session_data = session_data_create(session_id);
+    free(session_id);
 
     /* Find executable path for restart command */
     init_exec_path(argv[0]);
@@ -643,7 +548,16 @@ int main(int argc, char *argv[])
     XmActivateWMProtocol(toplevel, wm_save);
 
     /* Restore previous session state (geometry + current page), if any */
-    restored_geometry = restore_session_state(toplevel, notebook);
+    if (g_session_data && session_load(toplevel, g_session_data)) {
+        restored_geometry = session_apply_geometry(toplevel, g_session_data,
+                                                   "x", "y", "w", "h");
+        int page = session_data_get_int(g_session_data, "page", 1);
+        if (page >= 1 && notebook) {
+            XtVaSetValues(notebook,
+                          XmNcurrentPageNumber, page,
+                          NULL);
+        }
+    }
 
     /* Realize widgets */
     XtRealizeWidget(toplevel);

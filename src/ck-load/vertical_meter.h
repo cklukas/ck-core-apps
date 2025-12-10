@@ -17,6 +17,7 @@
  *   Widget VerticalMeterCreate(Widget parent, char *name, Arg *args, Cardinal n);
  *   void   VerticalMeterSetValue(Widget w, int value);
  *   void   VerticalMeterSetMaximum(Widget w, int maximum);
+ *   void   VerticalMeterSetDefaultMaximum(Widget w, int default_max);
  *   void   VerticalMeterSetCellHeight(Widget w, int cell_height); // 0 = square
  */
 
@@ -41,6 +42,9 @@ void VerticalMeterSetValue(Widget w, int value);
 
 /* Set the maximum value (default suggested 100). */
 void VerticalMeterSetMaximum(Widget w, int maximum);
+
+/* Set a "default" maximum; cells beyond this threshold are outlined, not filled. */
+void VerticalMeterSetDefaultMaximum(Widget w, int default_max);
 
 /* Set the minimum height of a single "cell" in pixels.
  * If cell_height == 0, cells are drawn square (height ≈ width).

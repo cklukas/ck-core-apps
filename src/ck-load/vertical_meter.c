@@ -34,6 +34,7 @@
 typedef struct {
     int   value;          /* current value */
     int   maximum;        /* maximum value (default 100) */
+    int   default_max;    /* threshold for filled vs outlined cells */
 
     int   cell_height;    /* 0 = square (height == width), >0 = fixed height */
     int   cell_gap;       /* vertical gap between cells (pixels) */
@@ -78,6 +79,7 @@ static VerticalMeterData *vm_get_data(Widget w, Boolean create_if_missing)
 
         vm->value       = 0;
         vm->maximum     = 100;
+        vm->default_max = 100;
         vm->cell_height = 0;   /* 0 = square */
         vm->cell_gap    = 1;
         vm->padding     = 2;
@@ -244,10 +246,18 @@ static void vm_draw(Widget w, VerticalMeterData *vm)
     /* Determine how many cells to fill based on value/maximum */
     int value  = vm->value;
     int maxval = (vm->maximum > 0) ? vm->maximum : 100;
+    int default_max = (vm->default_max > 0) ? vm->default_max : maxval;
+    if (default_max > maxval) default_max = maxval;
     if (value < 0) value = 0;
     if (value > maxval) value = maxval;
 
     int filled_cells = (max_cells * value + maxval / 2) / maxval;
+    int default_cells = (max_cells * default_max + maxval / 2) / maxval;
+    if (default_cells > max_cells) default_cells = max_cells;
+
+    int solid_cells = filled_cells;
+    if (solid_cells > default_cells) solid_cells = default_cells;
+    int outlined_cells = filled_cells - solid_cells;
 
     /* Draw filled cells from bottom up */
     int cx = inner_x0 + (inner_w - cell_width) / 2;
@@ -259,9 +269,15 @@ static void vm_draw(Widget w, VerticalMeterData *vm)
 
         if (cell_y0 < inner_y0) break;
 
-        if (i < filled_cells) {
+        if (i < solid_cells) {
             /* Filled cell */
             XFillRectangle(dpy, win, vm->gc_bar,
+                           cx, cell_y0,
+                           (unsigned int)cell_width,
+                           (unsigned int)cell_height);
+        } else if (i < solid_cells + outlined_cells) {
+            /* Outlined cell */
+            XDrawRectangle(dpy, win, vm->gc_bar,
                            cx, cell_y0,
                            (unsigned int)cell_width,
                            (unsigned int)cell_height);
@@ -323,8 +339,21 @@ void VerticalMeterSetMaximum(Widget w, int maximum)
 
     if (maximum <= 0) maximum = 100;
     vm->maximum = maximum;
+    if (vm->default_max > vm->maximum) vm->default_max = vm->maximum;
 
     if (vm->value > vm->maximum) vm->value = vm->maximum;
+
+    vm_draw(w, vm);
+}
+
+void VerticalMeterSetDefaultMaximum(Widget w, int default_max)
+{
+    VerticalMeterData *vm = vm_get_data(w, False);
+    if (!vm) return;
+
+    if (default_max <= 0) default_max = vm->maximum;
+    if (default_max > vm->maximum) default_max = vm->maximum;
+    vm->default_max = default_max;
 
     vm_draw(w, vm);
 }

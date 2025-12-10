@@ -1,5 +1,5 @@
 CC ?= cc
-CFLAGS ?= -O2 -Wall
+CFLAGS ?= -O2 -Wall -Isrc
 
 # Where to place build artifacts
 BUILD_DIR ?= build
@@ -27,12 +27,12 @@ $(BIN_DIR):
 	@mkdir -p $@
 
 # ck-about
-$(BIN_DIR)/ck-about: src/ck-about/ck-about.c | $(BIN_DIR)
-	$(CC) $(CFLAGS) $(CDE_CFLAGS) $< -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
+$(BIN_DIR)/ck-about: src/ck-about/ck-about.c src/shared/session_utils.c src/shared/session_utils.h | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) $< src/shared/session_utils.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
 
 # ck-load
-$(BIN_DIR)/ck-load: src/ck-load/ck-load.c src/ck-load/vertical_meter.c | $(BIN_DIR)
-	$(CC) $(CFLAGS) $(CDE_CFLAGS) $^ -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
+$(BIN_DIR)/ck-load: src/ck-load/ck-load.c src/ck-load/vertical_meter.c src/ck-load/vertical_meter.h src/shared/session_utils.c src/shared/session_utils.h | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-load/ck-load.c src/ck-load/vertical_meter.c src/shared/session_utils.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
 
 # ck-mixer
 $(BIN_DIR)/ck-mixer: src/ck-mixer/ck-mixer.c | $(BIN_DIR)

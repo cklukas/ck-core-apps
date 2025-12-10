@@ -44,8 +44,8 @@ $(BIN_DIR)/ck-clock: src/ck-clock/ck-clock.c | $(BIN_DIR)
 	$(CC) $(CFLAGS) $(CDE_CFLAGS) $< -o $@ $(CDE_LDFLAGS) -lX11 -lcairo -lXm -lXt -lm
 
 # ck-calc
-$(BIN_DIR)/ck-calc: src/ck-calc/ck-calc.c src/ck-calc/formula_eval.c src/shared/session_utils.c src/shared/session_utils.h src/shared/about_dialog.c src/shared/about_dialog.h src/shared/config_utils.c src/shared/config_utils.h src/shared/cde_palette.c src/shared/cde_palette.h | $(BIN_DIR)
-	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-calc/ck-calc.c src/ck-calc/formula_eval.c src/shared/session_utils.c src/shared/about_dialog.c src/shared/config_utils.c src/shared/cde_palette.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
+$(BIN_DIR)/ck-calc: src/ck-calc/ck-calc.c src/ck-calc/formula_eval.c src/ck-calc/calc_state.c src/ck-calc/keypad_layout.c src/ck-calc/sci_visuals.c src/ck-calc/window_metrics.c src/ck-calc/clipboard.c src/ck-calc/menu_handlers.c src/shared/session_utils.c src/shared/session_utils.h src/shared/about_dialog.c src/shared/about_dialog.h src/shared/config_utils.c src/shared/config_utils.h src/shared/cde_palette.c src/shared/cde_palette.h | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-calc/ck-calc.c src/ck-calc/formula_eval.c src/ck-calc/calc_state.c src/ck-calc/keypad_layout.c src/ck-calc/sci_visuals.c src/ck-calc/window_metrics.c src/ck-calc/clipboard.c src/ck-calc/menu_handlers.c src/shared/session_utils.c src/shared/about_dialog.c src/shared/config_utils.c src/shared/cde_palette.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
 
 clean:
 	rm -rf $(BUILD_DIR)

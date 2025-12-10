@@ -1,0 +1,46 @@
+CC ?= cc
+CFLAGS ?= -O2 -Wall
+
+# Where to place build artifacts
+BUILD_DIR ?= build
+BIN_DIR := $(BUILD_DIR)/bin
+
+# CDE include/lib paths (override on CLI if different on your system)
+CDE_PREFIX ?= /usr/local/CDE
+CDE_INC ?= $(CDE_PREFIX)/include
+CDE_LIB ?= $(CDE_PREFIX)/lib
+
+CDE_CFLAGS := -I$(CDE_INC)
+CDE_LDFLAGS := -L$(CDE_LIB)
+CDE_LIBS := -lDtSvc -lDtXinerama -lDtWidget -ltt -lXm -lXt -lSM -lICE -lXinerama -lX11
+
+PROGRAMS := $(BIN_DIR)/ck-about \
+            $(BIN_DIR)/ck-load \
+            $(BIN_DIR)/ck-mixer \
+            $(BIN_DIR)/ck-clock
+
+.PHONY: all clean
+
+all: $(PROGRAMS)
+
+$(BIN_DIR):
+	@mkdir -p $@
+
+# ck-about
+$(BIN_DIR)/ck-about: src/ck-about/ck-about.c | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) $< -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
+
+# ck-load
+$(BIN_DIR)/ck-load: src/ck-load/ck-load.c src/ck-load/vertical_meter.c | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) $^ -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
+
+# ck-mixer
+$(BIN_DIR)/ck-mixer: src/ck-mixer/ck-mixer.c | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) $< -o $@ $(CDE_LDFLAGS) $(CDE_LIBS) -lasound
+
+# ck-clock (does not depend on CDE, only Motif/X11 + cairo)
+$(BIN_DIR)/ck-clock: src/ck-clock/ck-clock.c | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) $< -o $@ $(CDE_LDFLAGS) -lX11 -lcairo -lXm -lXt -lm
+
+clean:
+	rm -rf $(BUILD_DIR)

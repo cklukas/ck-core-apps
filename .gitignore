@@ -1,0 +1,12 @@
+# Build artifacts
+build/
+bin/
+
+# Local binaries kept in source tree
+src/ck-about/ck-about
+src/ck-load/ck-load
+src/ck-mixer/ck-mixer
+src/ck-clock/ck-clock
+
+# Misc
+src/ck-clock/log.txt

@@ -47,6 +47,7 @@
 #include "../shared/session_utils.h"
 #include "../shared/about_dialog.h"
 #include "../shared/config_utils.h"
+#include "../shared/cde_palette.h"
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -82,6 +83,20 @@ typedef struct {
     char         thousands_char;
     int          mode; /* 0=basic, 1=scientific */
 
+    bool         shift_left_down;
+    bool         shift_right_down;
+    bool         second_mouse_pressed;
+    Widget       btn_second;
+    Pixel        second_shadow_top;
+    Pixel        second_shadow_bottom;
+    Boolean      second_shadow_cached;
+    short        second_shadow_thickness;
+    Boolean      second_thickness_cached;
+    Pixel        second_bg_normal;
+    Pixel        second_bg_active;
+    Boolean      second_color_cached;
+    Boolean      second_border_prev_active;
+
     /* Widgets for keyboard activation */
     Widget       btn_digits[10];
     Widget       btn_decimal;
@@ -102,13 +117,34 @@ typedef struct {
     XtIntervalId paste_flash_id;
     char         paste_flash_backup[MAX_DISPLAY_LEN];
 
+    Dimension    chrome_dy;
+    Boolean      chrome_inited;
+
+    CdePalette   palette;
+    Boolean      palette_ok;
+
 } AppState;
 
 static AppState *g_app = NULL;
 static Widget g_about_shell = NULL;
 
+static const char *SCI_LABELS[5][6] = {
+    { "(", ")", "mc",  "m+",   "m-",  "mr" },
+    { "2nd", "x^2", "x^3", "x^y",  "e^x", "10^x" },
+    { "1/x", "sqrt(x)", "3rd root(x)", "y root x", "ln", "log10" },
+    { "x!",  "sin", "cos", "tan",  "e",   "EE" },
+    { "Rand", "sinh", "cosh", "tanh", "pi",  "Rad" }
+};
+
+static const char *get_sci_label(int row, int col)
+{
+    if (row < 0 || row >= 5 || col < 0 || col >= 6) return "?";
+    return SCI_LABELS[row][col];
+}
+
 static void format_number(AppState *app, double value, char *out, size_t out_len);
 static void key_press_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont);
+static void key_release_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont);
 static void ensure_keyboard_focus(AppState *app);
 static void focus_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont);
 static void reformat_display(AppState *app);
@@ -117,18 +153,24 @@ static void clipboard_paste(AppState *app);
 static void display_button_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont);
 static void cb_display_copy(Widget w, XtPointer client_data, XtPointer call_data);
 static void cb_display_paste(Widget w, XtPointer client_data, XtPointer call_data);
+static void cb_second_toggle(Widget w, XtPointer client_data, XtPointer call_data);
+static void cb_second_arm(Widget w, XtPointer client_data, XtPointer call_data);
+static void second_button_mouse_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont);
 static void copy_flash_reset(XtPointer client_data, XtIntervalId *id);
 static void paste_flash_reset(XtPointer client_data, XtIntervalId *id);
 static void rebuild_keypad(AppState *app);
 static void set_mode(AppState *app, int mode, Boolean from_menu);
 static void cb_mode_toggle(Widget w, XtPointer client_data, XtPointer call_data);
 static void clear_button_refs(AppState *app);
+static Boolean is_second_active(const AppState *app);
+static void update_second_button_state(AppState *app);
+static void set_shift_state(AppState *app, KeySym sym, Boolean down);
 static Widget create_key_button(Widget parent, const char *name, const char *label,
                                 Widget top_widget, Boolean align_top,
                                 int col, int col_span, int col_step,
                                 XtCallbackProc cb, XtPointer data);
-static void rebuild_keypad(AppState *app);
-static void set_mode(AppState *app, int mode, Boolean from_menu);
+static void apply_wm_hints(AppState *app);
+static void lock_shell_dimensions(AppState *app);
 
 /* -------------------------------------------------------------------------
  * Helpers
@@ -569,6 +611,55 @@ static void cb_percent(Widget w, XtPointer client_data, XtPointer call_data)
     ensure_keyboard_focus(app);
 }
 
+static void cb_second_toggle(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)client_data;
+    (void)call_data;
+    AppState *app = g_app;
+    if (!app || !w) return;
+    app->second_mouse_pressed = !app->second_mouse_pressed;
+    fprintf(stderr, "[ck-calc] 2nd mouse toggle (%s) -> active=%d\n",
+            app->second_mouse_pressed ? "press" : "release",
+            is_second_active(app));
+    update_second_button_state(app);
+}
+
+static void cb_second_arm(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)client_data;
+    (void)call_data;
+    AppState *app = g_app;
+    if (!app) return;
+    if (is_second_active(app)) {
+        fprintf(stderr, "[ck-calc] 2nd arm: keeping border pressed\n");
+        update_second_button_state(app);
+    }
+}
+
+static void second_button_mouse_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont)
+{
+    (void)w;
+    (void)client_data;
+    (void)cont;
+    if (!event) return;
+    AppState *app = g_app;
+    switch (event->type) {
+        case ButtonPress:
+            fprintf(stderr, "[ck-calc] 2nd mouse down\n");
+            if (is_second_active(app)) {
+                fprintf(stderr, "[ck-calc] 2nd already active; keeping border pressed\n");
+                update_second_button_state(app);
+            }
+            break;
+        case ButtonRelease:
+            fprintf(stderr, "[ck-calc] 2nd mouse up\n");
+            break;
+        default:
+            break;
+    }
+}
+
 static void cb_operator(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
@@ -687,13 +778,16 @@ static void set_mode(AppState *app, int mode, Boolean from_menu)
 
     rebuild_keypad(app);
 
-    /* Adjust shell width roughly based on column count */
+    /* Adjust shell width; let height follow natural layout */
     int cols = (app->mode == 1) ? 10 : 4;
     Dimension desired_w = (Dimension)(cols * 60 + 40);
     XtVaSetValues(app->shell,
                   XmNwidth, desired_w,
                   XmNminWidth, (Dimension)(cols * 50),
+                  XmNmaxWidth, desired_w,
                   NULL);
+    apply_wm_hints(app);
+    lock_shell_dimensions(app);
 }
 
 static void rebuild_keypad(AppState *app)
@@ -727,12 +821,12 @@ static void rebuild_keypad(AppState *app)
     Widget row_top = NULL;
     int offset = (app->mode == 1) ? 6 : 0;
 
-    /* extra scientific dummy columns (6) */
+    /* extra scientific columns (6) */
     if (offset > 0) {
         for (int i = 0; i < offset; ++i) {
             char name[32];
             snprintf(name, sizeof(name), "sciR1C%d", i);
-            create_key_button(keypad, name, "?", row_anchor, False, i, 1, col_step, NULL, NULL);
+            create_key_button(keypad, name, get_sci_label(0, i), row_anchor, False, i, 1, col_step, NULL, NULL);
         }
     }
 
@@ -744,7 +838,7 @@ static void rebuild_keypad(AppState *app)
         for (int i = 0; i < offset; ++i) {
             char name[32];
             snprintf(name, sizeof(name), "sciR1bC%d", i);
-            create_key_button(keypad, name, "?", row_top, True, i, 1, col_step, NULL, NULL);
+            create_key_button(keypad, name, get_sci_label(0, i), row_top, True, i, 1, col_step, NULL, NULL);
         }
     }
     app->btn_ac = create_key_button(keypad, "acBtn",   "AC",   row_top, True, offset + 1, 1, col_step, cb_clear, NULL);
@@ -766,7 +860,15 @@ static void rebuild_keypad(AppState *app)
         for (int i = 0; i < offset; ++i) {
             char name[32];
             snprintf(name, sizeof(name), "sciR2C%d", i);
-            create_key_button(keypad, name, "?", row_top, True, i, 1, col_step, NULL, NULL);
+            if (i == 0) {
+                Widget sci_button = create_key_button(keypad, name, get_sci_label(1, i), row_top, True, i, 1, col_step, cb_second_toggle, NULL);
+                app->btn_second = sci_button;
+                XtAddEventHandler(sci_button, ButtonPressMask, False, second_button_mouse_handler, NULL);
+                XtAddEventHandler(sci_button, ButtonReleaseMask, False, second_button_mouse_handler, NULL);
+                XtAddCallback(sci_button, XmNarmCallback, cb_second_arm, NULL);
+            } else {
+                create_key_button(keypad, name, get_sci_label(1, i), row_top, True, i, 1, col_step, NULL, NULL);
+            }
         }
     }
     app->btn_digits[8] = create_key_button(keypad, "eightBtn", "8", row_top, True, offset + 1, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'8');
@@ -781,7 +883,7 @@ static void rebuild_keypad(AppState *app)
         for (int i = 0; i < offset; ++i) {
             char name[32];
             snprintf(name, sizeof(name), "sciR3C%d", i);
-            create_key_button(keypad, name, "?", row_top, True, i, 1, col_step, NULL, NULL);
+            create_key_button(keypad, name, get_sci_label(2, i), row_top, True, i, 1, col_step, NULL, NULL);
         }
     }
     app->btn_digits[5] = create_key_button(keypad, "fiveBtn", "5", row_top, True, offset + 1, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'5');
@@ -796,7 +898,7 @@ static void rebuild_keypad(AppState *app)
         for (int i = 0; i < offset; ++i) {
             char name[32];
             snprintf(name, sizeof(name), "sciR4C%d", i);
-            create_key_button(keypad, name, "?", row_top, True, i, 1, col_step, NULL, NULL);
+            create_key_button(keypad, name, get_sci_label(3, i), row_top, True, i, 1, col_step, NULL, NULL);
         }
     }
     app->btn_digits[2] = create_key_button(keypad, "twoBtn", "2", row_top, True, offset + 1, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'2');
@@ -812,16 +914,71 @@ static void rebuild_keypad(AppState *app)
         for (int i = 0; i < offset; ++i) {
             char name[32];
             snprintf(name, sizeof(name), "sciR5C%d", i);
-            create_key_button(keypad, name, "?", row_top, True, i, 1, col_step, NULL, NULL);
+            create_key_button(keypad, name, get_sci_label(4, i), row_top, True, i, 1, col_step, NULL, NULL);
         }
     }
     app->btn_digits[0] = create_key_button(keypad, "zeroBtn", "0", row_top, True, offset + 1, 1, col_step, cb_digit, (XtPointer)(uintptr_t)'0');
     app->btn_decimal = create_key_button(keypad, "decimalBtn", decimal_label, row_top, True, offset + 2, 1, col_step, cb_decimal, NULL);
     Widget eq_btn = create_key_button(keypad, "eqBtn", "=", row_top, True, offset + 3, 1, col_step, cb_equals, NULL);
     app->btn_eq = eq_btn;
-    XtVaSetValues(eq_btn, XmNbottomAttachment, XmATTACH_FORM, XmNbottomOffset, 6, NULL);
 
     ensure_keyboard_focus(app);
+
+    /* Apply color accents to right column using CDE select color */
+    /* Only colorize when full palette is available */
+    int set_count = cde_palette_set_count(&app->palette);
+    Boolean have_active   = (app->palette.active   >= 0 && app->palette.active   < set_count);
+    Boolean have_inactive = (app->palette.inactive >= 0 && app->palette.inactive < set_count);
+    Boolean allow_color = app->palette_ok && have_active && have_inactive;
+    if (allow_color) {
+        Pixel op_bg = 0, op_fg = 0;
+        Pixel top_bg = 0, top_fg = 0;
+
+        int active = app->palette.active;
+        int inactive = app->palette.inactive;
+        if (active >= 0 && active < app->palette.count) {
+            op_bg = app->palette.set[active].bg.pixel;
+            op_fg = app->palette.set[active].fg.pixel;
+        }
+        if (inactive >= 0 && inactive < app->palette.count) {
+            top_bg = app->palette.set[inactive].bg.pixel;
+            top_fg = app->palette.set[inactive].fg.pixel;
+        }
+
+        Widget ops[] = { app->btn_div, app->btn_mul, app->btn_minus, app->btn_plus, app->btn_eq };
+        for (size_t i = 0; i < sizeof(ops)/sizeof(ops[0]); ++i) {
+            if (ops[i]) {
+                XtVaSetValues(ops[i],
+                              XmNbackground, op_bg,
+                              XmNforeground, op_fg,
+                              NULL);
+            }
+        }
+
+        Widget accents[] = { app->btn_back, app->btn_ac, app->btn_percent };
+        for (size_t i = 0; i < sizeof(accents)/sizeof(accents[0]); ++i) {
+            if (accents[i]) {
+                XtVaSetValues(accents[i],
+                              XmNbackground, top_bg,
+                              XmNforeground, top_fg,
+                              NULL);
+            }
+        }
+    }
+
+    update_second_button_state(app);
+}
+
+static void apply_wm_hints(AppState *app)
+{
+    if (!app || !app->shell) return;
+    unsigned int decor = MWM_DECOR_BORDER | MWM_DECOR_TITLE | MWM_DECOR_MENU | MWM_DECOR_MINIMIZE;
+    unsigned int funcs = MWM_FUNC_MOVE | MWM_FUNC_CLOSE | MWM_FUNC_MINIMIZE;
+    XtVaSetValues(app->shell,
+                  XmNmwmDecorations, decor,
+                  XmNmwmFunctions,   funcs,
+                  XmNallowShellResize, False,
+                  NULL);
 }
 
 static void copy_flash_reset(XtPointer client_data, XtIntervalId *id)
@@ -852,6 +1009,33 @@ static void paste_flash_reset(XtPointer client_data, XtIntervalId *id)
     }
 }
 
+static void lock_shell_dimensions(AppState *app)
+{
+    if (!app || !app->shell || !XtIsRealized(app->shell) || !app->main_form) return;
+
+    Dimension shell_w = 0, shell_h = 0;
+    Dimension form_w = 0, form_h = 0;
+    XtVaGetValues(app->shell, XmNwidth, &shell_w, XmNheight, &shell_h, NULL);
+    XtVaGetValues(app->main_form, XmNwidth, &form_w, XmNheight, &form_h, NULL);
+
+    if (!app->chrome_inited && shell_h > form_h) {
+        app->chrome_dy = shell_h - form_h;
+        app->chrome_inited = True;
+    }
+
+    if (form_h == 0 || shell_w == 0) return;
+
+    Dimension desired_h = form_h;
+    if (app->chrome_inited) desired_h += app->chrome_dy;
+
+    XtVaSetValues(app->shell,
+                  XmNminWidth,  shell_w,
+                  XmNmaxWidth,  shell_w,
+                  XmNminHeight, desired_h,
+                  XmNmaxHeight, desired_h,
+                  NULL);
+}
+
 static void clear_button_refs(AppState *app)
 {
     if (!app) return;
@@ -866,6 +1050,98 @@ static void clear_button_refs(AppState *app)
     app->btn_sign = NULL;
     app->btn_back = NULL;
     app->btn_ac = NULL;
+    app->btn_second = NULL;
+    app->second_shadow_cached = False;
+    app->second_color_cached = False;
+    app->second_thickness_cached = False;
+    app->second_shadow_thickness = 0;
+    app->second_border_prev_active = False;
+}
+
+static Boolean is_second_active(const AppState *app)
+{
+    if (!app) return False;
+    return (app->shift_left_down || app->shift_right_down || app->second_mouse_pressed) ? True : False;
+}
+
+static void update_second_button_state(AppState *app)
+{
+    if (!app || !app->btn_second) return;
+    Boolean active = is_second_active(app);
+    if (!app->second_shadow_cached) {
+        Pixel top = 0;
+        Pixel bottom = 0;
+        short thickness = 0;
+        XtVaGetValues(app->btn_second,
+                      XmNtopShadowColor, &top,
+                      XmNbottomShadowColor, &bottom,
+                      XmNshadowThickness, &thickness,
+                      NULL);
+        app->second_shadow_top = top;
+        app->second_shadow_bottom = bottom;
+        app->second_shadow_thickness = thickness;
+        app->second_shadow_cached = True;
+        app->second_thickness_cached = True;
+    }
+    Pixel top = app->second_shadow_top;
+    Pixel bottom = app->second_shadow_bottom;
+    if (active) {
+        Pixel tmp = top;
+        top = bottom;
+        bottom = tmp;
+    }
+    if (!app->second_color_cached) {
+        Pixel base_bg = 0;
+        XtVaGetValues(app->btn_second,
+                      XmNbackground, &base_bg,
+                      NULL);
+        app->second_bg_normal = base_bg;
+        Pixel highlight = base_bg;
+        if (app->palette_ok) {
+            int idx = (app->palette.active >= 0 && app->palette.active < app->palette.count)
+                          ? app->palette.active
+                          : app->palette.inactive;
+            if (idx >= 0 && idx < app->palette.count) {
+                highlight = app->palette.set[idx].bg.pixel;
+            }
+        }
+        app->second_bg_active = highlight;
+        app->second_color_cached = True;
+    }
+    Pixel bg = active ? app->second_bg_active : app->second_bg_normal;
+    XtVaSetValues(app->btn_second,
+                  XmNshadowType, active ? XmSHADOW_IN : XmSHADOW_OUT,
+                  XmNtopShadowColor, top,
+                  XmNbottomShadowColor, bottom,
+                  XmNshadowThickness, app->second_shadow_thickness,
+                  XmNbackground, bg,
+                  NULL);
+    if (app->second_border_prev_active != active) {
+        fprintf(stderr, "[ck-calc] 2nd border %s (top=%lu bottom=%lu bg=%lu)\n",
+                active ? "pressed" : "released",
+                (unsigned long)top,
+                (unsigned long)bottom,
+                (unsigned long)bg);
+        app->second_border_prev_active = active;
+    }
+}
+
+static void set_shift_state(AppState *app, KeySym sym, Boolean down)
+{
+    if (!app) return;
+    if (sym == XK_Shift_L) {
+        app->shift_left_down = (down != False);
+    } else if (sym == XK_Shift_R) {
+        app->shift_right_down = (down != False);
+    } else {
+        return;
+    }
+    fprintf(stderr, "[ck-calc] shift %s -> active=%d (L=%d R=%d)\n",
+            down ? "down" : "up",
+            is_second_active(app),
+            app->shift_left_down,
+            app->shift_right_down);
+    update_second_button_state(app);
 }
 
 static void display_button_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont)
@@ -1257,6 +1533,14 @@ static void key_press_handler(Widget w, XtPointer client_data, XEvent *event, Bo
             (unsigned int)event->xkey.state,
             (keybuf[0] >= 32 && keybuf[0] < 127) ? keybuf[0] : ' ');
 
+    if (sym == XK_Shift_L || sym == XK_Shift_R) {
+        set_shift_state(app, sym, True);
+        fprintf(stderr, "[ck-calc] shift down (%s) code=%u state=0x%x\n",
+                (sym == XK_Shift_L) ? "left" : "right",
+                (unsigned int)kc,
+                (unsigned int)event->xkey.state);
+    }
+
     /* Explicit keypad enter handling (some layouts map to keycode 108) */
     if (sym == XK_KP_Enter || (kc_kp_enter && kc == kc_kp_enter) || kc == 108) {
         activate_button(app->btn_eq, event);
@@ -1368,6 +1652,33 @@ static void key_press_handler(Widget w, XtPointer client_data, XEvent *event, Bo
     }
 }
 
+static void key_release_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont)
+{
+    (void)w;
+    (void)client_data;
+    (void)cont;
+    if (!g_app || !event || event->type != KeyRelease) return;
+
+    char keybuf[8];
+    KeySym sym = NoSymbol;
+    XLookupString(&event->xkey, keybuf, sizeof(keybuf), &sym, NULL);
+    if (sym == NoSymbol) {
+        sym = XLookupKeysym(&event->xkey, 0);
+    }
+    if (sym == NoSymbol) {
+        sym = XLookupKeysym(&event->xkey, 1);
+    }
+
+    if (sym == XK_Shift_L || sym == XK_Shift_R) {
+        set_shift_state(g_app, sym, False);
+        KeyCode kc = event->xkey.keycode;
+        fprintf(stderr, "[ck-calc] shift up (%s) code=%u state=0x%x\n",
+                (sym == XK_Shift_L) ? "left" : "right",
+                (unsigned int)kc,
+                (unsigned int)event->xkey.state);
+    }
+}
+
 static void ensure_keyboard_focus(AppState *app)
 {
     if (!app || !app->shell) return;
@@ -1463,6 +1774,7 @@ static void build_ui(AppState *app)
     XtManageChild(app->key_focus_proxy);
     XmAddTabGroup(app->key_focus_proxy);
     XtAddEventHandler(app->key_focus_proxy, KeyPressMask, False, key_press_handler, NULL);
+    XtAddEventHandler(app->key_focus_proxy, KeyReleaseMask, False, key_release_handler, NULL);
     XtAddEventHandler(app->key_focus_proxy, FocusChangeMask, False, focus_handler, NULL);
     XtVaSetValues(app->key_focus_proxy, XmNtraversalOn, True, NULL);
 
@@ -1734,12 +2046,13 @@ int main(int argc, char *argv[])
                                   &argc, argv,
                                   NULL,
                                   XmNtitle, "Calculator",
-                                  XmNminWidth, 220,
-                                  XmNminHeight, 300,
                                   XmNkeyboardFocusPolicy, XmEXPLICIT,
                                   NULL);
 
     DtInitialize(XtDisplay(app.shell), app.shell, "CkCalc", "CkCalc");
+    Display *dpy = XtDisplay(app.shell);
+    Colormap cmap = DefaultColormapOfScreen(XtScreen(app.shell));
+    app.palette_ok = cde_palette_read(dpy, DefaultScreen(dpy), cmap, &app.palette);
 
     /* Load session data (geometry + display) */
     if (app.session_data) {
@@ -1760,6 +2073,7 @@ int main(int argc, char *argv[])
 
     build_ui(&app);
     set_mode(&app, app.mode, False);
+    apply_wm_hints(&app);
 
     if (app.session_data) {
         if (!session_apply_geometry(app.shell, app.session_data, "x", "y", "w", "h")) {
@@ -1769,13 +2083,26 @@ int main(int argc, char *argv[])
         center_shell_on_screen(app.shell);
     }
 
+    Dimension init_h = 0;
+    XtVaGetValues(app.shell, XmNheight, &init_h, NULL);
+    if (init_h < 200) {
+        XtVaSetValues(app.shell,
+                      XmNheight, (Dimension)360,
+                      XmNminHeight, (Dimension)360,
+                      NULL);
+    }
+
     XtRealizeWidget(app.shell);
+    apply_wm_hints(&app);
+    lock_shell_dimensions(&app);
 
     /* Keyboard handler for shortcuts/digits */
     XtAddEventHandler(app.shell, KeyPressMask, True, key_press_handler, NULL);
+    XtAddEventHandler(app.shell, KeyReleaseMask, True, key_release_handler, NULL);
     XtAddEventHandler(app.shell, FocusChangeMask, False, focus_handler, NULL);
     if (app.main_form) {
         XtAddEventHandler(app.main_form, KeyPressMask, True, key_press_handler, NULL);
+        XtAddEventHandler(app.main_form, KeyReleaseMask, True, key_release_handler, NULL);
         XtAddEventHandler(app.main_form, FocusChangeMask, False, focus_handler, NULL);
     }
     if (app.key_focus_proxy) {

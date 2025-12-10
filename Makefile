@@ -17,7 +17,8 @@ CDE_LIBS := -lDtSvc -lDtXinerama -lDtWidget -ltt -lXm -lXt -lSM -lICE -lXinerama
 PROGRAMS := $(BIN_DIR)/ck-about \
             $(BIN_DIR)/ck-load \
             $(BIN_DIR)/ck-mixer \
-            $(BIN_DIR)/ck-clock
+            $(BIN_DIR)/ck-clock \
+            $(BIN_DIR)/ck-calc
 
 .PHONY: all clean
 
@@ -41,6 +42,10 @@ $(BIN_DIR)/ck-mixer: src/ck-mixer/ck-mixer.c src/shared/session_utils.c src/shar
 # ck-clock (does not depend on CDE, only Motif/X11 + cairo)
 $(BIN_DIR)/ck-clock: src/ck-clock/ck-clock.c | $(BIN_DIR)
 	$(CC) $(CFLAGS) $(CDE_CFLAGS) $< -o $@ $(CDE_LDFLAGS) -lX11 -lcairo -lXm -lXt -lm
+
+# ck-calc
+$(BIN_DIR)/ck-calc: src/ck-calc/ck-calc.c src/shared/session_utils.c src/shared/session_utils.h src/shared/about_dialog.c src/shared/about_dialog.h src/shared/config_utils.c src/shared/config_utils.h | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-calc/ck-calc.c src/shared/session_utils.c src/shared/about_dialog.c src/shared/config_utils.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
 
 clean:
 	rm -rf $(BUILD_DIR)

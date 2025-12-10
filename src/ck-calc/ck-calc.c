@@ -95,6 +95,8 @@ static Widget g_about_shell = NULL;
 static void format_number(AppState *app, double value, char *out, size_t out_len);
 static void key_press_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont);
 static void ensure_keyboard_focus(AppState *app);
+static void focus_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont);
+static void reformat_display(AppState *app);
 
 /* -------------------------------------------------------------------------
  * Helpers
@@ -415,7 +417,8 @@ static void cb_digit(Widget w, XtPointer client_data, XtPointer call_data)
         app->display[len + 1] = '\0';
     }
 
-    update_display(app);
+    reformat_display(app);
+    ensure_keyboard_focus(app);
 }
 
 static void cb_decimal(Widget w, XtPointer client_data, XtPointer call_data)
@@ -430,7 +433,8 @@ static void cb_decimal(Widget w, XtPointer client_data, XtPointer call_data)
     if (app->entering_new) {
         snprintf(app->display, sizeof(app->display), "0%c", app->decimal_char);
         app->entering_new = false;
-        update_display(app);
+        reformat_display(app);
+        ensure_keyboard_focus(app);
         return;
     }
 
@@ -439,9 +443,10 @@ static void cb_decimal(Widget w, XtPointer client_data, XtPointer call_data)
         if (len + 1 < sizeof(app->display)) {
             app->display[len] = app->decimal_char;
             app->display[len + 1] = '\0';
-            update_display(app);
+            reformat_display(app);
         }
     }
+    ensure_keyboard_focus(app);
 }
 
 static void cb_backspace(Widget w, XtPointer client_data, XtPointer call_data)
@@ -462,8 +467,9 @@ static void cb_backspace(Widget w, XtPointer client_data, XtPointer call_data)
         app->entering_new = true;
     } else {
         app->display[len - 1] = '\0';
-        update_display(app);
+        reformat_display(app);
     }
+    ensure_keyboard_focus(app);
 }
 
 static void cb_clear(Widget w, XtPointer client_data, XtPointer call_data)
@@ -473,6 +479,7 @@ static void cb_clear(Widget w, XtPointer client_data, XtPointer call_data)
     (void)call_data;
     AppState *app = g_app;
     reset_state(app);
+    ensure_keyboard_focus(app);
 }
 
 static void cb_toggle_sign(Widget w, XtPointer client_data, XtPointer call_data)
@@ -501,6 +508,7 @@ static void cb_toggle_sign(Widget w, XtPointer client_data, XtPointer call_data)
         }
     }
     update_display(app);
+    ensure_keyboard_focus(app);
 }
 
 static void cb_percent(Widget w, XtPointer client_data, XtPointer call_data)
@@ -524,6 +532,7 @@ static void cb_percent(Widget w, XtPointer client_data, XtPointer call_data)
     set_display_from_double(app, value);
     app->entering_new = true;
     app->last_op = 0;
+    ensure_keyboard_focus(app);
 }
 
 static void cb_operator(Widget w, XtPointer client_data, XtPointer call_data)
@@ -553,6 +562,7 @@ static void cb_operator(Widget w, XtPointer client_data, XtPointer call_data)
     app->pending_op = op;
     app->entering_new = true;
     app->last_op = 0;
+    ensure_keyboard_focus(app);
 }
 
 static void cb_equals(Widget w, XtPointer client_data, XtPointer call_data)
@@ -593,14 +603,31 @@ static void cb_equals(Widget w, XtPointer client_data, XtPointer call_data)
     set_display_from_double(app, result);
     app->pending_op = 0;
     app->entering_new = true;
+    ensure_keyboard_focus(app);
 }
 
 static void reformat_display(AppState *app)
 {
     if (!app || app->error_state) return;
+
+    size_t len = strlen(app->display);
+    if (len > 0 && app->display[len - 1] == app->decimal_char) {
+        double val = current_input(app);
+        char tmp[MAX_DISPLAY_LEN];
+        format_number(app, val, tmp, sizeof(tmp));
+        size_t used = strlen(tmp);
+        if (used + 1 < sizeof(app->display)) {
+            memcpy(app->display, tmp, used);
+            app->display[used] = app->decimal_char;
+            app->display[used + 1] = '\0';
+            update_display(app);
+        }
+        return;
+    }
+
     double val = current_input(app);
     set_display_from_double(app, val);
-    app->entering_new = true;
+    app->entering_new = false;
 }
 
 static void cb_toggle_thousands(Widget w, XtPointer client_data, XtPointer call_data)
@@ -617,6 +644,7 @@ static void cb_toggle_thousands(Widget w, XtPointer client_data, XtPointer call_
         session_data_set_int(app->session_data, "show_thousands", app->show_thousands ? 1 : 0);
     }
     reformat_display(app);
+    ensure_keyboard_focus(app);
 }
 
 static void cb_menu_new(Widget w, XtPointer client_data, XtPointer call_data)
@@ -927,6 +955,17 @@ static void ensure_keyboard_focus(AppState *app)
     }
 }
 
+static void focus_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont)
+{
+    (void)w;
+    (void)client_data;
+    (void)cont;
+    if (!event) return;
+    if (event->type == FocusIn) {
+        ensure_keyboard_focus(g_app);
+    }
+}
+
 /* -------------------------------------------------------------------------
  * UI helpers
  * ------------------------------------------------------------------------- */
@@ -994,6 +1033,7 @@ static void build_ui(AppState *app)
     XtManageChild(app->key_focus_proxy);
     XmAddTabGroup(app->key_focus_proxy);
     XtAddEventHandler(app->key_focus_proxy, KeyPressMask, False, key_press_handler, NULL);
+    XtAddEventHandler(app->key_focus_proxy, FocusChangeMask, False, focus_handler, NULL);
     XtVaSetValues(app->key_focus_proxy, XmNtraversalOn, True, NULL);
 
     /* Menubar (flush to edges) */
@@ -1243,8 +1283,10 @@ int main(int argc, char *argv[])
 
     /* Keyboard handler for shortcuts/digits */
     XtAddEventHandler(app.shell, KeyPressMask, True, key_press_handler, NULL);
+    XtAddEventHandler(app.shell, FocusChangeMask, False, focus_handler, NULL);
     if (app.main_form) {
         XtAddEventHandler(app.main_form, KeyPressMask, True, key_press_handler, NULL);
+        XtAddEventHandler(app.main_form, FocusChangeMask, False, focus_handler, NULL);
     }
     if (app.key_focus_proxy) {
         XtSetKeyboardFocus(app.shell, app.key_focus_proxy);

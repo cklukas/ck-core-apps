@@ -29,14 +29,21 @@
 #include <Xm/Scale.h>
 #include <Xm/ToggleB.h>
 #include <Xm/PushB.h>
+#include <Xm/CascadeB.h>
+#include <Xm/Notebook.h>
+#include <Xm/DialogS.h>
 #include <Xm/ComboBox.h>      /* If not available on your system, we can switch to OptionMenu later */
 #include <Xm/SeparatoG.h>
 #include <Xm/Protocols.h>
 #include <X11/Xlib.h>
 #include <Dt/Session.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 #include <alsa/asoundlib.h>
 #include "../shared/session_utils.h"
+#include "../shared/config_utils.h"
+#include "../shared/about_dialog.h"
 
 /* -------------------------------------------------------------------------
  * Types
@@ -97,6 +104,11 @@ typedef struct AppState {
 
     /* Area that holds all control columns */
     Widget           controls_container;      /* e.g. a horizontal RowColumn */
+    Widget           top_bar_form;
+    Widget           top_separator;
+    Widget           menubar;
+    Widget           view_toggle;
+    Widget           view_menu_pane;
 
     /* Status bar (optional) */
     Widget           status_label;
@@ -116,6 +128,13 @@ typedef struct AppState {
     /* Session handling */
     SessionData     *session_data;
     char             exec_path[PATH_MAX];
+    bool             show_device_combo;
+
+    /* Filters */
+    char           **filter_names;
+    int             *filter_visible;
+    Widget          *filter_menu_items;
+    size_t           filter_count;
 } AppState;
 
 /* Simple global pointer so callbacks can see AppState without reshaping everything */
@@ -124,6 +143,7 @@ static Dimension g_mute_control_height = 0; /* cache height to keep spacer consi
 
 #define MIN_COLUMN_WIDTH 90
 #define MIN_WINDOW_HEIGHT 320
+#define VIEW_STATE_FILENAME "ck-mixer.view"
 
 /* Normalize column widths and center inner widgets after creation */
 static void normalize_column_layout(AppState *app, MixerDevice *dev)
@@ -135,6 +155,7 @@ static void normalize_column_layout(AppState *app, MixerDevice *dev)
     /* First pass: compute needed width per column based on text + mute + slider */
     for (size_t i = 0; i < dev->num_controls; ++i) {
         MixerControl *ctrl = &dev->controls[i];
+        if (!ctrl->column_form) continue;
         Dimension label_w = 0, value_w = 0, mute_w = 0, scale_w = 24;
 
         XtVaGetValues(ctrl->label_widget, XmNwidth, &label_w, NULL);
@@ -159,6 +180,7 @@ static void normalize_column_layout(AppState *app, MixerDevice *dev)
     /* Second pass: enforce width and center slider/mute widgets */
     for (size_t i = 0; i < dev->num_controls; ++i) {
         MixerControl *ctrl = &dev->controls[i];
+        if (!ctrl->column_form) continue;
         XtVaSetValues(ctrl->column_form, XmNwidth, max_w, NULL);
 
         Dimension scale_w = 0;
@@ -187,11 +209,16 @@ static void normalize_column_layout(AppState *app, MixerDevice *dev)
         }
     }
 
-    /* Ask container/shell to widen to fit all columns */
-    if (max_w > 0 && dev->num_controls > 0) {
-        Dimension total_width = (Dimension)(dev->num_controls * max_w);
+    /* Ask container/shell to widen to fit all visible columns */
+    size_t visible = 0;
+    for (size_t i = 0; i < dev->num_controls; ++i) {
+        if (dev->controls[i].column_form) visible++;
+    }
+
+    if (max_w > 0 && visible > 0) {
+        Dimension total_width = (Dimension)(visible * max_w);
         /* add spacing (6 between columns) and margins (approx) */
-        total_width += (Dimension)((dev->num_controls - 1) * 6 + 16);
+        total_width += (Dimension)((visible - 1) * 6 + 16);
 
         XtVaSetValues(app->controls_container, XmNwidth, total_width, NULL);
 
@@ -230,6 +257,17 @@ static void ui_build_device_list(AppState *app);
 static void ui_select_initial_device(AppState *app);
 static void ui_rebuild_controls_for_current_device(AppState *app);
 static void ui_register_wm_protocols(AppState *app);
+static void update_device_combo_visibility(AppState *app, Boolean visible);
+static void view_toggle_cb(Widget w, XtPointer client_data, XtPointer call_data);
+static void menu_close_cb(Widget w, XtPointer client_data, XtPointer call_data);
+static int  filter_find_or_add(AppState *app, const char *name);
+static void filter_toggle_cb(Widget w, XtPointer client_data, XtPointer call_data);
+static Boolean filter_is_visible(AppState *app, const char *name);
+static void filter_make_key(const char *name, char *buf, size_t len);
+static void show_about_dialog(AppState *app);
+static void about_dialog_close_cb(Widget w, XtPointer client_data, XtPointer call_data);
+static void about_dialog_destroy_cb(Widget w, XtPointer client_data, XtPointer call_data);
+static void about_menu_cb(Widget w, XtPointer client_data, XtPointer call_data);
 
 /* Callbacks */
 static void cb_device_selection(Widget w, XtPointer client_data, XtPointer call_data);
@@ -248,6 +286,8 @@ static MixerDevice *app_get_current_device(AppState *app);
 static int  volume_to_percent(const MixerControl *ctrl, long v);
 static long percent_to_volume(const MixerControl *ctrl, int percent);
 static void init_exec_path(AppState *app, const char *argv0);
+static void load_view_state(AppState *app);
+static void save_view_state(const AppState *app);
 
 /* -------------------------------------------------------------------------
  * main
@@ -264,6 +304,7 @@ int main(int argc, char **argv)
     app.session_data = session_data_create(session_id);
     free(session_id);
     init_exec_path(&app, argv[0]);
+    load_view_state(&app);
 
     /* Enumerate mixer devices via ALSA */
     if (alsa_enumerate_devices(&app) <= 0) {
@@ -309,6 +350,11 @@ static void app_init_state(AppState *app)
     app->mixer_input_ids = NULL;
     app->mixer_input_count = 0;
     app->updating_from_alsa = false;
+    app->show_device_combo = true;
+    app->filter_names = NULL;
+    app->filter_visible = NULL;
+    app->filter_menu_items = NULL;
+    app->filter_count = 0;
 }
 
 static void init_exec_path(AppState *app, const char *argv0)
@@ -349,6 +395,18 @@ static void init_exec_path(AppState *app, const char *argv0)
         strncpy(app->exec_path, argv0, sizeof(app->exec_path) - 1);
         app->exec_path[sizeof(app->exec_path) - 1] = '\0';
     }
+}
+static void load_view_state(AppState *app)
+{
+    if (!app) return;
+    int val = config_read_int_map(VIEW_STATE_FILENAME, "show_device_combo", 1);
+    app->show_device_combo = (val != 0);
+}
+
+static void save_view_state(const AppState *app)
+{
+    if (!app) return;
+    config_write_int_map(VIEW_STATE_FILENAME, "show_device_combo", app->show_device_combo ? 1 : 0);
 }
 
 /* No config file needed; session data holds geometry and last device index */
@@ -688,6 +746,10 @@ static void ui_create_main_window(AppState *app, int *argc, char **argv)
     /* Restore geometry from session, if available */
     if (app->session_data && session_load(app->top_level_shell, app->session_data)) {
         session_apply_geometry(app->top_level_shell, app->session_data, "x", "y", "w", "h");
+        if (session_data_has(app->session_data, "show_device_combo")) {
+            int saved_show = session_data_get_int(app->session_data, "show_device_combo", app->show_device_combo ? 1 : 0);
+            app->show_device_combo = (saved_show != 0);
+        }
     }
 
     app->main_form = XtVaCreateManagedWidget(
@@ -699,11 +761,96 @@ static void ui_create_main_window(AppState *app, int *argc, char **argv)
 
     /* Top part: device selection + "use as default" checkbox + separator */
 
-    /* Device combo (left, top) */
+    /* Menubar with View menu */
+    Widget menubar = XmCreateMenuBar(app->main_form, "menubar", NULL, 0);
+    XtManageChild(menubar);
+    XtVaSetValues(menubar,
+                  XmNleftAttachment,   XmATTACH_FORM,
+                  XmNrightAttachment,  XmATTACH_FORM,
+                  XmNtopAttachment,    XmATTACH_FORM,
+                  NULL);
+    app->menubar = menubar;
+
+    Widget window_pane = XmCreatePulldownMenu(menubar, "windowMenu", NULL, 0);
+    Widget window_cascade = XtVaCreateManagedWidget(
+        "windowCascade",
+        xmCascadeButtonWidgetClass, menubar,
+        XmNlabelString, XmStringCreateLocalized("Window"),
+        XmNmnemonic, 'W',
+        XmNsubMenuId, window_pane,
+        NULL
+    );
+    (void)window_cascade;
+
+    Widget close_item = XtVaCreateManagedWidget(
+        "closeItem",
+        xmPushButtonWidgetClass, window_pane,
+        XmNlabelString,   XmStringCreateLocalized("Close"),
+        XmNaccelerator,   "Alt<Key>F4",
+        XmNacceleratorText, XmStringCreateLocalized("Alt+F4"),
+        NULL
+    );
+    XtAddCallback(close_item, XmNactivateCallback, menu_close_cb, (XtPointer)app);
+
+    Widget view_pane = XmCreatePulldownMenu(menubar, "viewMenu", NULL, 0);
+    Widget view_cascade = XtVaCreateManagedWidget(
+        "viewCascade",
+        xmCascadeButtonWidgetClass, menubar,
+        XmNlabelString, XmStringCreateLocalized("View"),
+        XmNmnemonic, 'V',
+        XmNsubMenuId, view_pane,
+        NULL
+    );
+    (void)view_cascade;
+
+    app->view_toggle = XtVaCreateManagedWidget(
+        "showDeviceToggle",
+        xmToggleButtonWidgetClass, view_pane,
+        XmNlabelString, XmStringCreateLocalized("Show device selector"),
+        XmNmnemonic, 'S',
+        XmNset, app->show_device_combo ? True : False,
+        NULL
+    );
+    app->view_menu_pane = view_pane;
+
+    /* Help menu (right aligned) */
+    Widget help_pane = XmCreatePulldownMenu(menubar, "helpMenu", NULL, 0);
+    Widget help_cascade = XtVaCreateManagedWidget(
+        "helpCascade",
+        xmCascadeButtonWidgetClass, menubar,
+        XmNlabelString, XmStringCreateLocalized("Help"),
+        XmNmnemonic, 'H',
+        XmNsubMenuId, help_pane,
+        XmNmenuHelpWidget, NULL,
+        NULL
+    );
+    /* Motif uses XmNmenuHelpWidget on the menubar to right-align */
+    XtVaSetValues(menubar, XmNmenuHelpWidget, help_cascade, NULL);
+
+    Widget about_item = XtVaCreateManagedWidget(
+        "aboutMixer",
+        xmPushButtonWidgetClass, help_pane,
+        XmNlabelString, XmStringCreateLocalized("About Mixer"),
+        NULL
+    );
+    XtAddCallback(about_item, XmNactivateCallback, about_menu_cb, (XtPointer)app);
+
+    /* Device combo inside a top bar form for easy show/hide */
+    app->top_bar_form = XtVaCreateManagedWidget(
+        "topBar",
+        xmFormWidgetClass,
+        app->main_form,
+        XmNtopAttachment,    XmATTACH_WIDGET,
+        XmNtopWidget,        menubar,
+        XmNleftAttachment,   XmATTACH_FORM,
+        XmNrightAttachment,  XmATTACH_FORM,
+        NULL
+    );
+
     app->device_combo = XtVaCreateManagedWidget(
         "deviceCombo",
         xmComboBoxWidgetClass,
-        app->main_form,
+        app->top_bar_form,
         XmNtopAttachment,    XmATTACH_FORM,
         XmNleftAttachment,   XmATTACH_FORM,
         XmNmarginWidth,      4,
@@ -713,17 +860,18 @@ static void ui_create_main_window(AppState *app, int *argc, char **argv)
         NULL
     );
 
-    /* Separator below top bar */
+    /* Separator below top bar / menubar */
     Widget sep = XtVaCreateManagedWidget(
         "topSeparator",
         xmSeparatorGadgetClass,
         app->main_form,
         XmNtopAttachment,    XmATTACH_WIDGET,
-        XmNtopWidget,        app->device_combo,
+        XmNtopWidget,        app->top_bar_form,
         XmNleftAttachment,   XmATTACH_FORM,
         XmNrightAttachment,  XmATTACH_FORM,
         NULL
     );
+    app->top_separator = sep;
 
     /* Controls container: tight horizontal RowColumn so columns size to content */
     app->controls_container = XtVaCreateManagedWidget(
@@ -747,6 +895,18 @@ static void ui_create_main_window(AppState *app, int *argc, char **argv)
     app->status_label = NULL;
 
     /* Device combo callbacks will be set after ui_build_device_list() */
+
+    XtAddCallback(app->view_toggle, XmNvalueChangedCallback,
+                  view_toggle_cb, (XtPointer)app);
+
+    update_device_combo_visibility(app, app->show_device_combo ? True : False);
+
+    /* Separator before filter items */
+    XtVaCreateManagedWidget(
+        "filterSeparator",
+        xmSeparatorGadgetClass, view_pane,
+        NULL
+    );
 
     ui_register_wm_protocols(app);
 }
@@ -844,6 +1004,15 @@ static void ui_rebuild_controls_for_current_device(AppState *app)
     for (size_t i = 0; i < dev->num_controls; ++i) {
         MixerControl *ctrl = &dev->controls[i];
 
+        if (!filter_is_visible(app, ctrl->name)) {
+            ctrl->column_form = NULL;
+            ctrl->label_widget = NULL;
+            ctrl->value_label_widget = NULL;
+            ctrl->scale_widget = NULL;
+            ctrl->mute_toggle_widget = NULL;
+            continue;
+        }
+
         /* Column container: Form to let the scale stretch vertically */
         Widget col = XtVaCreateManagedWidget(
             "controlColumn",
@@ -857,7 +1026,7 @@ static void ui_rebuild_controls_for_current_device(AppState *app)
         ctrl->column_form = col;
 
         /* Top: label with control name */
-        XmString s_name = XmStringCreateLocalized(ctrl->name);
+        XmString s_name = XmStringCreateLocalized((char *)ctrl->name);
         ctrl->label_widget = XtVaCreateManagedWidget(
             "controlLabel",
             xmLabelWidgetClass,
@@ -870,6 +1039,9 @@ static void ui_rebuild_controls_for_current_device(AppState *app)
             NULL
         );
         XmStringFree(s_name);
+        if (!filter_is_visible(app, ctrl->name)) {
+            continue; /* skip hidden controls */
+        }
 
         Widget mute_toggle = NULL;
         Widget bottom_anchor = NULL;
@@ -984,6 +1156,15 @@ static void cb_wm_delete(Widget w, XtPointer client_data, XtPointer call_data)
     (void)call_data;
     AppState *app = (AppState *)client_data;
     if (!app) return;
+    if (app->session_data) {
+        session_capture_geometry(app->top_level_shell, app->session_data, "x", "y", "w", "h");
+        if (app->current_device_index >= 0) {
+            session_data_set_int(app->session_data, "device_index", app->current_device_index);
+        }
+        session_data_set_int(app->session_data, "show_device_combo", app->show_device_combo ? 1 : 0);
+        session_save(app->top_level_shell, app->session_data, app->exec_path);
+    }
+    save_view_state(app);
     XtAppSetExitFlag(app->app_context);
 }
 
@@ -998,7 +1179,9 @@ static void cb_wm_save(Widget w, XtPointer client_data, XtPointer call_data)
     if (app->current_device_index >= 0) {
         session_data_set_int(app->session_data, "device_index", app->current_device_index);
     }
+    session_data_set_int(app->session_data, "show_device_combo", app->show_device_combo ? 1 : 0);
     session_save(app->top_level_shell, app->session_data, app->exec_path);
+    save_view_state(app);
 }
 
 static void cb_device_selection(Widget w, XtPointer client_data, XtPointer call_data)
@@ -1029,6 +1212,9 @@ static void cb_device_selection(Widget w, XtPointer client_data, XtPointer call_
     }
 
     app->current_device_index = new_index;
+    if (app->session_data) {
+        session_data_set_int(app->session_data, "device_index", app->current_device_index);
+    }
     MixerDevice *new_dev = app_get_current_device(app);
     if (!new_dev) return;
 
@@ -1227,4 +1413,271 @@ static long percent_to_volume(const MixerControl *ctrl, int percent)
     if (raw > max) raw = max;
 
     return raw;
+}
+static void update_device_combo_visibility(AppState *app, Boolean visible)
+{
+    if (!app) return;
+    app->show_device_combo = (visible != False);
+
+    if (app->view_toggle) {
+        XmToggleButtonSetState(app->view_toggle, visible, False);
+    }
+
+    if (app->top_bar_form) {
+        if (visible) {
+            XtManageChild(app->top_bar_form);
+        } else {
+            XtUnmanageChild(app->top_bar_form);
+        }
+    }
+
+    if (app->top_separator) {
+        Widget attach = visible ? app->top_bar_form : app->menubar;
+        XtVaSetValues(app->top_separator,
+                      XmNtopAttachment,  XmATTACH_WIDGET,
+                      XmNtopWidget,      attach,
+                      XmNtopOffset,      0,
+                      NULL);
+    }
+
+    if (app->session_data) {
+        session_data_set_int(app->session_data, "show_device_combo", app->show_device_combo ? 1 : 0);
+    }
+    /* Persist immediately so it survives non-session runs */
+    save_view_state(app);
+}
+
+static void view_toggle_cb(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)call_data;
+    AppState *app = (AppState *)client_data;
+    if (!app) return;
+    Boolean state = XmToggleButtonGetState(w);
+    update_device_combo_visibility(app, state);
+}
+
+static void menu_close_cb(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)call_data;
+    AppState *app = (AppState *)client_data;
+    if (!app) return;
+    cb_wm_delete(app->top_level_shell, (XtPointer)app, NULL);
+}
+
+static int filter_find_or_add(AppState *app, const char *name)
+{
+    if (!app || !name || !name[0]) return -1;
+    for (size_t i = 0; i < app->filter_count; ++i) {
+        if (strcmp(app->filter_names[i], name) == 0) {
+            return (int)i;
+        }
+    }
+
+    size_t new_count = app->filter_count + 1;
+    char **new_names = (char **)realloc(app->filter_names, new_count * sizeof(char *));
+    int *new_vis = (int *)realloc(app->filter_visible, new_count * sizeof(int));
+    Widget *new_items = (Widget *)realloc(app->filter_menu_items, new_count * sizeof(Widget));
+    if (!new_names || !new_vis || !new_items) {
+        free(new_names);
+        free(new_vis);
+        free(new_items);
+        return -1;
+    }
+    app->filter_names = new_names;
+    app->filter_visible = new_vis;
+    app->filter_menu_items = new_items;
+
+    app->filter_names[app->filter_count] = strdup(name);
+    char key[256];
+    filter_make_key(name, key, sizeof(key));
+    int visible = config_read_int_map(VIEW_STATE_FILENAME, key, 1);
+    app->filter_visible[app->filter_count] = visible;
+    app->filter_menu_items[app->filter_count] = NULL;
+
+    if (app->view_menu_pane) {
+        Widget item = XtVaCreateManagedWidget(
+            name,
+            xmToggleButtonWidgetClass, app->view_menu_pane,
+            XmNlabelString, XmStringCreateLocalized((char *)name),
+            XmNset, visible ? True : False,
+            NULL
+        );
+        XtAddCallback(item, XmNvalueChangedCallback, filter_toggle_cb, (XtPointer)app);
+        app->filter_menu_items[app->filter_count] = item;
+    }
+
+    app->filter_count = new_count;
+    return (int)(new_count - 1);
+}
+
+static void filter_toggle_cb(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)call_data;
+    AppState *app = (AppState *)client_data;
+    if (!app) return;
+
+    for (size_t i = 0; i < app->filter_count; ++i) {
+        if (app->filter_menu_items[i] == w) {
+            Boolean state = XmToggleButtonGetState(w);
+            app->filter_visible[i] = state ? 1 : 0;
+            char key[256];
+            filter_make_key(app->filter_names[i], key, sizeof(key));
+            config_write_int_map(VIEW_STATE_FILENAME, key, app->filter_visible[i]);
+            ui_rebuild_controls_for_current_device(app);
+            break;
+        }
+    }
+}
+
+static Boolean filter_is_visible(AppState *app, const char *name)
+{
+    if (!app || !name) return True;
+    int idx = filter_find_or_add(app, name);
+    if (idx < 0) return True;
+    return app->filter_visible[idx] ? True : False;
+}
+
+static void filter_make_key(const char *name, char *buf, size_t len)
+{
+    if (!buf || len == 0) return;
+    if (!name) name = "";
+    size_t i = 0;
+    for (; i < len - 1 && name[i]; ++i) {
+        char c = name[i];
+        if (c == ' ' || c == '\t' || c == '/') c = '_';
+        buf[i] = c;
+    }
+    buf[i] = '\0';
+}
+
+static void about_dialog_close_cb(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)call_data;
+    Widget shell = (Widget)client_data;
+    if (shell && XtIsWidget(shell)) {
+        XtDestroyWidget(shell);
+    }
+}
+
+static Widget g_about_shell = NULL;
+
+static void about_dialog_destroy_cb(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)call_data;
+    (void)client_data;
+    g_about_shell = NULL;
+}
+
+static void about_menu_cb(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)call_data;
+    AppState *app = (AppState *)client_data;
+    show_about_dialog(app);
+}
+
+static void show_about_dialog(AppState *app)
+{
+    if (!app) return;
+
+    if (g_about_shell && XtIsWidget(g_about_shell)) {
+        fprintf(stderr, "[about] reusing existing dialog\n");
+        XtPopup(g_about_shell, XtGrabNone);
+        return;
+    }
+
+    fprintf(stderr, "[about] creating about dialog (parent=%p)\n", (void *)app->top_level_shell);
+
+    Arg shell_args[8];
+    int sn = 0;
+    XtSetArg(shell_args[sn], XmNtitle, "About Mixer"); sn++;
+    /* simple dialog shell; no modal/grab attempts */
+    XtSetArg(shell_args[sn], XmNallowShellResize, True); sn++;
+    XtSetArg(shell_args[sn], XmNheight, 350); sn++; /* default height bumped */
+    XtSetArg(shell_args[sn], XmNtransientFor, app->top_level_shell); sn++;
+    g_about_shell = XmCreateDialogShell(app->top_level_shell,
+                                        "aboutMixerShell",
+                                        shell_args, sn);
+    if (!g_about_shell) {
+        fprintf(stderr, "[about] failed to create shell\n");
+        return;
+    }
+
+    fprintf(stderr, "[about] shell created %p\n", (void *)g_about_shell);
+    XtAddCallback(g_about_shell, XmNdestroyCallback, about_dialog_destroy_cb, (XtPointer)app);
+
+    Widget form = XmCreateForm(g_about_shell, "aboutForm", NULL, 0);
+    if (!form) {
+        fprintf(stderr, "[about] failed to create form\n");
+        XtDestroyWidget(g_about_shell);
+        g_about_shell = NULL;
+        return;
+    }
+    fprintf(stderr, "[about] form created %p\n", (void *)form);
+    XtManageChild(form);
+
+    Arg args[8];
+    int n = 0;
+    XtSetArg(args[n], XmNtopAttachment,    XmATTACH_FORM); n++;
+    XtSetArg(args[n], XmNleftAttachment,   XmATTACH_FORM); n++;
+    XtSetArg(args[n], XmNrightAttachment,  XmATTACH_FORM); n++;
+    XtSetArg(args[n], XmNbottomAttachment, XmATTACH_FORM); n++;
+    Widget notebook = XmCreateNotebook(form, "aboutNotebook", args, n);
+    if (!notebook) {
+        fprintf(stderr, "[about] failed to create notebook\n");
+        XtDestroyWidget(g_about_shell);
+        g_about_shell = NULL;
+        return;
+    }
+    fprintf(stderr, "[about] notebook created %p\n", (void *)notebook);
+
+    XtVaSetValues(notebook,
+                  XmNmarginWidth,  12,
+                  XmNmarginHeight, 12,
+                  NULL);
+    XtManageChild(notebook);
+
+    Widget ok = XtVaCreateManagedWidget(
+        "aboutOk",
+        xmPushButtonWidgetClass, form,
+        XmNlabelString, XmStringCreateLocalized("OK"),
+        XmNbottomAttachment, XmATTACH_FORM,
+        XmNbottomOffset,    8,
+        XmNleftAttachment,  XmATTACH_POSITION,
+        XmNrightAttachment, XmATTACH_POSITION,
+        XmNleftPosition,    40,
+        XmNrightPosition,   60,
+        NULL
+    );
+
+    XtVaSetValues(notebook,
+                  XmNbottomAttachment, XmATTACH_WIDGET,
+                  XmNbottomWidget,     ok,
+                  XmNbottomOffset,     8,
+                  NULL);
+
+    XtAddCallback(ok, XmNactivateCallback, about_dialog_close_cb, (XtPointer)g_about_shell);
+
+    fprintf(stderr, "[about] building pages\n");
+
+    about_add_standard_pages(notebook, 1,
+                             "About",
+                             "CK-Core Volume Control",
+                             "(c) 2025-2026 by Dr. C. Klukas",
+                             True);
+
+    fprintf(stderr, "[about] realizing shell\n");
+    XtRealizeWidget(g_about_shell);
+    /* WM close should destroy the dialog */
+    Atom wm_delete = XmInternAtom(XtDisplay(g_about_shell),
+                                  "WM_DELETE_WINDOW", False);
+    XmAddWMProtocolCallback(g_about_shell, wm_delete,
+                            about_dialog_close_cb, (XtPointer)g_about_shell);
+    XmActivateWMProtocol(g_about_shell, wm_delete);
+
+    fprintf(stderr, "[about] popping up dialog\n");
+    XtPopup(g_about_shell, XtGrabNone);
 }

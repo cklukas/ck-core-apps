@@ -256,6 +256,10 @@ update_meters_cb(XtPointer client_data, XtIntervalId *id)
     (void)client_data;
     (void)id;
 
+    static int last_values[NUM_METERS] = { -1, -1, -1, -1, -1, -1 };
+    static int last_load_max = -1;
+    static char last_labels[NUM_METERS][32] = {{0}};
+
     int cpu_percent;
     int ram_percent, swap_percent;
     int load1_percent, load5_percent, load15_percent;
@@ -264,30 +268,48 @@ update_meters_cb(XtPointer client_data, XtIntervalId *id)
     double load1_raw = 0.0, load5_raw = 0.0, load15_raw = 0.0;
 
     if (read_cpu_usage_percent(&cpu_percent) == 0) {
-        VerticalMeterSetValue(meters[METER_CPU], cpu_percent);
+        if (cpu_percent != last_values[METER_CPU]) {
+            VerticalMeterSetValue(meters[METER_CPU], cpu_percent);
+            last_values[METER_CPU] = cpu_percent;
+        }
         char buf[32];
         snprintf(buf, sizeof(buf), "%d%%", cpu_percent);
-        XmString s = XmStringCreateLocalized(buf);
-        XtVaSetValues(value_labels[METER_CPU], XmNlabelString, s, NULL);
-        XmStringFree(s);
+        if (strcmp(buf, last_labels[METER_CPU]) != 0) {
+            XmString s = XmStringCreateLocalized(buf);
+            XtVaSetValues(value_labels[METER_CPU], XmNlabelString, s, NULL);
+            XmStringFree(s);
+            snprintf(last_labels[METER_CPU], sizeof(last_labels[METER_CPU]), "%s", buf);
+        }
     }
 
     if (read_mem_and_swap_percent(&ram_percent, &swap_percent,
                                   &ram_used_gb, &swap_used_gb) == 0) {
-        VerticalMeterSetValue(meters[METER_RAM],  ram_percent);
-        VerticalMeterSetValue(meters[METER_SWAP], swap_percent);
+        if (ram_percent != last_values[METER_RAM]) {
+            VerticalMeterSetValue(meters[METER_RAM],  ram_percent);
+            last_values[METER_RAM] = ram_percent;
+        }
+        if (swap_percent != last_values[METER_SWAP]) {
+            VerticalMeterSetValue(meters[METER_SWAP], swap_percent);
+            last_values[METER_SWAP] = swap_percent;
+        }
 
         char buf_ram[32];
         snprintf(buf_ram, sizeof(buf_ram), "%.1f GB", ram_used_gb);
-        XmString s_ram = XmStringCreateLocalized(buf_ram);
-        XtVaSetValues(value_labels[METER_RAM], XmNlabelString, s_ram, NULL);
-        XmStringFree(s_ram);
+        if (strcmp(buf_ram, last_labels[METER_RAM]) != 0) {
+            XmString s_ram = XmStringCreateLocalized(buf_ram);
+            XtVaSetValues(value_labels[METER_RAM], XmNlabelString, s_ram, NULL);
+            XmStringFree(s_ram);
+            snprintf(last_labels[METER_RAM], sizeof(last_labels[METER_RAM]), "%s", buf_ram);
+        }
 
         char buf_swap[32];
         snprintf(buf_swap, sizeof(buf_swap), "%.1f GB", swap_used_gb);
-        XmString s_swap = XmStringCreateLocalized(buf_swap);
-        XtVaSetValues(value_labels[METER_SWAP], XmNlabelString, s_swap, NULL);
-        XmStringFree(s_swap);
+        if (strcmp(buf_swap, last_labels[METER_SWAP]) != 0) {
+            XmString s_swap = XmStringCreateLocalized(buf_swap);
+            XtVaSetValues(value_labels[METER_SWAP], XmNlabelString, s_swap, NULL);
+            XmStringFree(s_swap);
+            snprintf(last_labels[METER_SWAP], sizeof(last_labels[METER_SWAP]), "%s", buf_swap);
+        }
     }
 
     if (read_load_percent(&load1_percent, &load5_percent, &load15_percent,
@@ -298,32 +320,53 @@ update_meters_cb(XtPointer client_data, XtIntervalId *id)
         if (load5_percent > load_max) load_max = load5_percent;
         if (load15_percent > load_max) load_max = load15_percent;
 
-        VerticalMeterSetMaximum(meters[METER_LOAD1],  load_max);
-        VerticalMeterSetMaximum(meters[METER_LOAD5],  load_max);
-        VerticalMeterSetMaximum(meters[METER_LOAD15], load_max);
+        if (load_max != last_load_max) {
+            VerticalMeterSetMaximum(meters[METER_LOAD1],  load_max);
+            VerticalMeterSetMaximum(meters[METER_LOAD5],  load_max);
+            VerticalMeterSetMaximum(meters[METER_LOAD15], load_max);
+            last_load_max = load_max;
+        }
 
         VerticalMeterSetDefaultMaximum(meters[METER_LOAD1],  LOAD_PERCENT_DEFAULT_MAX);
         VerticalMeterSetDefaultMaximum(meters[METER_LOAD5],  LOAD_PERCENT_DEFAULT_MAX);
         VerticalMeterSetDefaultMaximum(meters[METER_LOAD15], LOAD_PERCENT_DEFAULT_MAX);
 
-        VerticalMeterSetValue(meters[METER_LOAD1],  load1_percent);
-        VerticalMeterSetValue(meters[METER_LOAD5],  load5_percent);
-        VerticalMeterSetValue(meters[METER_LOAD15], load15_percent);
+        if (load1_percent != last_values[METER_LOAD1]) {
+            VerticalMeterSetValue(meters[METER_LOAD1],  load1_percent);
+            last_values[METER_LOAD1] = load1_percent;
+        }
+        if (load5_percent != last_values[METER_LOAD5]) {
+            VerticalMeterSetValue(meters[METER_LOAD5],  load5_percent);
+            last_values[METER_LOAD5] = load5_percent;
+        }
+        if (load15_percent != last_values[METER_LOAD15]) {
+            VerticalMeterSetValue(meters[METER_LOAD15], load15_percent);
+            last_values[METER_LOAD15] = load15_percent;
+        }
 
         char buf1[32], buf5[32], buf15[32];
         snprintf(buf1, sizeof(buf1), "%.2f", load1_raw);
         snprintf(buf5, sizeof(buf5), "%.2f", load5_raw);
         snprintf(buf15, sizeof(buf15), "%.2f", load15_raw);
 
-        XmString s1 = XmStringCreateLocalized(buf1);
-        XmString s5 = XmStringCreateLocalized(buf5);
-        XmString s15 = XmStringCreateLocalized(buf15);
-        XtVaSetValues(value_labels[METER_LOAD1],  XmNlabelString, s1,  NULL);
-        XtVaSetValues(value_labels[METER_LOAD5],  XmNlabelString, s5,  NULL);
-        XtVaSetValues(value_labels[METER_LOAD15], XmNlabelString, s15, NULL);
-        XmStringFree(s1);
-        XmStringFree(s5);
-        XmStringFree(s15);
+        if (strcmp(buf1, last_labels[METER_LOAD1]) != 0) {
+            XmString s1 = XmStringCreateLocalized(buf1);
+            XtVaSetValues(value_labels[METER_LOAD1],  XmNlabelString, s1,  NULL);
+            XmStringFree(s1);
+            snprintf(last_labels[METER_LOAD1], sizeof(last_labels[METER_LOAD1]), "%s", buf1);
+        }
+        if (strcmp(buf5, last_labels[METER_LOAD5]) != 0) {
+            XmString s5 = XmStringCreateLocalized(buf5);
+            XtVaSetValues(value_labels[METER_LOAD5],  XmNlabelString, s5,  NULL);
+            XmStringFree(s5);
+            snprintf(last_labels[METER_LOAD5], sizeof(last_labels[METER_LOAD5]), "%s", buf5);
+        }
+        if (strcmp(buf15, last_labels[METER_LOAD15]) != 0) {
+            XmString s15 = XmStringCreateLocalized(buf15);
+            XtVaSetValues(value_labels[METER_LOAD15], XmNlabelString, s15, NULL);
+            XmStringFree(s15);
+            snprintf(last_labels[METER_LOAD15], sizeof(last_labels[METER_LOAD15]), "%s", buf15);
+        }
     }
 
     /* Re-arm timer */

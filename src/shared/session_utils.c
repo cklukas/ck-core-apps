@@ -73,6 +73,11 @@ int session_data_get_int(SessionData *data, const char *key, int default_value)
     return atoi(v);
 }
 
+int session_data_has(SessionData *data, const char *key)
+{
+    return session_data_get(data, key) != NULL;
+}
+
 void session_data_set(SessionData *data, const char *key, const char *value)
 {
     if (!data || !key) return;

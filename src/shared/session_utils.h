@@ -26,6 +26,7 @@ void session_data_free(SessionData *data);
 /* Accessors */
 const char *session_data_get(SessionData *data, const char *key);
 int session_data_get_int(SessionData *data, const char *key, int default_value);
+int session_data_has(SessionData *data, const char *key);
 void session_data_set(SessionData *data, const char *key, const char *value);
 void session_data_set_int(SessionData *data, const char *key, int value);
 

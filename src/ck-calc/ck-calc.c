@@ -49,15 +49,16 @@
 #include "../shared/about_dialog.h"
 #include "../shared/config_utils.h"
 #include "../shared/cde_palette.h"
-#include "formula_eval.h"
+#include "logic/formula_eval.h"
 #include "app_state.h"
-#include "display_api.h"
+#include "logic/display_api.h"
 #include "clipboard.h"
-#include "keypad_layout.h"
-#include "sci_visuals.h"
-#include "menu_handlers.h"
-#include "window_metrics.h"
-#include "formula_mode.h"
+#include "ui/keypad_layout.h"
+#include "ui/sci_visuals.h"
+#include "ui/menu_handlers.h"
+#include "ui/window_metrics.h"
+#include "logic/formula_mode.h"
+#include "logic/input_handler.h"
 
 #ifndef VIEW_STATE_FILENAME
 #define VIEW_STATE_FILENAME "ck-calc.view"
@@ -421,31 +422,6 @@ static void format_number(AppState *app, double value, char *out, size_t out_len
     out[pos] = '\0';
 }
 
-static bool apply_operation(AppState *app, char op, double rhs, double *out_value)
-{
-    if (!app || !out_value) return false;
-    double lhs = app->calc_state.stored_value;
-    double result = lhs;
-
-    switch (op) {
-        case '+': result = lhs + rhs; break;
-        case '-': result = lhs - rhs; break;
-        case '*': result = lhs * rhs; break;
-        case '/':
-            if (rhs == 0.0) {
-                set_error(app);
-                return false;
-            }
-            result = lhs / rhs;
-            break;
-        default:
-            return false;
-    }
-
-    *out_value = result;
-    return true;
-}
-
 /* -------------------------------------------------------------------------
  * Callbacks
  * ------------------------------------------------------------------------- */
@@ -456,39 +432,8 @@ static void cb_digit(Widget w, XtPointer client_data, XtPointer call_data)
     (void)call_data;
     AppState *app = g_app;
     if (!app) return;
-    if (app->mode == 1) {
-        if (app->calc_state.error_state) reset_state(app);
-        formula_mode_prepare_for_edit(app);
-        char digit = (char)(uintptr_t)client_data;
-        if (formula_append_char(&app->formula_ctx, digit)) {
-            formula_mode_update_display(app);
-        }
-        ensure_keyboard_focus(app);
-        return;
-    }
-    if (app->calc_state.error_state) reset_state(app);
-
     char digit = (char)(uintptr_t)client_data;
-    size_t len = strlen(app->display);
-
-    if (app->calc_state.entering_new) {
-        if (app->calc_state.pending_op == 0) {
-            app->calc_state.has_pending_value = false;
-            app->calc_state.last_op = 0;
-        }
-        app->display[0] = digit;
-        app->display[1] = '\0';
-        app->calc_state.entering_new = false;
-    } else if (len == 1 && app->display[0] == '0') {
-        app->display[0] = digit;
-        app->display[1] = '\0';
-    } else if (len + 1 < sizeof(app->display)) {
-        app->display[len] = digit;
-        app->display[len + 1] = '\0';
-    }
-
-    reformat_display(app);
-    ensure_keyboard_focus(app);
+    input_handler_handle_digit(app, digit);
 }
 
 void ck_calc_cb_digit(Widget w, XtPointer client_data, XtPointer call_data)
@@ -503,34 +448,7 @@ static void cb_decimal(Widget w, XtPointer client_data, XtPointer call_data)
     (void)call_data;
     AppState *app = g_app;
     if (!app) return;
-    if (app->mode == 1) {
-        if (app->calc_state.error_state) reset_state(app);
-        formula_mode_prepare_for_edit(app);
-        if (formula_append_char(&app->formula_ctx, '.')) {
-            formula_mode_update_display(app);
-        }
-        ensure_keyboard_focus(app);
-        return;
-    }
-    if (app->calc_state.error_state) reset_state(app);
-
-    if (app->calc_state.entering_new) {
-        snprintf(app->display, sizeof(app->display), "0%c", app->decimal_char);
-        app->calc_state.entering_new = false;
-        reformat_display(app);
-        ensure_keyboard_focus(app);
-        return;
-    }
-
-    if (!strchr(app->display, app->decimal_char)) {
-        size_t len = strlen(app->display);
-        if (len + 1 < sizeof(app->display)) {
-            app->display[len] = app->decimal_char;
-            app->display[len + 1] = '\0';
-            reformat_display(app);
-        }
-    }
-    ensure_keyboard_focus(app);
+    input_handler_handle_decimal(app);
 }
 
 void ck_calc_cb_decimal(Widget w, XtPointer client_data, XtPointer call_data)
@@ -545,31 +463,7 @@ static void cb_backspace(Widget w, XtPointer client_data, XtPointer call_data)
     (void)call_data;
     AppState *app = g_app;
     if (!app) return;
-    if (app->mode == 1) {
-        if (app->calc_state.error_state) {
-            reset_state(app);
-            return;
-        }
-        formula_mode_prepare_for_edit(app);
-        formula_backspace(&app->formula_ctx);
-        formula_mode_update_display(app);
-        ensure_keyboard_focus(app);
-        return;
-    }
-    if (app->calc_state.error_state) {
-        reset_state(app);
-        return;
-    }
-
-    size_t len = strlen(app->display);
-    if (len <= 1 || (len == 2 && app->display[0] == '-')) {
-        set_display(app, "0");
-        app->calc_state.entering_new = true;
-    } else {
-        app->display[len - 1] = '\0';
-        reformat_display(app);
-    }
-    ensure_keyboard_focus(app);
+    input_handler_handle_backspace(app);
 }
 
 void ck_calc_cb_backspace(Widget w, XtPointer client_data, XtPointer call_data)
@@ -583,8 +477,8 @@ static void cb_clear(Widget w, XtPointer client_data, XtPointer call_data)
     (void)client_data;
     (void)call_data;
     AppState *app = g_app;
-    reset_state(app);
-    ensure_keyboard_focus(app);
+    if (!app) return;
+    input_handler_handle_clear(app);
 }
 
 void ck_calc_cb_clear(Widget w, XtPointer client_data, XtPointer call_data)
@@ -599,30 +493,7 @@ static void cb_toggle_sign(Widget w, XtPointer client_data, XtPointer call_data)
     (void)call_data;
     AppState *app = g_app;
     if (!app) return;
-    if (app->mode == 1) {
-        ensure_keyboard_focus(app);
-        return;
-    }
-    if (app->calc_state.error_state) {
-        reset_state(app);
-        return;
-    }
-
-    if (strcmp(app->display, "0") == 0) {
-        return;
-    }
-
-    if (app->display[0] == '-') {
-        memmove(app->display, app->display + 1, strlen(app->display));
-    } else {
-        size_t len = strlen(app->display);
-        if (len + 1 < sizeof(app->display)) {
-            memmove(app->display + 1, app->display, len + 1);
-            app->display[0] = '-';
-        }
-    }
-    update_display(app);
-    ensure_keyboard_focus(app);
+    input_handler_handle_toggle_sign(app);
 }
 
 void ck_calc_cb_toggle_sign(Widget w, XtPointer client_data, XtPointer call_data)
@@ -637,25 +508,7 @@ static void cb_percent(Widget w, XtPointer client_data, XtPointer call_data)
     (void)call_data;
     AppState *app = g_app;
     if (!app) return;
-    if (app->mode == 1) {
-        ensure_keyboard_focus(app);
-        return;
-    }
-    if (app->calc_state.error_state) {
-        reset_state(app);
-        return;
-    }
-
-    double value = current_input(app);
-    if (app->calc_state.has_pending_value) {
-        value = app->calc_state.stored_value * value / 100.0;
-    } else {
-        value = value / 100.0;
-    }
-    set_display_from_double(app, value);
-    app->calc_state.entering_new = true;
-    app->calc_state.last_op = 0;
-    ensure_keyboard_focus(app);
+    input_handler_handle_percent(app);
 }
 
 void ck_calc_cb_percent(Widget w, XtPointer client_data, XtPointer call_data)
@@ -669,40 +522,8 @@ static void cb_operator(Widget w, XtPointer client_data, XtPointer call_data)
     (void)call_data;
     AppState *app = g_app;
     if (!app) return;
-    if (app->mode == 1) {
-        if (app->calc_state.error_state) reset_state(app);
-        if (app->formula_showing_result) {
-            formula_mode_seed_with_last_result(app);
-        }
-        char op = (char)(uintptr_t)client_data;
-        if (formula_append_char(&app->formula_ctx, op)) {
-            formula_mode_update_display(app);
-        }
-        ensure_keyboard_focus(app);
-        return;
-    }
-    if (app->calc_state.error_state) reset_state(app);
-
     char op = (char)(uintptr_t)client_data;
-    double value = current_input(app);
-
-    if (app->calc_state.pending_op && app->calc_state.has_pending_value && !app->calc_state.entering_new) {
-        double result = 0.0;
-        if (apply_operation(app, app->calc_state.pending_op, value, &result)) {
-            app->calc_state.stored_value = result;
-            set_display_from_double(app, result);
-        } else {
-            return;
-        }
-    } else if (!app->calc_state.has_pending_value) {
-        app->calc_state.stored_value = value;
-        app->calc_state.has_pending_value = true;
-    }
-
-    app->calc_state.pending_op = op;
-    app->calc_state.entering_new = true;
-    app->calc_state.last_op = 0;
-    ensure_keyboard_focus(app);
+    input_handler_handle_operator(app, op);
 }
 
 void ck_calc_cb_operator(Widget w, XtPointer client_data, XtPointer call_data)
@@ -739,38 +560,7 @@ static void cb_equals(Widget w, XtPointer client_data, XtPointer call_data)
         ensure_keyboard_focus(app);
         return;
     }
-    if (app->calc_state.error_state) {
-        reset_state(app);
-        return;
-    }
-
-    char op = app->calc_state.pending_op;
-    double rhs = current_input(app);
-
-    if (!op) {
-        if (!app->calc_state.last_op) return;
-        op = app->calc_state.last_op;
-        rhs = app->calc_state.last_operand;
-    } else {
-        app->calc_state.last_op = op;
-        app->calc_state.last_operand = rhs;
-    }
-
-    if (!app->calc_state.has_pending_value) {
-        app->calc_state.stored_value = current_input(app);
-        app->calc_state.has_pending_value = true;
-    }
-
-    double result = 0.0;
-    if (!apply_operation(app, op, rhs, &result)) {
-        return;
-    }
-
-    app->calc_state.stored_value = result;
-    set_display_from_double(app, result);
-    app->calc_state.pending_op = 0;
-    app->calc_state.entering_new = true;
-    ensure_keyboard_focus(app);
+    input_handler_handle_equals(app);
 }
 
 void ck_calc_cb_equals(Widget w, XtPointer client_data, XtPointer call_data)

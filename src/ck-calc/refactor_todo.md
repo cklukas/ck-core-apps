@@ -17,12 +17,12 @@ Track the cleanup work that keeps `ck-calc.c` manageable. Check a box when the a
   - Rename logging helpers as needed and ensure `set_mode` calls into the new module to resize/reapply constraints.
   - Make sure widget measurement code still updates `app->chrome_dy` from the UI when the shell realizes.
 
-- [ ] **Menu/session callbacks**
+- [x] **Menu/session callbacks**
   - Move `cb_toggle_thousands`, `cb_menu_*`, `capture_and_save_session`, `about_*`, and related dialog setup into `menu_handlers.c`.
   - Export setup/teardown functions so `ck-calc.c` simply registers the callbacks instead of defining them inline.
   - Verify shared helpers (session capture, about dialog) still operate on `AppState`.
 
-- [ ] **Calculator input logic**
+- [x] **Calculator input logic**
   - Consider moving the arithmetic button callbacks (`cb_digit`, `cb_decimal`, `cb_backspace`, `cb_toggle_sign`, `cb_percent`, `cb_operator`, `cb_equals`) into an `input_handler.c` that operates on `CalcState`/`AppState`.
   - Let `ck-calc.c` focus on wiring the callbacks to buttons while the handler routines live elsewhere and reuse the display API.
 
@@ -31,6 +31,6 @@ Track the cleanup work that keeps `ck-calc.c` manageable. Check a box when the a
   - Keep `display_api` as the single entry point for `set_display`/`set_display_from_double`, `current_input`, `ensure_keyboard_focus` so other modules do not duplicate that logic.
   - Verify any leftover inline helpers (locale init, view state, WM hints) become the owning module’s responsibility so they are neither repeated nor hidden within `ck-calc.c`.
 
-- [ ] **Clipboard utilities**
+- [x] **Clipboard utilities**
   - Move the copy/paste flash timers and clipboard helpers out of `ck-calc.c` into `clipboard.c/h` (shared across apps if needed).
   - Have `ck-calc.c` call the exposed clipboard helpers via `AppState` and remove any duplicated buffer management/code from the main UI file.

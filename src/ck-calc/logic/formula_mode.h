@@ -1,7 +1,7 @@
 #ifndef CK_CALC_FORMULA_MODE_H
 #define CK_CALC_FORMULA_MODE_H
 
-#include "app_state.h"
+#include "../app_state.h"
 
 #ifdef __cplusplus
 extern "C" {

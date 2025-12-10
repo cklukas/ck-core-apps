@@ -9,8 +9,8 @@
 
 #include "../shared/session_utils.h"
 #include "../shared/cde_palette.h"
-#include "formula_eval.h"
-#include "calc_state.h"
+#include "logic/formula_eval.h"
+#include "logic/calc_state.h"
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096

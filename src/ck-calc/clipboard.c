@@ -8,7 +8,7 @@
 #include <X11/Xlib.h>
 #include <Xm/CutPaste.h>
 
-#include "display_api.h"
+#include "logic/display_api.h"
 
 static void copy_flash_reset(XtPointer client_data, XtIntervalId *id)
 {

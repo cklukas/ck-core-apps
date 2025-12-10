@@ -15,11 +15,11 @@
 #include <Xm/ToggleB.h>
 #include <Xm/Protocols.h>
 
-#include "../shared/config_utils.h"
+#include "../../shared/config_utils.h"
 
-#include "../shared/session_utils.h"
-#include "../shared/about_dialog.h"
-#include "display_api.h"
+#include "../../shared/session_utils.h"
+#include "../../shared/about_dialog.h"
+#include "../logic/display_api.h"
 
 static Widget g_about_shell = NULL;
 

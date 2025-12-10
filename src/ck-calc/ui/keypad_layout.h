@@ -1,7 +1,7 @@
 #ifndef CK_CALC_KEYPAD_LAYOUT_H
 #define CK_CALC_KEYPAD_LAYOUT_H
 
-#include "app_state.h"
+#include "../app_state.h"
 
 #ifdef __cplusplus
 extern "C" {

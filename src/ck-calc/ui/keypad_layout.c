@@ -11,7 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../shared/cde_palette.h"
+#include "../../shared/cde_palette.h"
 #include "sci_visuals.h"
 
 static const char *SCI_LABELS[5][6] = {

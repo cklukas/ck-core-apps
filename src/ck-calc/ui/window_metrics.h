@@ -3,7 +3,7 @@
 
 #include <Xm/Xm.h>
 
-#include "app_state.h"
+#include "../app_state.h"
 
 #ifdef __cplusplus
 extern "C" {

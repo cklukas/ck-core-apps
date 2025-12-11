@@ -29,6 +29,7 @@ static void capture_and_save_session(AppState *app)
     session_data_set(app->session_data, "display", app->display);
     session_data_set_int(app->session_data, "show_thousands", app->show_thousands ? 1 : 0);
     session_data_set_int(app->session_data, "mode", app->mode);
+    session_data_set_int(app->session_data, "trig_mode", app->trig_mode);
     session_save(app->shell, app->session_data, app->exec_path);
     ck_calc_save_view_state(app);
 }

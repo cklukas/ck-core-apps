@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "trig_mode.h"
+
 typedef struct {
     char buffer[512];
     size_t len;
@@ -16,6 +18,6 @@ bool formula_is_empty(const FormulaCtx *ctx);
 bool formula_append_char(FormulaCtx *ctx, char c);
 bool formula_append_str(FormulaCtx *ctx, const char *str);
 bool formula_backspace(FormulaCtx *ctx);
-bool formula_evaluate(const FormulaCtx *ctx, double *out_value);
+bool formula_evaluate(const FormulaCtx *ctx, double *out_value, TrigMode mode);
 
 #endif /* CK_CALC_FORMULA_EVAL_H */

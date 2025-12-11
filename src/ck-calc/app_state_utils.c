@@ -26,6 +26,9 @@ void ck_calc_load_view_state(AppState *app)
     int val = config_read_int_map(VIEW_STATE_FILENAME, "show_thousands", 1);
     app->show_thousands = (val != 0);
     app->mode = config_read_int_map(VIEW_STATE_FILENAME, "mode", app->mode);
+    int trig = config_read_int_map(VIEW_STATE_FILENAME, "trig_mode", TRIG_MODE_RAD);
+    if (trig < 0 || trig >= TRIG_MODE_COUNT) trig = TRIG_MODE_RAD;
+    app->trig_mode = (TrigMode)trig;
 }
 
 void ck_calc_save_view_state(const AppState *app)
@@ -33,4 +36,5 @@ void ck_calc_save_view_state(const AppState *app)
     if (!app) return;
     config_write_int_map(VIEW_STATE_FILENAME, "show_thousands", app->show_thousands ? 1 : 0);
     config_write_int_map(VIEW_STATE_FILENAME, "mode", app->mode);
+    config_write_int_map(VIEW_STATE_FILENAME, "trig_mode", app->trig_mode);
 }

@@ -3,12 +3,14 @@
 
 #include <limits.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #include <X11/Intrinsic.h>
 #include <Xm/Xm.h>
 
 #include "../shared/session_utils.h"
 #include "../shared/cde_palette.h"
+#include "logic/trig_mode.h"
 #include "logic/formula_eval.h"
 #include "logic/calc_state.h"
 
@@ -41,6 +43,7 @@ typedef struct AppState {
     char         decimal_char;
     char         thousands_char;
     int          mode; /* 0=basic, 1=scientific */
+    TrigMode     trig_mode;
 
     bool         shift_left_down;
     bool         shift_right_down;
@@ -82,6 +85,12 @@ typedef struct AppState {
     Widget       btn_sci_sinh;
     Widget       btn_sci_cosh;
     Widget       btn_sci_tanh;
+    Widget       trig_mode_row;
+    Widget       trig_mode_labels[TRIG_MODE_COUNT];
+    Pixel        trig_dim_fg;
+    Boolean      trig_dim_fg_set;
+    size_t       last_rand_len;
+    char         last_rand_token[32];
 
     XtIntervalId copy_flash_id;
     char         copy_flash_backup[MAX_DISPLAY_LEN];

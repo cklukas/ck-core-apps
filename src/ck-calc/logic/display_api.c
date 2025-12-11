@@ -184,6 +184,8 @@ void ck_calc_reset_state(AppState *app)
     formula_clear(&app->formula_ctx);
     app->formula_showing_result = false;
     app->formula_last_result = 0.0;
+    app->last_rand_len = 0;
+    app->last_rand_token[0] = '\0';
     ck_calc_set_display(app, "0");
 }
 

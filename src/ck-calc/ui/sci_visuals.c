@@ -66,7 +66,7 @@ static void refresh_second_button_labels(AppState *app, Boolean active)
     } swaps[] = {
         { app->btn_sci_exp,  "e^x",     "y^x"     },
         { app->btn_sci_10x,  "10^x",    "2^x"     },
-        { app->btn_sci_ln,   "ln",      "log y"   },
+        { app->btn_sci_ln,   "ln",      "ln"      },
         { app->btn_sci_log10,"log10",   "log 2"   },
         { app->btn_sci_sin,  "sin",     "sin^-1"  },
         { app->btn_sci_cos,  "cos",     "cos^-1"  },

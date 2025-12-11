@@ -196,6 +196,67 @@ static void set_error(AppState *app)
     app->calc_state.last_op = 0;
     ck_calc_set_display(app, "Error");
     app->calc_state.entering_new = true;
+    app->last_rand_len = 0;
+    app->last_rand_token[0] = '\0';
+}
+
+static Pixel get_dim_foreground(AppState *app, Pixel base)
+{
+    if (!app || !app->shell) return base;
+    if (app->trig_dim_fg_set) return app->trig_dim_fg;
+    Display *dpy = XtDisplay(app->shell);
+    Colormap cmap = DefaultColormapOfScreen(XtScreen(app->shell));
+    XColor screen, exact;
+    if (XAllocNamedColor(dpy, cmap, "gray60", &screen, &exact)) {
+        app->trig_dim_fg = screen.pixel;
+    } else {
+        app->trig_dim_fg = base;
+    }
+    app->trig_dim_fg_set = True;
+    return app->trig_dim_fg;
+}
+
+static void update_trig_mode_display(AppState *app)
+{
+    if (!app) return;
+    Pixel base_fg = BlackPixelOfScreen(XtScreen(app->shell));
+    if (app->display_label) {
+        XtVaGetValues(app->display_label, XmNforeground, &base_fg, NULL);
+    }
+    Pixel dim = get_dim_foreground(app, base_fg);
+    for (int i = 0; i < TRIG_MODE_COUNT; ++i) {
+        Widget lbl = app->trig_mode_labels[i];
+        if (!lbl) continue;
+        Pixel fg = (i == app->trig_mode) ? base_fg : dim;
+        XtVaSetValues(lbl, XmNforeground, fg, NULL);
+    }
+}
+
+static void cycle_trig_mode(AppState *app)
+{
+    if (!app) return;
+    int next = ((int)app->trig_mode + 1) % TRIG_MODE_COUNT;
+    app->trig_mode = (TrigMode)next;
+    ck_calc_save_view_state(app);
+    if (app->session_data) {
+        session_data_set_int(app->session_data, "trig_mode", app->trig_mode);
+    }
+    update_trig_mode_display(app);
+}
+
+static void seed_formula_if_empty(AppState *app)
+{
+    if (!app) return;
+    if (!formula_is_empty(&app->formula_ctx)) return;
+    if (app->formula_showing_result) {
+        formula_mode_seed_with_last_result(app);
+        return;
+    }
+    double value = ck_calc_current_input(app);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.12g", value);
+    formula_append_str(&app->formula_ctx, buf);
+    app->formula_showing_result = false;
 }
 
 static bool get_current_value(AppState *app, double *out_value)
@@ -210,7 +271,7 @@ static bool get_current_value(AppState *app, double *out_value)
         }
         if (!formula_is_empty(&app->formula_ctx)) {
             double val = 0.0;
-            if (!formula_evaluate(&app->formula_ctx, &val)) {
+            if (!formula_evaluate(&app->formula_ctx, &val, app->trig_mode)) {
                 return false;
             }
             *out_value = val;
@@ -222,24 +283,42 @@ static bool get_current_value(AppState *app, double *out_value)
     return true;
 }
 
-static bool formula_append_token(AppState *app, const char *text)
+static bool append_formula_token(AppState *app, const char *text, Boolean seed_with_current)
 {
-    if (!app || !text) return false;
-    formula_mode_prepare_for_edit(app);
+    if (!app || !text || app->mode != 1) return false;
+    if (app->calc_state.error_state) {
+        ck_calc_reset_state(app);
+    }
+    if (app->formula_showing_result) {
+        formula_mode_seed_with_last_result(app);
+    } else {
+        formula_mode_prepare_for_edit(app);
+        if (seed_with_current) {
+            seed_formula_if_empty(app);
+        }
+    }
     if (!formula_append_str(&app->formula_ctx, text)) {
         formula_clear(&app->formula_ctx);
         set_error(app);
         return false;
     }
+    app->formula_showing_result = false;
     formula_mode_update_display(app);
     ck_calc_ensure_keyboard_focus(app);
     return true;
+}
+
+static bool formula_append_token(AppState *app, const char *text)
+{
+    return append_formula_token(app, text, False);
 }
 
 static void store_formula_result(AppState *app, double value)
 {
     if (!app) return;
     formula_clear(&app->formula_ctx);
+    app->last_rand_len = 0;
+    app->last_rand_token[0] = '\0';
     app->formula_last_result = value;
     app->formula_showing_result = true;
     ck_calc_set_display_from_double(app, value);
@@ -336,10 +415,47 @@ void ck_calc_cb_insert_random(Widget w, XtPointer client_data, XtPointer call_da
     (void)call_data;
     AppState *app = g_app;
     if (!app || app->mode != 1) return;
+    if (app->calc_state.error_state) {
+        ck_calc_reset_state(app);
+    }
+    formula_mode_prepare_for_edit(app);
+
+    const char *formula = formula_text(&app->formula_ctx);
+    size_t len = formula ? strlen(formula) : 0;
+    if (app->last_rand_len > 0 && len >= app->last_rand_len && formula) {
+        if (strcmp(formula + len - app->last_rand_len, app->last_rand_token) == 0) {
+            if (app->formula_ctx.len >= app->last_rand_len) {
+                app->formula_ctx.len -= app->last_rand_len;
+                app->formula_ctx.buffer[app->formula_ctx.len] = '\0';
+            }
+        }
+    }
+
     double value = (double)rand() / (double)RAND_MAX;
     char buf[32];
     snprintf(buf, sizeof(buf), "%.12g", value);
-    (void)formula_append_token(app, buf);
+    if (!formula_append_str(&app->formula_ctx, buf)) {
+        formula_clear(&app->formula_ctx);
+        app->last_rand_len = 0;
+        app->last_rand_token[0] = '\0';
+        set_error(app);
+        return;
+    }
+    app->last_rand_len = strlen(buf);
+    strncpy(app->last_rand_token, buf, sizeof(app->last_rand_token) - 1);
+    app->last_rand_token[sizeof(app->last_rand_token) - 1] = '\0';
+    formula_mode_update_display(app);
+    ck_calc_ensure_keyboard_focus(app);
+}
+
+void ck_calc_cb_toggle_trig_mode(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)client_data;
+    (void)call_data;
+    AppState *app = g_app;
+    if (!app || app->mode != 1) return;
+    cycle_trig_mode(app);
 }
 
 void ck_calc_cb_unary_math(Widget w, XtPointer client_data, XtPointer call_data)
@@ -349,6 +465,64 @@ void ck_calc_cb_unary_math(Widget w, XtPointer client_data, XtPointer call_data)
     AppState *app = g_app;
     const char *op = (const char *)client_data;
     if (!app || !op) return;
+    if (app->mode != 1) {
+        ck_calc_ensure_keyboard_focus(app);
+        return;
+    }
+
+    Boolean second = sci_visuals_is_second_active(app);
+    const char *token = NULL;
+    Boolean seed = False;
+
+    if (strcmp(op, "x!") == 0) {
+        token = "!";
+        seed = True;
+    } else if (strcmp(op, "x^2") == 0) {
+        token = "^2";
+        seed = True;
+    } else if (strcmp(op, "x^3") == 0) {
+        token = "^3";
+        seed = True;
+    } else if (strcmp(op, "x^y") == 0 || (second && strcmp(op, "e^x") == 0)) {
+        token = "^";
+        seed = True;
+    } else if (strcmp(op, "1/x") == 0) {
+        token = "^(-1)";
+        seed = True;
+    } else if (strcmp(op, "y root x") == 0) {
+        token = "^(1/";
+        seed = True;
+    } else if (strcmp(op, "sqrt(x)") == 0 || strcmp(op, "sqrt") == 0) {
+        token = second ? "asin(" : "sqrt(";
+    } else if (strcmp(op, "3rd root(x)") == 0 || strcmp(op, "3rd_root") == 0) {
+        token = second ? "acos(" : "cbrt(";
+    } else if (strcmp(op, "e^x") == 0) {
+        token = "e^";
+    } else if (strcmp(op, "10^x") == 0) {
+        token = second ? "2^" : "10^";
+    } else if (strcmp(op, "ln") == 0) {
+        token = "ln(";
+    } else if (strcmp(op, "log10") == 0) {
+        token = second ? "log2(" : "log10(";
+    } else if (strcmp(op, "sin") == 0) {
+        token = second ? "asin(" : "sin(";
+    } else if (strcmp(op, "cos") == 0) {
+        token = second ? "acos(" : "cos(";
+    } else if (strcmp(op, "tan") == 0) {
+        token = second ? "atan(" : "tan(";
+    } else if (strcmp(op, "sinh") == 0) {
+        token = second ? "asinh(" : "sinh(";
+    } else if (strcmp(op, "cosh") == 0) {
+        token = second ? "acosh(" : "cosh(";
+    } else if (strcmp(op, "tanh") == 0) {
+        token = second ? "atanh(" : "tanh(";
+    }
+
+    if (token) {
+        append_formula_token(app, token, seed);
+        return;
+    }
+
     double value = 0.0;
     if (!get_current_value(app, &value)) {
         formula_clear(&app->formula_ctx);
@@ -572,7 +746,7 @@ static void cb_equals(Widget w, XtPointer client_data, XtPointer call_data)
             return;
         }
         double result = 0.0;
-        if (formula_evaluate(&app->formula_ctx, &result)) {
+        if (formula_evaluate(&app->formula_ctx, &result, app->trig_mode)) {
             formula_clear(&app->formula_ctx);
             app->formula_last_result = result;
             app->formula_showing_result = true;
@@ -655,6 +829,14 @@ static void set_mode(AppState *app, int mode, Boolean from_menu)
     if (app->view_mode_sci_btn) {
         XtVaSetValues(app->view_mode_sci_btn, XmNset, sci_set, NULL);
     }
+    if (app->trig_mode_row) {
+        if (mode == 1) {
+            XtManageChild(app->trig_mode_row);
+        } else {
+            XtUnmanageChild(app->trig_mode_row);
+        }
+    }
+    update_trig_mode_display(app);
 
     ck_calc_save_view_state(app);
     if (app->session_data) {
@@ -1047,6 +1229,39 @@ static void build_ui(AppState *app)
     XtSetSensitive(display_label, True);
     XtAddEventHandler(display_label, ButtonPressMask, True, display_button_handler, (XtPointer)app);
 
+    /* Angle mode row (small text under the display) */
+    Widget angle_row = XmCreateRowColumn(content_form, "angleRow", NULL, 0);
+    XtVaSetValues(angle_row,
+                  XmNorientation,   XmHORIZONTAL,
+                  XmNmarginHeight,  0,
+                  XmNmarginWidth,   0,
+                  XmNspacing,       6,
+                  XmNpacking,       XmPACK_TIGHT,
+                  XmNtopAttachment, XmATTACH_WIDGET,
+                  XmNtopWidget,     display_label,
+                  XmNtopOffset,     0,
+                  XmNleftAttachment,XmATTACH_FORM,
+                  NULL);
+    XtManageChild(angle_row);
+    app->trig_mode_row = angle_row;
+
+    const char *mode_labels[TRIG_MODE_COUNT] = { "Rad", "Deg", "Grad", "Turn" };
+    for (int i = 0; i < TRIG_MODE_COUNT; ++i) {
+        Widget lbl = XtVaCreateManagedWidget(
+            "angleMode",
+            xmLabelWidgetClass, angle_row,
+            XmNlabelString, XmStringCreateLocalized((char *)mode_labels[i]),
+            XmNmarginWidth, 2,
+            XmNmarginHeight, 0,
+            NULL
+        );
+        app->trig_mode_labels[i] = lbl;
+    }
+    update_trig_mode_display(app);
+    if (app->mode != 1 && angle_row) {
+        XtUnmanageChild(angle_row);
+    }
+
     /* Context menu for display (Copy/Paste) */
     Widget menu = XmCreatePopupMenu(display_label, "displayPopup", NULL, 0);
     app->display_menu = menu;
@@ -1084,6 +1299,7 @@ int main(int argc, char *argv[])
     ck_calc_init_locale_settings(&app);
     app.show_thousands = true;
     app.mode = 0; /* basic by default */
+    app.trig_mode = TRIG_MODE_RAD;
     ck_calc_load_view_state(&app);
 
     char *session_id = session_parse_argument(&argc, argv);
@@ -1119,6 +1335,11 @@ int main(int argc, char *argv[])
             }
             if (session_data_has(app.session_data, "mode")) {
                 app.mode = session_data_get_int(app.session_data, "mode", app.mode);
+            }
+            if (session_data_has(app.session_data, "trig_mode")) {
+                int t = session_data_get_int(app.session_data, "trig_mode", app.trig_mode);
+                if (t < 0 || t >= TRIG_MODE_COUNT) t = TRIG_MODE_RAD;
+                app.trig_mode = (TrigMode)t;
             }
         }
     }

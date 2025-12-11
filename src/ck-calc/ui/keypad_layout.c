@@ -279,41 +279,65 @@ extern void ck_calc_cb_equals(Widget, XtPointer, XtPointer);
 extern void ck_calc_cb_append_str(Widget, XtPointer, XtPointer);
 extern void ck_calc_cb_insert_constant(Widget, XtPointer, XtPointer);
 extern void ck_calc_cb_insert_random(Widget, XtPointer, XtPointer);
+extern void ck_calc_cb_toggle_trig_mode(Widget, XtPointer, XtPointer);
 extern void ck_calc_cb_unary_math(Widget, XtPointer, XtPointer);
 extern void ck_calc_cb_memory_clear(Widget, XtPointer, XtPointer);
 extern void ck_calc_cb_memory_add(Widget, XtPointer, XtPointer);
 extern void ck_calc_cb_memory_subtract(Widget, XtPointer, XtPointer);
 extern void ck_calc_cb_memory_recall(Widget, XtPointer, XtPointer);
 
-static void assign_sci_action(AppState *app, Widget button, const char *label)
+static void assign_sci_action(AppState *app, Widget button, const char *name, const char *label)
 {
     (void)app;
     if (!button || !label) return;
-    if (strcmp(label, "(") == 0 || strcmp(label, ")") == 0) {
+
+    /* Prefer the button name for canonical operations (sin/cos/tan/hyperbolic mapping) */
+    const char *op = label;
+    if (name) {
+        if (strcmp(name, "sciR4C1") == 0) {
+            op = "sin";
+        } else if (strcmp(name, "sciR4C2") == 0) {
+            op = "cos";
+        } else if (strcmp(name, "sciR4C3") == 0) {
+            op = "tan";
+        } else if (strcmp(name, "sciR5C1") == 0) {
+            op = "sinh";
+        } else if (strcmp(name, "sciR5C2") == 0) {
+            op = "cosh";
+        } else if (strcmp(name, "sciR5C3") == 0) {
+            op = "tanh";
+        }
+    }
+
+    if (strcmp(op, "(") == 0 || strcmp(op, ")") == 0) {
         XtAddCallback(button, XmNactivateCallback, ck_calc_cb_append_str, (XtPointer)label);
-    } else if (strcmp(label, "EE") == 0) {
+    } else if (strcmp(op, "EE") == 0) {
         XtAddCallback(button, XmNactivateCallback, ck_calc_cb_append_str, (XtPointer)"e");
-    } else if (strcmp(label, "pi") == 0 || strcmp(label, "e") == 0) {
-        XtAddCallback(button, XmNactivateCallback, ck_calc_cb_insert_constant, (XtPointer)label);
-    } else if (strcmp(label, "Rand") == 0) {
+    } else if (strcmp(op, "pi") == 0 || strcmp(op, "e") == 0) {
+        XtAddCallback(button, XmNactivateCallback, ck_calc_cb_insert_constant, (XtPointer)op);
+    } else if (strcmp(op, "Rand") == 0) {
         XtAddCallback(button, XmNactivateCallback, ck_calc_cb_insert_random, NULL);
-    } else if (strcmp(label, "mc") == 0) {
+    } else if (strcmp(op, "mc") == 0) {
         XtAddCallback(button, XmNactivateCallback, ck_calc_cb_memory_clear, NULL);
-    } else if (strcmp(label, "m+") == 0) {
+    } else if (strcmp(op, "m+") == 0) {
         XtAddCallback(button, XmNactivateCallback, ck_calc_cb_memory_add, NULL);
-    } else if (strcmp(label, "m-") == 0) {
+    } else if (strcmp(op, "m-") == 0) {
         XtAddCallback(button, XmNactivateCallback, ck_calc_cb_memory_subtract, NULL);
-    } else if (strcmp(label, "mr") == 0) {
+    } else if (strcmp(op, "mr") == 0) {
         XtAddCallback(button, XmNactivateCallback, ck_calc_cb_memory_recall, NULL);
-    } else if (strcmp(label, "x^2") == 0 || strcmp(label, "x^3") == 0 ||
-               strcmp(label, "1/x") == 0 || strcmp(label, "sqrt(x)") == 0 ||
-               strcmp(label, "sqrt") == 0 || strcmp(label, "3rd root(x)") == 0 ||
-               strcmp(label, "3rd_root") == 0 || strcmp(label, "ln") == 0 ||
-               strcmp(label, "log10") == 0 || strcmp(label, "e^x") == 0 ||
-               strcmp(label, "10^x") == 0 || strcmp(label, "x!") == 0 ||
-               strcmp(label, "sinh") == 0 || strcmp(label, "cosh") == 0 ||
-               strcmp(label, "tanh") == 0) {
-        XtAddCallback(button, XmNactivateCallback, ck_calc_cb_unary_math, (XtPointer)label);
+    } else if (strcmp(op, "Rad") == 0) {
+        XtAddCallback(button, XmNactivateCallback, ck_calc_cb_toggle_trig_mode, NULL);
+    } else if (strcmp(op, "x^2") == 0 || strcmp(op, "x^3") == 0 ||
+               strcmp(op, "x^y") == 0 || strcmp(op, "1/x") == 0 ||
+               strcmp(op, "sqrt(x)") == 0 || strcmp(op, "sqrt") == 0 ||
+               strcmp(op, "3rd root(x)") == 0 || strcmp(op, "3rd_root") == 0 ||
+               strcmp(op, "y root x") == 0 ||
+               strcmp(op, "ln") == 0 || strcmp(op, "log10") == 0 ||
+               strcmp(op, "e^x") == 0 || strcmp(op, "10^x") == 0 ||
+               strcmp(op, "x!") == 0 ||
+               strcmp(op, "sin") == 0 || strcmp(op, "cos") == 0 || strcmp(op, "tan") == 0 ||
+               strcmp(op, "sinh") == 0 || strcmp(op, "cosh") == 0 || strcmp(op, "tanh") == 0) {
+        XtAddCallback(button, XmNactivateCallback, ck_calc_cb_unary_math, (XtPointer)op);
     }
 }
 
@@ -332,10 +356,16 @@ void ck_calc_rebuild_keypad(AppState *app)
     int col_step = 25;
     XtSetArg(pad_args[pn], XmNfractionBase, base_cols * col_step); pn++;
     Widget keypad = XmCreateForm(app->content_form, "keypadForm", pad_args, pn);
+    Widget top_anchor = app->display_label;
+    int top_offset = 8;
+    if (app->mode == 1 && app->trig_mode_row && XtIsWidget(app->trig_mode_row) && XtIsManaged(app->trig_mode_row)) {
+        top_anchor = app->trig_mode_row;
+        top_offset = 4;
+    }
     XtVaSetValues(keypad,
                   XmNtopAttachment,    XmATTACH_WIDGET,
-                  XmNtopWidget,        app->display_label,
-                  XmNtopOffset,        8,
+                  XmNtopWidget,        top_anchor,
+                  XmNtopOffset,        top_offset,
                   XmNleftAttachment,   XmATTACH_FORM,
                   XmNrightAttachment,  XmATTACH_FORM,
                   XmNbottomAttachment, XmATTACH_FORM,
@@ -360,7 +390,7 @@ void ck_calc_rebuild_keypad(AppState *app)
             Widget sci_button = create_key_button(keypad, name, label, row_anchor, False, i, 1, col_step, NULL, NULL);
             register_scientific_button(app, sci_button, sci_extra_buttons, &sci_extra_count, sci_extra_capacity, sci_extra_height, sci_extra_flushed);
             sci_visuals_register_button(app, name, sci_button);
-            assign_sci_action(app, sci_button, label);
+            assign_sci_action(app, sci_button, name, label);
         }
     }
 
@@ -376,7 +406,7 @@ void ck_calc_rebuild_keypad(AppState *app)
             Widget sci_button = create_key_button(keypad, name, label, row_top, True, i, 1, col_step, NULL, NULL);
             register_scientific_button(app, sci_button, sci_extra_buttons, &sci_extra_count, sci_extra_capacity, sci_extra_height, sci_extra_flushed);
             sci_visuals_register_button(app, name, sci_button);
-            assign_sci_action(app, sci_button, label);
+            assign_sci_action(app, sci_button, name, label);
         }
     }
     app->btn_ac = create_key_button(keypad, "acBtn",   "AC",   row_top, True, offset + 1, 1, col_step, ck_calc_cb_clear, NULL);
@@ -418,7 +448,7 @@ void ck_calc_rebuild_keypad(AppState *app)
                 XtAddEventHandler(sci_button, ButtonReleaseMask, False, sci_visuals_second_button_event, app);
                 XtAddCallback(sci_button, XmNarmCallback, sci_visuals_arm_button, app);
             }
-            assign_sci_action(app, sci_button, label);
+            assign_sci_action(app, sci_button, name, label);
         }
     }
     app->btn_digits[8] = create_key_button(keypad, "eightBtn", "8", row_top, True, offset + 1, 1, col_step, ck_calc_cb_digit, (XtPointer)(uintptr_t)'8');
@@ -437,7 +467,7 @@ void ck_calc_rebuild_keypad(AppState *app)
             Widget sci_button = create_key_button(keypad, name, label, row_top, True, i, 1, col_step, NULL, NULL);
             register_scientific_button(app, sci_button, sci_extra_buttons, &sci_extra_count, sci_extra_capacity, sci_extra_height, sci_extra_flushed);
             sci_visuals_register_button(app, name, sci_button);
-            assign_sci_action(app, sci_button, label);
+            assign_sci_action(app, sci_button, name, label);
         }
     }
     app->btn_digits[5] = create_key_button(keypad, "fiveBtn", "5", row_top, True, offset + 1, 1, col_step, ck_calc_cb_digit, (XtPointer)(uintptr_t)'5');
@@ -456,7 +486,7 @@ void ck_calc_rebuild_keypad(AppState *app)
             Widget sci_button = create_key_button(keypad, name, label, row_top, True, i, 1, col_step, NULL, NULL);
             register_scientific_button(app, sci_button, sci_extra_buttons, &sci_extra_count, sci_extra_capacity, sci_extra_height, sci_extra_flushed);
             sci_visuals_register_button(app, name, sci_button);
-            assign_sci_action(app, sci_button, label);
+            assign_sci_action(app, sci_button, name, label);
         }
     }
     app->btn_digits[2] = create_key_button(keypad, "twoBtn", "2", row_top, True, offset + 1, 1, col_step, ck_calc_cb_digit, (XtPointer)(uintptr_t)'2');
@@ -476,7 +506,7 @@ void ck_calc_rebuild_keypad(AppState *app)
             Widget sci_button = create_key_button(keypad, name, label, row_top, True, i, 1, col_step, NULL, NULL);
             register_scientific_button(app, sci_button, sci_extra_buttons, &sci_extra_count, sci_extra_capacity, sci_extra_height, sci_extra_flushed);
             sci_visuals_register_button(app, name, sci_button);
-            assign_sci_action(app, sci_button, label);
+            assign_sci_action(app, sci_button, name, label);
         }
     }
     app->btn_digits[0] = create_key_button(keypad, "zeroBtn", "0", row_top, True, offset + 1, 1, col_step, ck_calc_cb_digit, (XtPointer)(uintptr_t)'0');

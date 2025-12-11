@@ -93,6 +93,9 @@ typedef struct AppState {
 
     CdePalette   palette;
     Boolean      palette_ok;
+
+    double       memory_value;
+    bool         memory_set;
 } AppState;
 
 #endif /* CK_CALC_APP_STATE_H */

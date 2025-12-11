@@ -22,6 +22,7 @@
 #include <limits.h>
 #include <stdint.h>
 #include <locale.h>
+#include <math.h>
 #include <X11/keysym.h>
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
@@ -195,6 +196,254 @@ static void set_error(AppState *app)
     app->calc_state.last_op = 0;
     ck_calc_set_display(app, "Error");
     app->calc_state.entering_new = true;
+}
+
+static bool get_current_value(AppState *app, double *out_value)
+{
+    if (!app || !out_value) return false;
+    if (app->calc_state.error_state) return false;
+
+    if (app->mode == 1) {
+        if (app->formula_showing_result) {
+            *out_value = app->formula_last_result;
+            return true;
+        }
+        if (!formula_is_empty(&app->formula_ctx)) {
+            double val = 0.0;
+            if (!formula_evaluate(&app->formula_ctx, &val)) {
+                return false;
+            }
+            *out_value = val;
+            return true;
+        }
+    }
+
+    *out_value = ck_calc_current_input(app);
+    return true;
+}
+
+static bool formula_append_token(AppState *app, const char *text)
+{
+    if (!app || !text) return false;
+    formula_mode_prepare_for_edit(app);
+    if (!formula_append_str(&app->formula_ctx, text)) {
+        formula_clear(&app->formula_ctx);
+        set_error(app);
+        return false;
+    }
+    formula_mode_update_display(app);
+    ck_calc_ensure_keyboard_focus(app);
+    return true;
+}
+
+static void store_formula_result(AppState *app, double value)
+{
+    if (!app) return;
+    formula_clear(&app->formula_ctx);
+    app->formula_last_result = value;
+    app->formula_showing_result = true;
+    ck_calc_set_display_from_double(app, value);
+    ck_calc_ensure_keyboard_focus(app);
+}
+
+static bool sci_compute_unary(const char *op, double input, double *out)
+{
+    if (!op || !out) return false;
+    double result = 0.0;
+    if (strcmp(op, "1/x") == 0) {
+        if (input == 0.0) return false;
+        result = 1.0 / input;
+    } else if (strcmp(op, "x^2") == 0) {
+        result = input * input;
+    } else if (strcmp(op, "x^3") == 0) {
+        result = input * input * input;
+    } else if (strcmp(op, "sqrt(x)") == 0 || strcmp(op, "sqrt") == 0) {
+        if (input < 0.0) return false;
+        result = sqrt(input);
+    } else if (strcmp(op, "3rd root(x)") == 0 || strcmp(op, "3rd_root") == 0) {
+        result = cbrt(input);
+    } else if (strcmp(op, "e^x") == 0) {
+        result = exp(input);
+    } else if (strcmp(op, "10^x") == 0) {
+        result = pow(10.0, input);
+    } else if (strcmp(op, "ln") == 0) {
+        if (input <= 0.0) return false;
+        result = log(input);
+    } else if (strcmp(op, "log10") == 0) {
+        if (input <= 0.0) return false;
+        result = log10(input);
+    } else if (strcmp(op, "x!") == 0) {
+        if (input < 0.0) return false;
+        double rounded = floor(input + 0.5);
+        if (fabs(input - rounded) > 1e-9) return false;
+        if (rounded > 20.0) return false;
+        double fact = 1.0;
+        for (int i = 2; i <= (int)rounded; ++i) {
+            fact *= (double)i;
+        }
+        result = fact;
+    } else if (strcmp(op, "sinh") == 0) {
+        result = sinh(input);
+    } else if (strcmp(op, "cosh") == 0) {
+        result = cosh(input);
+    } else if (strcmp(op, "tanh") == 0) {
+        result = tanh(input);
+    } else {
+        return false;
+    }
+
+    if (!isfinite(result)) {
+        return false;
+    }
+    *out = result;
+    return true;
+}
+
+void ck_calc_cb_append_str(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)call_data;
+    AppState *app = g_app;
+    const char *text = (const char *)client_data;
+    if (!app || !text || app->mode != 1) return;
+    (void)formula_append_token(app, text);
+}
+
+void ck_calc_cb_insert_constant(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)call_data;
+    AppState *app = g_app;
+    const char *name = (const char *)client_data;
+    if (!app || !name || app->mode != 1) return;
+    double value = 0.0;
+    if (strcmp(name, "pi") == 0) {
+        value = 3.14159265358979323846;
+    } else if (strcmp(name, "e") == 0) {
+        value = 2.71828182845904523536;
+    } else {
+        return;
+    }
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.12g", value);
+    (void)formula_append_token(app, buf);
+}
+
+void ck_calc_cb_insert_random(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)client_data;
+    (void)call_data;
+    AppState *app = g_app;
+    if (!app || app->mode != 1) return;
+    double value = (double)rand() / (double)RAND_MAX;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.12g", value);
+    (void)formula_append_token(app, buf);
+}
+
+void ck_calc_cb_unary_math(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)call_data;
+    AppState *app = g_app;
+    const char *op = (const char *)client_data;
+    if (!app || !op) return;
+    double value = 0.0;
+    if (!get_current_value(app, &value)) {
+        formula_clear(&app->formula_ctx);
+        set_error(app);
+        return;
+    }
+    double result = 0.0;
+    if (!sci_compute_unary(op, value, &result)) {
+        formula_clear(&app->formula_ctx);
+        set_error(app);
+        return;
+    }
+    if (app->mode == 1) {
+        store_formula_result(app, result);
+    } else {
+        ck_calc_set_display_from_double(app, result);
+        app->calc_state.entering_new = true;
+        ck_calc_ensure_keyboard_focus(app);
+    }
+}
+
+void ck_calc_cb_memory_clear(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)client_data;
+    (void)call_data;
+    AppState *app = g_app;
+    if (!app) return;
+    app->memory_value = 0.0;
+    app->memory_set = false;
+    ck_calc_ensure_keyboard_focus(app);
+}
+
+void ck_calc_cb_memory_add(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)client_data;
+    (void)call_data;
+    AppState *app = g_app;
+    if (!app) return;
+    double value = 0.0;
+    if (!get_current_value(app, &value)) {
+        formula_clear(&app->formula_ctx);
+        set_error(app);
+        return;
+    }
+    if (!app->memory_set) {
+        app->memory_value = 0.0;
+        app->memory_set = true;
+    }
+    app->memory_value += value;
+    ck_calc_ensure_keyboard_focus(app);
+}
+
+void ck_calc_cb_memory_subtract(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)client_data;
+    (void)call_data;
+    AppState *app = g_app;
+    if (!app) return;
+    double value = 0.0;
+    if (!get_current_value(app, &value)) {
+        formula_clear(&app->formula_ctx);
+        set_error(app);
+        return;
+    }
+    if (!app->memory_set) {
+        app->memory_value = 0.0;
+        app->memory_set = true;
+    }
+    app->memory_value -= value;
+    ck_calc_ensure_keyboard_focus(app);
+}
+
+void ck_calc_cb_memory_recall(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)client_data;
+    (void)call_data;
+    AppState *app = g_app;
+    if (!app || !app->memory_set) return;
+    double value = app->memory_value;
+    if (app->mode == 1) {
+        formula_clear(&app->formula_ctx);
+        app->formula_showing_result = false;
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%.12g", value);
+        formula_append_str(&app->formula_ctx, buf);
+        formula_mode_update_display(app);
+    } else {
+        ck_calc_set_display_from_double(app, value);
+        app->calc_state.entering_new = true;
+    }
+    ck_calc_ensure_keyboard_focus(app);
 }
 
 /* -------------------------------------------------------------------------
@@ -695,7 +944,7 @@ static void build_ui(AppState *app)
         XmNacceleratorText,XmStringCreateLocalized("Ctrl+N"),
         NULL
     );
-    XtAddCallback(new_item, XmNactivateCallback, menu_handlers_cb_menu_new, NULL);
+    XtAddCallback(new_item, XmNactivateCallback, menu_handlers_cb_menu_new, (XtPointer)app);
 
     Widget close_item = XtVaCreateManagedWidget(
         "closeItem",
@@ -705,7 +954,7 @@ static void build_ui(AppState *app)
         XmNacceleratorText,XmStringCreateLocalized("Alt+F4"),
         NULL
     );
-    XtAddCallback(close_item, XmNactivateCallback, menu_handlers_cb_menu_close, NULL);
+    XtAddCallback(close_item, XmNactivateCallback, menu_handlers_cb_menu_close, (XtPointer)app);
 
     /* View menu */
     Widget view_pane = XmCreatePulldownMenu(menubar, "viewMenu", NULL, 0);
@@ -726,7 +975,7 @@ static void build_ui(AppState *app)
         XmNset, app->show_thousands ? True : False,
         NULL
     );
-    XtAddCallback(thousand_toggle, XmNvalueChangedCallback, menu_handlers_cb_toggle_thousands, NULL);
+    XtAddCallback(thousand_toggle, XmNvalueChangedCallback, menu_handlers_cb_toggle_thousands, (XtPointer)app);
 
     XtVaCreateManagedWidget(
         "viewSeparator",
@@ -776,7 +1025,7 @@ static void build_ui(AppState *app)
         XmNlabelString, XmStringCreateLocalized("About"),
         NULL
     );
-    XtAddCallback(about_item, XmNactivateCallback, menu_handlers_cb_about, NULL);
+    XtAddCallback(about_item, XmNactivateCallback, menu_handlers_cb_about, (XtPointer)app);
 
     /* Display label */
     Widget display_label = XtVaCreateManagedWidget(
@@ -922,8 +1171,8 @@ int main(int argc, char *argv[])
 
     Atom wm_delete = XmInternAtom(XtDisplay(app.shell), "WM_DELETE_WINDOW", False);
     Atom wm_save   = XmInternAtom(XtDisplay(app.shell), "WM_SAVE_YOURSELF", False);
-    XmAddWMProtocolCallback(app.shell, wm_delete, menu_handlers_cb_wm_delete, NULL);
-    XmAddWMProtocolCallback(app.shell, wm_save,   menu_handlers_cb_wm_save, NULL);
+    XmAddWMProtocolCallback(app.shell, wm_delete, menu_handlers_cb_wm_delete, (XtPointer)&app);
+    XmAddWMProtocolCallback(app.shell, wm_save,   menu_handlers_cb_wm_save, (XtPointer)&app);
     XmActivateWMProtocol(app.shell, wm_delete);
     XmActivateWMProtocol(app.shell, wm_save);
 

@@ -15,15 +15,12 @@
 #include <Xm/ToggleB.h>
 #include <Xm/Protocols.h>
 
-#include "../../shared/config_utils.h"
-
 #include "../../shared/session_utils.h"
 #include "../../shared/about_dialog.h"
 #include "../logic/display_api.h"
+#include "../app_state_utils.h"
 
 static Widget g_about_shell = NULL;
-
-extern void save_view_state(const AppState *app);
 
 static void capture_and_save_session(AppState *app)
 {
@@ -33,7 +30,7 @@ static void capture_and_save_session(AppState *app)
     session_data_set_int(app->session_data, "show_thousands", app->show_thousands ? 1 : 0);
     session_data_set_int(app->session_data, "mode", app->mode);
     session_save(app->shell, app->session_data, app->exec_path);
-    save_view_state(app);
+    ck_calc_save_view_state(app);
 }
 
 static void about_close_cb(Widget w, XtPointer client_data, XtPointer call_data)
@@ -137,7 +134,7 @@ void menu_handlers_cb_toggle_thousands(Widget w, XtPointer client_data, XtPointe
     if (!app) return;
     Boolean state = XmToggleButtonGetState(w);
     app->show_thousands = (state != False);
-    save_view_state(app);
+    ck_calc_save_view_state(app);
     if (app->session_data) {
         session_data_set_int(app->session_data, "show_thousands", app->show_thousands ? 1 : 0);
     }

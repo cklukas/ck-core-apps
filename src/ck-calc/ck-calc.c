@@ -47,10 +47,10 @@
 
 #include "../shared/session_utils.h"
 #include "../shared/about_dialog.h"
-#include "../shared/config_utils.h"
 #include "../shared/cde_palette.h"
-#include "logic/formula_eval.h"
 #include "app_state.h"
+#include "app_state_utils.h"
+#include "logic/formula_eval.h"
 #include "logic/display_api.h"
 #include "clipboard.h"
 #include "ui/keypad_layout.h"
@@ -60,19 +60,11 @@
 #include "logic/formula_mode.h"
 #include "logic/input_handler.h"
 
-#ifndef VIEW_STATE_FILENAME
-#define VIEW_STATE_FILENAME "ck-calc.view"
-#endif
-
-
 static AppState *g_app = NULL;
 
-static void format_number(AppState *app, double value, char *out, size_t out_len);
 static void key_press_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont);
 static void key_release_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont);
-static void ensure_keyboard_focus(AppState *app);
 static void focus_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont);
-static void reformat_display(AppState *app);
 static void display_button_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont);
 static void cb_display_copy(Widget w, XtPointer client_data, XtPointer call_data);
 static void cb_display_paste(Widget w, XtPointer client_data, XtPointer call_data);
@@ -100,7 +92,7 @@ static void cb_display_copy(Widget w, XtPointer client_data, XtPointer call_data
     (void)call_data;
     AppState *app = (AppState *)client_data;
     ck_calc_clipboard_copy(app);
-    ensure_keyboard_focus(app);
+    ck_calc_ensure_keyboard_focus(app);
 }
 
 static void cb_display_paste(Widget w, XtPointer client_data, XtPointer call_data)
@@ -109,7 +101,7 @@ static void cb_display_paste(Widget w, XtPointer client_data, XtPointer call_dat
     (void)call_data;
     AppState *app = (AppState *)client_data;
     ck_calc_clipboard_paste(app);
-    ensure_keyboard_focus(app);
+    ck_calc_ensure_keyboard_focus(app);
 }
 
 static void cb_mode_toggle(Widget w, XtPointer client_data, XtPointer call_data)
@@ -122,100 +114,6 @@ static void cb_mode_toggle(Widget w, XtPointer client_data, XtPointer call_data)
     if (!set) return;
     int mode = (int)(intptr_t)client_data;
     set_mode(app, mode, True);
-}
-
-/* -------------------------------------------------------------------------
- * Helpers
- * ------------------------------------------------------------------------- */
-
-static void update_display(AppState *app)
-{
-    if (!app || !app->display_label) return;
-    XmString xms = XmStringCreateLocalized(app->display);
-    XtVaSetValues(app->display_label,
-                  XmNlabelString, xms,
-                  NULL);
-    XmStringFree(xms);
-}
-
-static void set_display(AppState *app, const char *text)
-{
-    if (!app || !text) return;
-    strncpy(app->display, text, sizeof(app->display) - 1);
-    app->display[sizeof(app->display) - 1] = '\0';
-    update_display(app);
-}
-
-static void set_display_from_double(AppState *app, double value)
-{
-    if (!app) return;
-    format_number(app, value, app->display, sizeof(app->display));
-    update_display(app);
-}
-
-static void reset_state(AppState *app)
-{
-    if (!app) return;
-    app->calc_state.stored_value      = 0.0;
-    app->calc_state.last_operand      = 0.0;
-    app->calc_state.pending_op        = 0;
-    app->calc_state.last_op           = 0;
-    app->calc_state.has_pending_value = false;
-    app->calc_state.entering_new      = true;
-    app->calc_state.error_state       = false;
-    formula_clear(&app->formula_ctx);
-    app->formula_showing_result = false;
-    app->formula_last_result = 0.0;
-    set_display(app, "0");
-}
-
-static double current_input(AppState *app)
-{
-    if (!app) return 0.0;
-    if (app->calc_state.error_state) return 0.0;
-
-    char buf[128];
-    size_t bpos = 0;
-    for (const char *p = app->display; *p && bpos + 1 < sizeof(buf); ++p) {
-        if (app->show_thousands && *p == app->thousands_char) continue;
-        if (*p == app->decimal_char && app->decimal_char != '.') {
-            buf[bpos++] = '.';
-            continue;
-        }
-        buf[bpos++] = *p;
-    }
-    buf[bpos] = '\0';
-    return strtod(buf, NULL);
-}
-
-void ck_calc_set_display(AppState *app, const char *text)
-{
-    set_display(app, text);
-}
-
-void ck_calc_set_display_from_double(AppState *app, double value)
-{
-    set_display_from_double(app, value);
-}
-
-double ck_calc_current_input(AppState *app)
-{
-    return current_input(app);
-}
-
-void ck_calc_reset_state(AppState *app)
-{
-    reset_state(app);
-}
-
-void ck_calc_ensure_keyboard_focus(AppState *app)
-{
-    ensure_keyboard_focus(app);
-}
-
-void ck_calc_reformat_display(AppState *app)
-{
-    reformat_display(app);
 }
 
 static void init_exec_path(AppState *app, const char *argv0)
@@ -295,131 +193,8 @@ static void set_error(AppState *app)
     app->calc_state.pending_op = 0;
     app->calc_state.has_pending_value = false;
     app->calc_state.last_op = 0;
-    set_display(app, "Error");
+    ck_calc_set_display(app, "Error");
     app->calc_state.entering_new = true;
-}
-
-static void init_locale_settings(AppState *app)
-{
-    if (!app) return;
-    struct lconv *lc = localeconv();
-    app->decimal_char = (lc && lc->decimal_point && lc->decimal_point[0])
-                            ? lc->decimal_point[0]
-                            : '.';
-    app->thousands_char = (lc && lc->thousands_sep && lc->thousands_sep[0])
-                              ? lc->thousands_sep[0]
-                              : ',';
-}
-
-static void load_view_state(AppState *app)
-{
-    if (!app) return;
-    int val = config_read_int_map(VIEW_STATE_FILENAME, "show_thousands", 1);
-    app->show_thousands = (val != 0);
-    app->mode = config_read_int_map(VIEW_STATE_FILENAME, "mode", app->mode);
-}
-
-void save_view_state(const AppState *app)
-{
-    if (!app) return;
-    config_write_int_map(VIEW_STATE_FILENAME, "show_thousands", app->show_thousands ? 1 : 0);
-    config_write_int_map(VIEW_STATE_FILENAME, "mode", app->mode);
-}
-
-static void format_number(AppState *app, double value, char *out, size_t out_len)
-{
-    if (!app || !out || out_len == 0) return;
-
-    char tmp[128];
-    snprintf(tmp, sizeof(tmp), "%.12g", value);
-
-    const char *exp_part = strchr(tmp, 'e');
-    if (!exp_part) exp_part = strchr(tmp, 'E');
-
-    char int_part[128] = {0};
-    char frac_part[128] = {0};
-    char sign = 0;
-
-    const char *p = tmp;
-    if (*p == '+' || *p == '-') {
-        sign = *p;
-        p++;
-    }
-
-    size_t int_len = 0;
-    while (*p && *p != '.' && *p != 'e' && *p != 'E') {
-        if (int_len + 1 < sizeof(int_part)) {
-            int_part[int_len++] = *p;
-        }
-        p++;
-    }
-    int_part[int_len] = '\0';
-
-    size_t frac_len = 0;
-    if (*p == '.') {
-        p++;
-        while (*p && *p != 'e' && *p != 'E') {
-            if (frac_len + 1 < sizeof(frac_part)) {
-                frac_part[frac_len++] = *p;
-            }
-            p++;
-        }
-        frac_part[frac_len] = '\0';
-    }
-
-    char grouped[128] = {0};
-    size_t gpos = 0;
-    if (app->show_thousands && app->thousands_char && int_len > 3) {
-        int count = 0;
-        for (ssize_t i = (ssize_t)int_len - 1; i >= 0; --i) {
-            if (gpos + 2 >= sizeof(grouped)) break;
-            grouped[gpos++] = int_part[i];
-            count++;
-            if (count == 3 && i > 0) {
-                grouped[gpos++] = app->thousands_char;
-                count = 0;
-            }
-        }
-        /* reverse */
-        for (size_t i = 0; i < gpos / 2; ++i) {
-            char tmpc = grouped[i];
-            grouped[i] = grouped[gpos - 1 - i];
-            grouped[gpos - 1 - i] = tmpc;
-        }
-        grouped[gpos] = '\0';
-    } else {
-        size_t copy_len = strlen(int_part);
-        if (copy_len >= sizeof(grouped)) copy_len = sizeof(grouped) - 1;
-        memcpy(grouped, int_part, copy_len);
-        grouped[copy_len] = '\0';
-    }
-
-    /* Compose final string */
-    out[0] = '\0';
-    size_t pos = 0;
-    if (sign) {
-        out[pos++] = sign;
-    }
-
-    size_t grouped_len = strlen(grouped);
-    if (pos + grouped_len < out_len) {
-        memcpy(out + pos, grouped, grouped_len);
-        pos += grouped_len;
-    }
-
-    if (frac_len > 0 && pos + 1 + frac_len < out_len) {
-        out[pos++] = app->decimal_char;
-        memcpy(out + pos, frac_part, frac_len);
-        pos += frac_len;
-    }
-
-    if (exp_part && pos + strlen(exp_part) < out_len) {
-        memcpy(out + pos, exp_part, strlen(exp_part));
-        pos += strlen(exp_part);
-    }
-
-    if (pos >= out_len) pos = out_len - 1;
-    out[pos] = '\0';
 }
 
 /* -------------------------------------------------------------------------
@@ -540,11 +315,11 @@ static void cb_equals(Widget w, XtPointer client_data, XtPointer call_data)
     if (!app) return;
     if (app->mode == 1) {
         if (app->calc_state.error_state) {
-            reset_state(app);
+            ck_calc_reset_state(app);
             return;
         }
         if (formula_is_empty(&app->formula_ctx)) {
-            ensure_keyboard_focus(app);
+            ck_calc_ensure_keyboard_focus(app);
             return;
         }
         double result = 0.0;
@@ -552,12 +327,12 @@ static void cb_equals(Widget w, XtPointer client_data, XtPointer call_data)
             formula_clear(&app->formula_ctx);
             app->formula_last_result = result;
             app->formula_showing_result = true;
-            set_display_from_double(app, result);
+            ck_calc_set_display_from_double(app, result);
         } else {
             formula_clear(&app->formula_ctx);
             set_error(app);
         }
-        ensure_keyboard_focus(app);
+        ck_calc_ensure_keyboard_focus(app);
         return;
     }
     input_handler_handle_equals(app);
@@ -568,36 +343,12 @@ void ck_calc_cb_equals(Widget w, XtPointer client_data, XtPointer call_data)
     cb_equals(w, client_data, call_data);
 }
 
-static void reformat_display(AppState *app)
-{
-    if (!app || app->calc_state.error_state) return;
-
-    size_t len = strlen(app->display);
-    if (len > 0 && app->display[len - 1] == app->decimal_char) {
-        double val = current_input(app);
-        char tmp[MAX_DISPLAY_LEN];
-        format_number(app, val, tmp, sizeof(tmp));
-        size_t used = strlen(tmp);
-        if (used + 1 < sizeof(app->display)) {
-            memcpy(app->display, tmp, used);
-            app->display[used] = app->decimal_char;
-            app->display[used + 1] = '\0';
-            update_display(app);
-        }
-        return;
-    }
-
-    double val = current_input(app);
-    set_display_from_double(app, val);
-    app->calc_state.entering_new = false;
-}
-
 void formula_mode_update_display(AppState *app)
 {
     if (!app) return;
     const char *formula = formula_text(&app->formula_ctx);
     if (!formula || !*formula) {
-        set_display(app, "0");
+        ck_calc_set_display(app, "0");
         return;
     }
 
@@ -611,7 +362,7 @@ void formula_mode_update_display(AppState *app)
         buf[pos++] = ch;
     }
     buf[pos] = '\0';
-    set_display(app, buf);
+    ck_calc_set_display(app, buf);
 }
 
 void formula_mode_prepare_for_edit(AppState *app)
@@ -656,7 +407,7 @@ static void set_mode(AppState *app, int mode, Boolean from_menu)
         XtVaSetValues(app->view_mode_sci_btn, XmNset, sci_set, NULL);
     }
 
-    save_view_state(app);
+    ck_calc_save_view_state(app);
     if (app->session_data) {
         session_data_set_int(app->session_data, "mode", mode);
     }
@@ -858,23 +609,6 @@ static void key_release_handler(Widget w, XtPointer client_data, XEvent *event, 
     }
 }
 
-static void ensure_keyboard_focus(AppState *app)
-{
-    if (!app || !app->shell) return;
-    Widget target = NULL;
-    if (app->key_focus_proxy) {
-        target = app->key_focus_proxy;
-    } else if (app->btn_digits[0]) {
-        target = app->btn_digits[0];
-    } else if (app->main_form) {
-        target = app->main_form;
-    }
-    if (target) {
-        XtSetKeyboardFocus(app->shell, target);
-        XmProcessTraversal(target, XmTRAVERSE_CURRENT);
-    }
-}
-
 static void focus_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont)
 {
     (void)w;
@@ -882,7 +616,7 @@ static void focus_handler(Widget w, XtPointer client_data, XEvent *event, Boolea
     (void)cont;
     if (!event) return;
     if (event->type == FocusIn) {
-        ensure_keyboard_focus(g_app);
+        ck_calc_ensure_keyboard_focus(g_app);
     }
 }
 
@@ -1059,7 +793,7 @@ static void build_ui(AppState *app)
         NULL
     );
     app->display_label = display_label;
-    update_display(app);
+    ck_calc_set_display(app, app->display);
 
     XtSetSensitive(display_label, True);
     XtAddEventHandler(display_label, ButtonPressMask, True, display_button_handler, (XtPointer)app);
@@ -1098,16 +832,16 @@ int main(int argc, char *argv[])
     XtSetLanguageProc(NULL, NULL, NULL);
     setlocale(LC_ALL, "");
 
-    init_locale_settings(&app);
+    ck_calc_init_locale_settings(&app);
     app.show_thousands = true;
     app.mode = 0; /* basic by default */
-    load_view_state(&app);
+    ck_calc_load_view_state(&app);
 
     char *session_id = session_parse_argument(&argc, argv);
     app.session_data = session_data_create(session_id);
     free(session_id);
     init_exec_path(&app, argv[0]);
-    reset_state(&app);
+    ck_calc_reset_state(&app);
 
     app.shell = XtVaAppInitialize(&app.app_context,
                                   "CkCalc",
@@ -1128,7 +862,7 @@ int main(int argc, char *argv[])
         if (session_load(app.shell, app.session_data)) {
             const char *saved_disp = session_data_get(app.session_data, "display");
             if (saved_disp && saved_disp[0]) {
-                set_display(&app, saved_disp);
+                ck_calc_set_display(&app, saved_disp);
                 app.calc_state.entering_new = true;
             }
             if (session_data_has(app.session_data, "show_thousands")) {
@@ -1184,7 +918,7 @@ int main(int argc, char *argv[])
     } else if (app.main_form) {
         XtSetKeyboardFocus(app.shell, app.main_form);
     }
-    ensure_keyboard_focus(&app);
+    ck_calc_ensure_keyboard_focus(&app);
 
     Atom wm_delete = XmInternAtom(XtDisplay(app.shell), "WM_DELETE_WINDOW", False);
     Atom wm_save   = XmInternAtom(XtDisplay(app.shell), "WM_SAVE_YOURSELF", False);

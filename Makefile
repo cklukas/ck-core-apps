@@ -48,9 +48,9 @@ $(BIN_DIR)/ck-clock: src/ck-clock/ck-clock.c | $(BIN_DIR)
 $(BIN_DIR)/ck-calc: src/ck-calc/ck-calc.c src/ck-calc/app_state_utils.c src/ck-calc/logic/display_api.c src/ck-calc/logic/formula_eval.c src/ck-calc/logic/calc_state.c src/ck-calc/logic/input_handler.c src/ck-calc/ui/keypad_layout.c src/ck-calc/ui/sci_visuals.c src/ck-calc/ui/window_metrics.c src/ck-calc/clipboard.c src/ck-calc/ui/menu_handlers.c src/shared/session_utils.c src/shared/session_utils.h src/shared/about_dialog.c src/shared/about_dialog.h src/shared/config_utils.c src/shared/config_utils.h src/shared/cde_palette.c src/shared/cde_palette.h | $(BIN_DIR)
 	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-calc/ck-calc.c src/ck-calc/app_state_utils.c src/ck-calc/logic/display_api.c src/ck-calc/logic/formula_eval.c src/ck-calc/logic/calc_state.c src/ck-calc/logic/input_handler.c src/ck-calc/ui/keypad_layout.c src/ck-calc/ui/sci_visuals.c src/ck-calc/ui/window_metrics.c src/ck-calc/clipboard.c src/ck-calc/ui/menu_handlers.c src/shared/session_utils.c src/shared/about_dialog.c src/shared/config_utils.c src/shared/cde_palette.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS) -lm
 
-# ck-nibbles (Motif/X11 game, no CDE dependency)
-$(BIN_DIR)/ck-nibbles: src/games/ck-nibbles/ck-nibbles.c src/shared/about_dialog.c src/shared/about_dialog.h | $(BIN_DIR)
-	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/games/ck-nibbles/ck-nibbles.c src/shared/about_dialog.c -o $@ $(CDE_LDFLAGS) -lXm -lXt -lX11
+# ck-nibbles (Motif/X11 game, with CDE session dependency)
+$(BIN_DIR)/ck-nibbles: src/games/ck-nibbles/ck-nibbles.c src/shared/about_dialog.c src/shared/about_dialog.h src/shared/session_utils.c src/shared/session_utils.h | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/games/ck-nibbles/ck-nibbles.c src/shared/about_dialog.c src/shared/session_utils.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
 
 clean:
 	rm -rf $(BUILD_DIR)

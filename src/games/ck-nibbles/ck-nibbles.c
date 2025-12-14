@@ -194,6 +194,9 @@ static void show_round_end_dialog(const char *msg);
 static void on_roundend_next(Widget w, XtPointer client, XtPointer call);
 static void on_roundend_end(Widget w, XtPointer client, XtPointer call);
 
+static void on_toplevel_configure(Widget w, XtPointer client, XEvent *ev, Boolean *cont);
+static int  startup_dialog_shown = 0;
+
 /* ---------- Dialog positioning helper ---------- */
 
 static void center_shell_over_widget(Widget shell, Widget over) {
@@ -1438,6 +1441,26 @@ static void on_new_game_menu(Widget w, XtPointer client, XtPointer call) {
     show_new_game_dialog(0);
 }
 
+/* Show startup dialog only after WM has placed/resized the toplevel at least once. */
+static void on_toplevel_configure(Widget w, XtPointer client, XEvent *ev, Boolean *cont) {
+    (void)client;
+    *cont = True;
+
+    if (startup_dialog_shown) return;
+    if (ev->type != ConfigureNotify) return;
+
+    /* First real geometry from the WM -> now centering works reliably */
+    startup_dialog_shown = 1;
+    XtRemoveEventHandler(w, StructureNotifyMask, False, on_toplevel_configure, NULL);
+
+    /* Pause and force startup dialog */
+    G.paused = 1;
+    set_status_text();
+    redraw();
+    show_new_game_dialog(1);
+    G.timer = XtAppAddTimeOut(G.app, (unsigned long)G.tick_ms, on_tick, NULL);
+}
+
 /* ---------- Main ---------- */
 
 static int arg_is(const char *a, const char *b) { return a && b && strcmp(a,b)==0; }
@@ -1601,14 +1624,8 @@ int main(int argc, char **argv) {
 
     on_realize(G.drawing, NULL, NULL);
 
-    /* Pause and force startup dialog */
-    G.paused = 1;
-    set_status_text();
-    redraw();
-
-    show_new_game_dialog(1);
-
-    G.timer = XtAppAddTimeOut(G.app, (unsigned long)G.tick_ms, on_tick, NULL);
+    /* Defer startup dialog until WM has configured the main window */
+    XtAddEventHandler(G.toplevel, StructureNotifyMask, False, on_toplevel_configure, NULL);
 
     XtAppMainLoop(G.app);
     return 0;

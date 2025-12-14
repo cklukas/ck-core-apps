@@ -50,6 +50,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <limits.h>
+#include <ctype.h>
 
 #ifndef MIN
 #define MIN(a,b) ((a)<(b)?(a):(b))
@@ -83,7 +84,8 @@ typedef enum {
     DEATH_WALL,
     DEATH_OUT_OF_BOUNDS,
     DEATH_BITE_SELF,
-    DEATH_HIT_OTHER
+    DEATH_HIT_OTHER,
+    DEATH_HEAD_ON
 } DeathReason;
 
 typedef struct {
@@ -162,8 +164,15 @@ typedef struct {
     /* match/rounds */
     int rounds_total;     /* user-set in New Game dialog */
     int rounds_played;    /* completed rounds */
-    int p1_round_wins;
-    int p2_round_wins;
+
+    /*
+     * "points" for match outcome:
+     * - Win gives 1 point to winner.
+     * - Draw gives 1 point to BOTH players (requested).
+     * We still track draw_rounds as a statistic.
+     */
+    int p1_round_wins;    /* interpreted as match points */
+    int p2_round_wins;    /* interpreted as match points */
     int draw_rounds;
 
     /* New Game dialog (robust FormDialog) */
@@ -181,6 +190,9 @@ typedef struct {
     Widget roundend_dialog;
     int    roundend_active;
     char   roundend_msg[512];
+
+    /* Validation warning dialog */
+    Widget warn_dialog;
 
     /* Session handling */
     SessionData *session_data;
@@ -343,13 +355,72 @@ static int parse_int_clamped(const char *s, int defv, int minv, int maxv) {
     return v;
 }
 
+/* strict: must be a clean integer token and in [minv,maxv] */
+static int parse_int_strict_range(const char *s, int minv, int maxv, int *out) {
+    if (!s) return 0;
+    while (*s && isspace((unsigned char)*s)) s++;
+    if (!*s) return 0;
+
+    char *end = NULL;
+    long v = strtol(s, &end, 10);
+    if (end == s) return 0;
+    while (*end && isspace((unsigned char)*end)) end++;
+    if (*end != '\0') return 0;
+    if (v < minv || v > maxv) return 0;
+
+    if (out) *out = (int)v;
+    return 1;
+}
+
 static const char* death_reason_str(DeathReason r) {
     switch (r) {
         case DEATH_WALL:          return "hit a wall";
         case DEATH_OUT_OF_BOUNDS: return "left the field";
         case DEATH_BITE_SELF:     return "bit itself";
         case DEATH_HIT_OTHER:     return "crashed into the other snake";
+        case DEATH_HEAD_ON:       return "hit head-on";
         default:                  return "died";
+    }
+}
+
+/* ---------- Validation warning dialog ---------- */
+
+static void build_warn_dialog(void) {
+    if (G.warn_dialog) return;
+
+    Arg args[8];
+    int n = 0;
+    XtSetArg(args[n], XmNdialogStyle, XmDIALOG_PRIMARY_APPLICATION_MODAL); n++;
+    XtSetArg(args[n], XmNautoUnmanage, True); n++;
+
+    G.warn_dialog = XmCreateWarningDialog(G.toplevel, "warn_dialog", args, n);
+
+    Widget helpb = XmMessageBoxGetChild(G.warn_dialog, XmDIALOG_HELP_BUTTON);
+    if (helpb) XtUnmanageChild(helpb);
+
+    Widget cancelb = XmMessageBoxGetChild(G.warn_dialog, XmDIALOG_CANCEL_BUTTON);
+    if (cancelb) XtUnmanageChild(cancelb);
+
+    Widget shell = XtParent(G.warn_dialog);
+    XtVaSetValues(shell,
+                  XmNtitle, "Invalid Value",
+                  XmNdeleteResponse, XmUNMAP,
+                  XmNtransientFor, G.toplevel,
+                  NULL);
+}
+
+static void show_warning(const char *msg) {
+    build_warn_dialog();
+
+    XmString xs = XmStringCreateLocalized((char*)(msg ? msg : ""));
+    XtVaSetValues(G.warn_dialog, XmNmessageString, xs, NULL);
+    XmStringFree(xs);
+
+    XtManageChild(G.warn_dialog);
+
+    Widget shell = XtParent(G.warn_dialog);
+    if (XtIsRealized(shell)) {
+        XRaiseWindow(XtDisplay(shell), XtWindow(shell));
     }
 }
 
@@ -514,7 +585,7 @@ static void set_status_text(void) {
 
     char buf[256];
     snprintf(buf, sizeof(buf),
-             "Level %d   Round %d/%d   Wins %d:%d (%dD)   %s:%d   %s:%d   %s   (P pause, R restart)",
+             "Level %d   Round %d/%d   Points %d:%d (%dD)   %s:%d   %s:%d   %s   (P pause, R restart)",
              G.level+1,
              (G.rounds_played + 1),
              (G.rounds_total > 0 ? G.rounds_total : 1),
@@ -655,44 +726,99 @@ static void apply_next_dir(Snake *s) {
     if (!dir_opposite(s->dir, s->next_dir)) s->dir = s->next_dir;
 }
 
-static int step_snake(Snake *s) {
-    if (!s->alive) return 0;
+/*
+ * Step BOTH snakes "simultaneously" (same tick) and apply special draw logic:
+ * - head-head same target cell => draw
+ * - head swap (A moves into B head cell while B moves into A head cell) => draw
+ * - any tick where both die => draw (both get 1 match point)
+ *
+ * Note: we keep collision checks against current bodies (including other head),
+ * and explicitly treat head-on / swap as simultaneous.
+ */
+static void step_both_snakes_simultaneous(void) {
+    if (!G.s1.alive && !G.s2.alive) return;
 
-    apply_next_dir(s);
+    /* apply next dir constraints */
+    if (G.s1.alive) apply_next_dir(&G.s1);
+    if (G.s2.alive) apply_next_dir(&G.s2);
 
-    Pt head = s->body[0];
-    Pt next = step_pt(head, s->dir);
+    Pt p1_prev = G.s1.body[0];
+    Pt p2_prev = G.s2.body[0];
 
-    int include_tail = (s->grow_pending > 0) ? 1 : 0;
+    Pt p1_next = G.s1.alive ? step_pt(p1_prev, G.s1.dir) : p1_prev;
+    Pt p2_next = G.s2.alive ? step_pt(p2_prev, G.s2.dir) : p2_prev;
 
-    DeathReason reason = DEATH_NONE;
-    if (will_hit_reason(s, next, include_tail, &reason)) {
-        s->alive = 0;
-        s->death_reason = reason;
-        return 0;
+    int p1_include_tail = (G.s1.grow_pending > 0) ? 1 : 0;
+    int p2_include_tail = (G.s2.grow_pending > 0) ? 1 : 0;
+
+    DeathReason r1 = DEATH_NONE, r2 = DEATH_NONE;
+
+    /* Special simultaneous head collision cases */
+    int head_same_cell = (G.s1.alive && G.s2.alive && pt_eq(p1_next, p2_next));
+    int head_swap = (G.s1.alive && G.s2.alive && pt_eq(p1_next, p2_prev) && pt_eq(p2_next, p1_prev));
+
+    int p1_dead = 0, p2_dead = 0;
+
+    if (G.s1.alive) {
+        if (head_same_cell || head_swap) {
+            p1_dead = 1;
+            r1 = DEATH_HEAD_ON;
+        } else if (will_hit_reason(&G.s1, p1_next, p1_include_tail, &r1)) {
+            p1_dead = 1;
+        }
     }
 
-    int ate = (G.has_food && pt_eq(next, G.food));
-
-    if (ate) {
-        s->grow_pending += 2;
-        s->score += 10;
+    if (G.s2.alive) {
+        if (head_same_cell || head_swap) {
+            p2_dead = 1;
+            r2 = DEATH_HEAD_ON;
+        } else if (will_hit_reason(&G.s2, p2_next, p2_include_tail, &r2)) {
+            p2_dead = 1;
+        }
     }
 
-    int new_len = s->len;
-    if (s->grow_pending > 0) {
-        if (s->len < MAX_LEN) new_len = s->len + 1;
-        s->grow_pending--;
+    /* Apply deaths */
+    if (p1_dead) { G.s1.alive = 0; G.s1.death_reason = r1; }
+    if (p2_dead) { G.s2.alive = 0; G.s2.death_reason = r2; }
+
+    /* If dead, do not move that snake */
+    if (!G.s1.alive || !G.s2.alive) {
+        /* if one is dead, the other may still move this tick (classic feel) */
+        /* but if both are dead, no one moves */
     }
 
-    for (int i=new_len-1;i>0;i--) {
-        s->body[i] = s->body[i-1];
-    }
-    s->body[0] = next;
-    s->len = new_len;
+    /* Determine food eaten based on target cells (before moving) */
+    int p1_ate = (G.s1.alive && G.has_food && pt_eq(p1_next, G.food));
+    int p2_ate = (G.s2.alive && G.has_food && pt_eq(p2_next, G.food));
 
-    if (ate) place_food();
-    return ate;
+    if (p1_ate) { G.s1.grow_pending += 2; G.s1.score += 10; }
+    if (p2_ate) { G.s2.grow_pending += 2; G.s2.score += 10; }
+
+    /* Move snakes that are alive */
+    if (G.s1.alive) {
+        int new_len = G.s1.len;
+        if (G.s1.grow_pending > 0) {
+            if (G.s1.len < MAX_LEN) new_len = G.s1.len + 1;
+            G.s1.grow_pending--;
+        }
+        for (int i=new_len-1;i>0;i--) G.s1.body[i] = G.s1.body[i-1];
+        G.s1.body[0] = p1_next;
+        G.s1.len = new_len;
+    }
+
+    if (G.s2.alive) {
+        int new_len = G.s2.len;
+        if (G.s2.grow_pending > 0) {
+            if (G.s2.len < MAX_LEN) new_len = G.s2.len + 1;
+            G.s2.grow_pending--;
+        }
+        for (int i=new_len-1;i>0;i--) G.s2.body[i] = G.s2.body[i-1];
+        G.s2.body[0] = p2_next;
+        G.s2.len = new_len;
+    }
+
+    /* Food placement: if any ate, place a new food (simple) */
+    if (p1_ate || p2_ate) place_food();
 }
 
 /* safe append helper (keeps NUL, never overflows) */
@@ -728,7 +854,10 @@ static void end_round_and_show_dialog(void) {
     G.rounds_played++;
 
     if (draw) {
+        /* requested: draw gives BOTH players a point */
         G.draw_rounds++;
+        G.p1_round_wins++;
+        G.p2_round_wins++;
     } else if (winner == p1) {
         G.p1_round_wins++;
     } else if (winner == p2) {
@@ -751,8 +880,21 @@ static void end_round_and_show_dialog(void) {
     else         snprintf(line3, sizeof(line3), "%s survived.", p2);
 
     char line4[128];
-    snprintf(line4, sizeof(line4), "Match wins: %d : %d   (Draws: %d)",
+    snprintf(line4, sizeof(line4), "Match points: %d : %d   (Draw rounds: %d)",
              G.p1_round_wins, G.p2_round_wins, G.draw_rounds);
+
+    /* final result line if match finished */
+    char line5[160];
+    line5[0] = '\0';
+    if (G.rounds_played >= G.rounds_total) {
+        if (G.p1_round_wins > G.p2_round_wins) {
+            snprintf(line5, sizeof(line5), "Final result: %s wins the match.", p1);
+        } else if (G.p2_round_wins > G.p1_round_wins) {
+            snprintf(line5, sizeof(line5), "Final result: %s wins the match.", p2);
+        } else {
+            snprintf(line5, sizeof(line5), "Final result: Match draw.");
+        }
+    }
 
     G.roundend_msg[0] = '\0';
     str_append(G.roundend_msg, sizeof(G.roundend_msg), line1);
@@ -763,8 +905,9 @@ static void end_round_and_show_dialog(void) {
     str_append(G.roundend_msg, sizeof(G.roundend_msg), "\n\n");
     str_append(G.roundend_msg, sizeof(G.roundend_msg), line4);
 
-    if (strlen(G.roundend_msg) >= sizeof(G.roundend_msg) - 1) {
-        /* already truncated by strncat; could add "…" but would require reserving space */
+    if (line5[0]) {
+        str_append(G.roundend_msg, sizeof(G.roundend_msg), "\n");
+        str_append(G.roundend_msg, sizeof(G.roundend_msg), line5);
     }
 
     set_status_text();
@@ -841,8 +984,8 @@ static void on_tick(XtPointer client, XtIntervalId *id) {
             G.s2.next_dir = cpu_choose_dir(&G.s2);
         }
 
-        step_snake(&G.s1);
-        step_snake(&G.s2);
+        /* IMPORTANT: step simultaneously so head-on cases become draws correctly */
+        step_both_snakes_simultaneous();
 
         handle_deaths_and_progress();
         set_status_text();
@@ -1231,6 +1374,7 @@ static void on_newgame_cancel(Widget w, XtPointer client, XtPointer call) {
     if (G.newgame_dialog) XtUnmanageChild(G.newgame_dialog);
 }
 
+/* OK/Start: validate rounds strictly (1..99). If invalid -> warning, do NOT start. */
 static void on_newgame_start(Widget w, XtPointer client, XtPointer call) {
     (void)w; (void)client; (void)call;
 
@@ -1241,11 +1385,21 @@ static void on_newgame_start(Widget w, XtPointer client, XtPointer call) {
     char *t2 = XmTextFieldGetString(G.newgame_text_p2);
     char *tr = XmTextFieldGetString(G.newgame_text_rounds);
 
+    /* Validate rounds BEFORE applying changes / closing dialog */
+    int rounds = 0;
+    if (!parse_int_strict_range(tr, 1, 99, &rounds)) {
+        if (t1) XtFree(t1);
+        if (t2) XtFree(t2);
+        if (tr) XtFree(tr);
+
+        show_warning("Please enter a valid number of rounds from 1 to 99.");
+        return; /* keep dialog open */
+    }
+
     trim_copy(G.player1_name, sizeof(G.player1_name), t1, "Player 1");
     if (G.two_player) trim_copy(G.player2_name, sizeof(G.player2_name), t2, "Player 2");
     else              trim_copy(G.player2_name, sizeof(G.player2_name), t2, "CPU");
 
-    int rounds = parse_int_clamped(tr, 3, 1, 99);
     G.rounds_total = rounds;
 
     if (t1) XtFree(t1);
@@ -1412,7 +1566,7 @@ static void build_new_game_dialog(void) {
 
     (void)XtVaCreateManagedWidget("label_rounds",
                                   xmLabelWidgetClass, cfg_form,
-                                  XmNlabelString, XmStringCreateLocalized("Rounds:"),
+                                  XmNlabelString, XmStringCreateLocalized("Rounds (1..99):"),
                                   XmNtopAttachment,  XmATTACH_WIDGET,
                                   XmNtopWidget,      G.newgame_text_p2,
                                   XmNtopOffset,      10,
@@ -1767,3 +1921,4 @@ int main(int argc, char **argv) {
     session_data_free(G.session_data);
     return 0;
 }
+

@@ -2,17 +2,19 @@
  * ck-nibbles.c  -  Motif/CDE "Nibbles" (QBasic/DOS-inspired) clone
  *
  * Build:
- *   cc -O2 -Wall -o ck-nibbles ck-nibbles.c -lXm -lXt -lX11
+ *   cc -O2 -Wall -Isrc -I/usr/local/CDE/include \
+ *      src/games/ck-nibbles/ck-nibbles.c src/shared/about_dialog.c \
+ *      -o build/bin/ck-nibbles -L/usr/local/CDE/lib -lXm -lXt -lX11
  *
  * Run:
- *   ./ck-nibbles            # 1P vs CPU
- *   ./ck-nibbles -2         # 2-player (P2 uses WASD)
+ *   ./ck-nibbles            # Startup dialog chooses mode
+ *   ./ck-nibbles -2         # Defaults to 2-player in dialog
  *
  * Keys:
  *   Player 1: Arrow keys
- *   Player 2: W A S D (only in -2 mode)
+ *   Player 2: W A S D (only in 2-player mode)
  *   P: pause
- *   R: restart level
+ *   R: restart level (current round)
  */
 
 #include <Xm/Xm.h>
@@ -28,6 +30,9 @@
 #include <Xm/PushB.h>
 #include <Xm/RowColumn.h>
 #include <Xm/ToggleB.h>
+#include <Xm/Text.h>
+#include <Xm/TextF.h>
+
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
 
@@ -65,6 +70,14 @@ typedef struct {
 
 typedef struct { int x, y; } Pt;
 
+typedef enum {
+    DEATH_NONE = 0,
+    DEATH_WALL,
+    DEATH_OUT_OF_BOUNDS,
+    DEATH_BITE_SELF,
+    DEATH_HIT_OTHER
+} DeathReason;
+
 typedef struct {
     Pt body[MAX_LEN];
     int len;
@@ -74,6 +87,9 @@ typedef struct {
     unsigned long color;
     int score;
     int grow_pending;
+
+    /* for end-of-round explanation */
+    DeathReason death_reason;
 } Snake;
 
 typedef struct {
@@ -130,30 +146,81 @@ typedef struct {
     unsigned long col_s2;
 
     XtIntervalId timer;
+
+    /* player naming */
+    char player1_name[64];
+    char player2_name[64];
+
+    /* match/rounds */
+    int rounds_total;     /* user-set in New Game dialog */
+    int rounds_played;    /* completed rounds */
+    int p1_round_wins;
+    int p2_round_wins;
+    int draw_rounds;
+
+    /* New Game dialog (robust FormDialog) */
+    Widget newgame_dialog;
+    Widget newgame_rb_1p;
+    Widget newgame_rb_2p;
+    Widget newgame_text_p1;
+    Widget newgame_text_p2;
+    Widget newgame_label_p2;
+    Widget newgame_text_rounds;
+    int    newgame_is_startup;
+    int    newgame_prev_paused;
+
+    /* Round End dialog */
+    Widget roundend_dialog;
+    int    roundend_active;
+    char   roundend_msg[512];
 } Game;
 
 static Game G;
 
-/* ---------- Forward declarations (avoid implicit-decl warnings) ---------- */
+/* ---------- Forward declarations ---------- */
 
 static void redraw(void);
 static void set_status_text(void);
 static void restart_game(int full_reset_scores);
-
 static void apply_queued_dirs(void);
+static int  dir_opposite(Dir a, Dir b);
 
-static int dir_opposite(Dir a, Dir b);
+static void show_new_game_dialog(int is_startup);
+static void build_new_game_dialog(void);
+static void on_new_game_menu(Widget w, XtPointer client, XtPointer call);
+
+static void build_round_end_dialog(void);
+static void show_round_end_dialog(const char *msg);
+static void on_roundend_next(Widget w, XtPointer client, XtPointer call);
+static void on_roundend_end(Widget w, XtPointer client, XtPointer call);
+
+/* ---------- Dialog positioning helper ---------- */
+
+static void center_shell_over_widget(Widget shell, Widget over) {
+    if (!shell || !over) return;
+
+    if (!XtIsRealized(over)) return;
+    if (!XtIsRealized(shell)) XtRealizeWidget(shell); /* realize (not map) so width/height are valid */
+
+    Position rx = 0, ry = 0;
+    XtTranslateCoords(over, 0, 0, &rx, &ry);
+
+    Dimension ow = 0, oh = 0, sw = 0, sh = 0;
+    XtVaGetValues(over,  XmNwidth, &ow, XmNheight, &oh, NULL);
+    XtVaGetValues(shell, XmNwidth, &sw, XmNheight, &sh, NULL);
+
+    Position nx = rx + (Position)((int)ow - (int)sw) / 2;
+    Position ny = ry + (Position)((int)oh - (int)sh) / 2;
+    if (nx < 0) nx = 0;
+    if (ny < 0) ny = 0;
+
+    XtVaSetValues(shell, XmNx, nx, XmNy, ny, NULL);
+}
 
 /* ---------- Direction queue ---------- */
 
-static void dirq_clear(DirQueue *dq) {
-    dq->head = 0;
-    dq->tail = 0;
-}
-
-static int dirq_empty(const DirQueue *dq) {
-    return dq->head == dq->tail;
-}
+static void dirq_clear(DirQueue *dq) { dq->head = dq->tail = 0; }
+static int  dirq_empty(const DirQueue *dq) { return dq->head == dq->tail; }
 
 static int dirq_push(DirQueue *dq, Dir d) {
     int next_tail = (dq->tail + 1) % DIRQ_CAP;
@@ -170,8 +237,7 @@ static int dirq_pop(DirQueue *dq, Dir *out) {
     return 1;
 }
 
-/* Pop directions until we find one that is not a 180° reversal vs current snake dir.
-   Returns 1 and sets *out if a valid direction is found; otherwise returns 0. */
+/* Pop directions until we find one that is not a 180° reversal vs current snake dir. */
 static int dirq_pop_valid(DirQueue *dq, const Snake *s, Dir *out) {
     Dir d;
     while (dirq_pop(dq, &d)) {
@@ -179,12 +245,12 @@ static int dirq_pop_valid(DirQueue *dq, const Snake *s, Dir *out) {
             *out = d;
             return 1;
         }
-        /* else: drop it and continue popping */
+        /* drop 180° reversals */
     }
     return 0;
 }
 
-/* ---------- Utility / RNG ---------- */
+/* ---------- Utility ---------- */
 
 static int rnd_int(int lo, int hi) { /* inclusive */
     return lo + (int)(rand() % (unsigned)(hi - lo + 1));
@@ -211,19 +277,61 @@ static int dir_opposite(Dir a, Dir b) {
             (a==DIR_RIGHT && b==DIR_LEFT));
 }
 
-/* ---------- Level generation ---------- */
+static void trim_copy(char *dst, size_t dstsz, const char *src, const char *fallback) {
+    if (!dst || dstsz == 0) return;
+    dst[0] = '\0';
 
-static void clear_walls(void) {
-    memset(G.wall, 0, sizeof(G.wall));
+    if (!src) src = "";
+    while (*src==' ' || *src=='\t' || *src=='\n' || *src=='\r') src++;
+
+    size_t n = strlen(src);
+    while (n > 0) {
+        char c = src[n-1];
+        if (c==' ' || c=='\t' || c=='\n' || c=='\r') n--;
+        else break;
+    }
+
+    if (n == 0) {
+        strncpy(dst, fallback ? fallback : "", dstsz-1);
+        dst[dstsz-1] = '\0';
+        return;
+    }
+
+    if (n >= dstsz) n = dstsz-1;
+    memcpy(dst, src, n);
+    dst[n] = '\0';
 }
 
+static int parse_int_clamped(const char *s, int defv, int minv, int maxv) {
+    if (!s) return defv;
+    while (*s==' ' || *s=='\t' || *s=='\n' || *s=='\r') s++;
+    if (!*s) return defv;
+    int v = atoi(s);
+    if (v < minv) v = minv;
+    if (v > maxv) v = maxv;
+    return v;
+}
+
+static const char* death_reason_str(DeathReason r) {
+    switch (r) {
+        case DEATH_WALL:          return "hit a wall";
+        case DEATH_OUT_OF_BOUNDS: return "left the field";
+        case DEATH_BITE_SELF:     return "bit itself";
+        case DEATH_HIT_OTHER:     return "crashed into the other snake";
+        default:                  return "died";
+    }
+}
+
+/* ---------- Level generation ---------- */
+
+static void clear_walls(void) { memset(G.wall, 0, sizeof(G.wall)); }
+
 static void add_border(void) {
-    int x,y;
-    for (x=0;x<GRID_W;x++) {
+    for (int x=0;x<GRID_W;x++) {
         G.wall[0][x]=1;
         G.wall[GRID_H-1][x]=1;
     }
-    for (y=0;y<GRID_H;y++) {
+    for (int y=0;y<GRID_H;y++) {
         G.wall[y][0]=1;
         G.wall[y][GRID_W-1]=1;
     }
@@ -233,7 +341,6 @@ static void build_level(int lvl) {
     clear_walls();
     add_border();
 
-    int x,y;
     int m = (lvl % 6);
 
     if (m==0) {
@@ -244,8 +351,8 @@ static void build_level(int lvl) {
         int box_top = GRID_H * 8 / 25;
         int box_bottom = GRID_H * 16 / 25;
         int gap_y = GRID_H * 12 / 25;
-        for (x=box_left; x<box_right; x++) { G.wall[box_top][x]=1; G.wall[box_bottom][x]=1; }
-        for (y=box_top; y<=box_bottom; y++) { G.wall[y][box_left]=1; G.wall[y][box_right-1]=1; }
+        for (int x=box_left; x<box_right; x++) { G.wall[box_top][x]=1; G.wall[box_bottom][x]=1; }
+        for (int y=box_top; y<=box_bottom; y++) { G.wall[y][box_left]=1; G.wall[y][box_right-1]=1; }
         G.wall[gap_y][box_left]=0; G.wall[gap_y][box_right-1]=0;
     } else if (m==2) {
         int x1 = GRID_W * 13 / 40;
@@ -253,30 +360,27 @@ static void build_level(int lvl) {
         int y_start = GRID_H * 3 / 25;
         int y_end = GRID_H * 22 / 25;
         int skip_y = GRID_H * 12 / 25;
-        for (y=y_start; y<=y_end; y++) {
-            if (y != skip_y) {
-                G.wall[y][x1]=1;
-                G.wall[y][x2]=1;
-            }
+        for (int y=y_start; y<=y_end; y++) {
+            if (y != skip_y) { G.wall[y][x1]=1; G.wall[y][x2]=1; }
         }
     } else if (m==3) {
         int zig_top = GRID_H * 6 / 25;
         int zig_bottom = GRID_H * 18 / 25;
         int zig_left = GRID_W * 6 / 40;
         int zig_right = GRID_W * 33 / 40;
-        for (x=4; x<GRID_W-4; x++) {
+        for (int x=4; x<GRID_W-4; x++) {
             if (x%2==0) G.wall[zig_top][x]=1;
             else        G.wall[zig_bottom][x]=1;
         }
-        for (y=8; y<GRID_H-8; y++) {
+        for (int y=8; y<GRID_H-8; y++) {
             if (y%2==0) G.wall[y][zig_left]=1;
             else        G.wall[y][zig_right]=1;
         }
     } else if (m==4) {
         int cx = GRID_W/2;
         int cy = GRID_H/2;
-        for (x=2;x<GRID_W-2;x++) if (x!=cx) G.wall[cy][x]=1;
-        for (y=2;y<GRID_H-2;y++) if (y!=cy) G.wall[y][cx]=1;
+        for (int x=2;x<GRID_W-2;x++) if (x!=cx) G.wall[cy][x]=1;
+        for (int y=2;y<GRID_H-2;y++) if (y!=cy) G.wall[y][cx]=1;
         G.wall[cy][cx-4]=0; G.wall[cy][cx+4]=0;
         G.wall[cy-4][cx]=0; G.wall[cy+4][cx]=0;
     } else if (m==5) {
@@ -290,10 +394,10 @@ static void build_level(int lvl) {
         int box2_bottom = GRID_H * 19 / 25;
         int ent1_y = GRID_H * 8 / 25;
         int ent2_y = GRID_H * 16 / 25;
-        for (x=box1_left; x<box1_right; x++) { G.wall[box1_top][x]=1; G.wall[box1_bottom][x]=1; }
-        for (y=box1_top; y<=box1_bottom; y++) { G.wall[y][box1_left]=1; G.wall[y][box1_right-1]=1; }
-        for (x=box2_left; x<box2_right; x++) { G.wall[box2_top][x]=1; G.wall[box2_bottom][x]=1; }
-        for (y=box2_top; y<=box2_bottom; y++) { G.wall[y][box2_left]=1; G.wall[y][box2_right-1]=1; }
+        for (int x=box1_left; x<box1_right; x++) { G.wall[box1_top][x]=1; G.wall[box1_bottom][x]=1; }
+        for (int y=box1_top; y<=box1_bottom; y++) { G.wall[y][box1_left]=1; G.wall[y][box1_right-1]=1; }
+        for (int x=box2_left; x<box2_right; x++) { G.wall[box2_top][x]=1; G.wall[box2_bottom][x]=1; }
+        for (int y=box2_top; y<=box2_bottom; y++) { G.wall[y][box2_left]=1; G.wall[y][box2_right-1]=1; }
         G.wall[ent1_y][box1_left]=0;  G.wall[ent2_y][box2_right-1]=0;
     }
 }
@@ -344,6 +448,8 @@ static void init_snake(Snake *s, int x, int y, Dir d, unsigned long col) {
     s->alive = 1;
     s->color = col;
     s->grow_pending = 0;
+    s->death_reason = DEATH_NONE;
+
     for (int i=0;i<s->len;i++) {
         s->body[i].x = x - i*(d==DIR_RIGHT ? 1 : d==DIR_LEFT ? -1 : 0);
         s->body[i].y = y - i*(d==DIR_DOWN  ? 1 : d==DIR_UP   ? -1 : 0);
@@ -357,6 +463,7 @@ static void reset_round(void) {
     int s1y = GRID_H * 12 / 25;
     int s2x = GRID_W * 31 / 40;
     int s2y = GRID_H * 12 / 25;
+
     init_snake(&G.s1, s1x, s1y, DIR_RIGHT, G.col_s1);
     init_snake(&G.s2, s2x, s2y, DIR_LEFT,  G.col_s2);
 
@@ -370,13 +477,19 @@ static void reset_round(void) {
 /* ---------- UI status ---------- */
 
 static void set_status_text(void) {
+    const char *p1 = (G.player1_name[0] ? G.player1_name : "Player 1");
+    const char *p2 = (G.two_player ? (G.player2_name[0] ? G.player2_name : "Player 2")
+                                   : (G.player2_name[0] ? G.player2_name : "CPU"));
+
     char buf[256];
     snprintf(buf, sizeof(buf),
-             "Level %d   P1:%d   %s:%d   %s   (P pause, R restart)",
+             "Level %d   Round %d/%d   Wins %d:%d (%dD)   %s:%d   %s:%d   %s   (P pause, R restart)",
              G.level+1,
-             G.s1.score,
-             (G.two_player ? "P2" : "CPU"),
-             G.s2.score,
+             (G.rounds_played + 1),
+             (G.rounds_total > 0 ? G.rounds_total : 1),
+             G.p1_round_wins, G.p2_round_wins, G.draw_rounds,
+             p1, G.s1.score,
+             p2, G.s2.score,
              (G.paused ? "PAUSED" : "RUN"));
 
     if (strcmp(buf, G.current_status) != 0) {
@@ -473,21 +586,37 @@ static void on_expose(Widget w, XtPointer client, XtPointer call) {
 
 /* ---------- Game mechanics ---------- */
 
-static int will_hit(const Snake *s, Pt next, int include_tail) {
-    if (!in_bounds(next.x, next.y)) return 1;
-    if (cell_is_wall(next.x, next.y)) return 1;
-
-    for (int i=0;i<s->len;i++) {
-        if (!include_tail && i==s->len-1) continue;
-        if (s->body[i].x==next.x && s->body[i].y==next.y) return 1;
+static int will_hit_reason(const Snake *s, Pt next, int include_tail, DeathReason *out_reason) {
+    if (!in_bounds(next.x, next.y)) {
+        if (out_reason) *out_reason = DEATH_OUT_OF_BOUNDS;
+        return 1;
+    }
+    if (cell_is_wall(next.x, next.y)) {
+        if (out_reason) *out_reason = DEATH_WALL;
+        return 1;
     }
 
+    /* self collision */
+    for (int i=0;i<s->len;i++) {
+        if (!include_tail && i==s->len-1) continue;
+        if (s->body[i].x==next.x && s->body[i].y==next.y) {
+            if (out_reason) *out_reason = DEATH_BITE_SELF;
+            return 1;
+        }
+    }
+
+    /* other snake collision */
     const Snake *o = (s==&G.s1) ? &G.s2 : &G.s1;
     if (o->alive) {
         for (int i=0;i<o->len;i++) {
-            if (o->body[i].x==next.x && o->body[i].y==next.y) return 1;
+            if (o->body[i].x==next.x && o->body[i].y==next.y) {
+                if (out_reason) *out_reason = DEATH_HIT_OTHER;
+                return 1;
+            }
         }
     }
+
+    if (out_reason) *out_reason = DEATH_NONE;
     return 0;
 }
 
@@ -505,8 +634,10 @@ static int step_snake(Snake *s) {
 
     int include_tail = (s->grow_pending > 0) ? 1 : 0;
 
-    if (will_hit(s, next, include_tail)) {
+    DeathReason reason = DEATH_NONE;
+    if (will_hit_reason(s, next, include_tail, &reason)) {
         s->alive = 0;
+        s->death_reason = reason;
         return 0;
     }
 
@@ -533,19 +664,91 @@ static int step_snake(Snake *s) {
     return ate;
 }
 
+/* safe append helper (keeps NUL, never overflows) */
+static void str_append(char *dst, size_t dstsz, const char *src) {
+    if (!dst || dstsz == 0 || !src) return;
+    size_t used = strlen(dst);
+    if (used >= dstsz - 1) return;
+    size_t avail = dstsz - 1 - used;
+    strncat(dst, src, avail);
+}
+
+/* Called when a round ends (someone died). Shows dialog instead of auto-resetting. */
+static void end_round_and_show_dialog(void) {
+    if (G.roundend_active) return;
+    G.roundend_active = 1;
+    G.paused = 1;
+
+    const char *p1 = (G.player1_name[0] ? G.player1_name : "Player 1");
+    const char *p2 = (G.two_player ? (G.player2_name[0] ? G.player2_name : "Player 2")
+                                   : (G.player2_name[0] ? G.player2_name : "CPU"));
+
+    int p1_dead = !G.s1.alive;
+    int p2_dead = !G.s2.alive;
+
+    const char *winner = NULL;
+    int draw = 0;
+
+    if (p1_dead && p2_dead) { draw = 1; }
+    else if (p1_dead && !p2_dead) { winner = p2; }
+    else if (!p1_dead && p2_dead) { winner = p1; }
+
+    /* update match stats */
+    G.rounds_played++;
+
+    if (draw) {
+        G.draw_rounds++;
+    } else if (winner == p1) {
+        G.p1_round_wins++;
+    } else if (winner == p2) {
+        G.p2_round_wins++;
+    }
+
+    /* build message */
+    char line1[128];
+    if (draw) snprintf(line1, sizeof(line1), "Round %d/%d: Draw",
+                       G.rounds_played, G.rounds_total);
+    else snprintf(line1, sizeof(line1), "Round %d/%d: %s wins!",
+                  G.rounds_played, G.rounds_total, winner);
+
+    char line2[256];
+    if (p1_dead) snprintf(line2, sizeof(line2), "%s %s.", p1, death_reason_str(G.s1.death_reason));
+    else         snprintf(line2, sizeof(line2), "%s survived.", p1);
+
+    char line3[256];
+    if (p2_dead) snprintf(line3, sizeof(line3), "%s %s.", p2, death_reason_str(G.s2.death_reason));
+    else         snprintf(line3, sizeof(line3), "%s survived.", p2);
+
+    char line4[128];
+    snprintf(line4, sizeof(line4), "Match wins: %d : %d   (Draws: %d)",
+             G.p1_round_wins, G.p2_round_wins, G.draw_rounds);
+
+    G.roundend_msg[0] = '\0';
+    str_append(G.roundend_msg, sizeof(G.roundend_msg), line1);
+    str_append(G.roundend_msg, sizeof(G.roundend_msg), "\n\n");
+    str_append(G.roundend_msg, sizeof(G.roundend_msg), line2);
+    str_append(G.roundend_msg, sizeof(G.roundend_msg), "\n");
+    str_append(G.roundend_msg, sizeof(G.roundend_msg), line3);
+    str_append(G.roundend_msg, sizeof(G.roundend_msg), "\n\n");
+    str_append(G.roundend_msg, sizeof(G.roundend_msg), line4);
+
+    if (strlen(G.roundend_msg) >= sizeof(G.roundend_msg) - 1) {
+        /* already truncated by strncat; could add "…" but would require reserving space */
+    }
+
+    set_status_text();
+    redraw();
+
+    show_round_end_dialog(G.roundend_msg);
+}
+
 static void handle_deaths_and_progress(void) {
     if (!G.s1.alive || !G.s2.alive) {
+        /* Small score penalty on death (optional, keeps original feel) */
         if (!G.s1.alive) G.s1.score = MAX(0, G.s1.score - 25);
         if (!G.s2.alive) G.s2.score = MAX(0, G.s2.score - 25);
 
-        static int foods_eaten = 0;
-        foods_eaten++;
-        if (foods_eaten >= 6) {
-            foods_eaten = 0;
-            G.level = (G.level + 1) % 12;
-        }
-
-        reset_round();
+        end_round_and_show_dialog();
     }
 }
 
@@ -562,7 +765,8 @@ static Dir cpu_choose_dir(const Snake *cpu) {
 
         Pt next = step_pt(cpu->body[0], d);
         int include_tail = (cpu->grow_pending>0) ? 1 : 0;
-        if (will_hit(cpu, next, include_tail)) continue;
+        DeathReason reason = DEATH_NONE;
+        if (will_hit_reason(cpu, next, include_tail, &reason)) continue;
 
         int dist = 0;
         if (G.has_food) dist = abs(next.x - G.food.x) + abs(next.y - G.food.y);
@@ -580,16 +784,13 @@ static Dir cpu_choose_dir(const Snake *cpu) {
 
 /* ---------- Input wishlist application ---------- */
 
-
 static void apply_queued_dirs(void) {
     Dir d;
 
-    /* P1 */
     if (dirq_pop_valid(&G.p1q, &G.s1, &d)) {
         G.s1.next_dir = d;
     }
 
-    /* P2 only if two-player; CPU does not use the queue */
     if (G.two_player) {
         if (dirq_pop_valid(&G.p2q, &G.s2, &d)) {
             G.s2.next_dir = d;
@@ -627,12 +828,22 @@ static void restart_game(int full_reset_scores) {
         G.s1.score = 0;
         G.s2.score = 0;
         G.level = 0;
+
+        G.rounds_played = 0;
+        G.p1_round_wins = 0;
+        G.p2_round_wins = 0;
+        G.draw_rounds = 0;
     }
+
+    G.roundend_active = 0;
+
     dirq_clear(&G.p1q);
     dirq_clear(&G.p2q);
     memset(G.key_down, 0, sizeof(G.key_down));
+
     reset_round();
     G.paused = 0;
+
     set_status_text();
     redraw();
 }
@@ -641,7 +852,6 @@ static void on_click_focus(Widget w, XtPointer client, XEvent *ev, Boolean *cont
     (void)client;
     *cont = True;
     if (ev->type == ButtonPress) {
-        /* reset repeat suppression state on focus click */
         memset(G.key_down, 0, sizeof(G.key_down));
         XmProcessTraversal(w, XmTRAVERSE_CURRENT);
         XSetInputFocus(XtDisplay(w), XtWindow(w), RevertToParent, CurrentTime);
@@ -672,11 +882,9 @@ static void on_focus_change(Widget w, XtPointer client, XEvent *ev, Boolean *con
 }
 
 static void enqueue_for_player(DirQueue *dq, int keycode, Dir d) {
-    /* keycode is 0..255-ish on X11; clamp defensively */
     if (keycode < 0) return;
     if (keycode > 255) keycode = 255;
 
-    /* Ignore auto-repeat KeyPress: only accept the first KeyPress until KeyRelease clears it */
     if (G.key_down[keycode]) return;
 
     G.key_down[keycode] = 1;
@@ -697,6 +905,9 @@ static void on_key(Widget w, XtPointer client, XEvent *ev, Boolean *cont) {
 
     if (ev->type != KeyPress) return;
 
+    /* if round-end dialog open, ignore game keys */
+    if (G.roundend_active) return;
+
     KeySym ks;
     char buf[8];
     XLookupString(&ev->xkey, buf, sizeof(buf), &ks, NULL);
@@ -709,17 +920,20 @@ static void on_key(Widget w, XtPointer client, XEvent *ev, Boolean *cont) {
     }
 
     if (ks == XK_r || ks == XK_R) {
-        restart_game(0);
+        /* restart current round (same level, same match) */
+        G.roundend_active = 0;
+        reset_round();
+        G.paused = 0;
+        set_status_text();
+        redraw();
         return;
     }
 
-    /* player 1 arrows -> queue */
     if (ks == XK_Up)    { enqueue_for_player(&G.p1q, ev->xkey.keycode, DIR_UP); return; }
     if (ks == XK_Down)  { enqueue_for_player(&G.p1q, ev->xkey.keycode, DIR_DOWN); return; }
     if (ks == XK_Left)  { enqueue_for_player(&G.p1q, ev->xkey.keycode, DIR_LEFT); return; }
     if (ks == XK_Right) { enqueue_for_player(&G.p1q, ev->xkey.keycode, DIR_RIGHT); return; }
 
-    /* player 2 WASD -> queue (only in -2 mode) */
     if (G.two_player) {
         if (ks == XK_w || ks == XK_W) { enqueue_for_player(&G.p2q, ev->xkey.keycode, DIR_UP); return; }
         if (ks == XK_s || ks == XK_S) { enqueue_for_player(&G.p2q, ev->xkey.keycode, DIR_DOWN); return; }
@@ -773,6 +987,8 @@ static void setup_graphics(void) {
 static void on_realize(Widget w, XtPointer client, XtPointer call) {
     (void)w; (void)client; (void)call;
     setup_graphics();
+
+    /* Start with a prepared game state, but we will pause + show New Game dialog */
     restart_game(1);
 }
 
@@ -817,7 +1033,7 @@ static void on_about(Widget w, XtPointer client, XtPointer call) {
     about_add_standard_pages(notebook, 1,
                              "Nibbles",
                              "Nibbles",
-                             "Snake Game\n\nControls:\nArrows: Move P1\nWASD: Move P2 (if enabled)\nP: Pause\nR: Restart",
+                             "Snake Game\n\nControls:\nArrows: Move P1\nWASD: Move P2 (if enabled)\nP: Pause\nR: Restart (round)",
                              False);
 
     Widget ok_button = XtVaCreateManagedWidget("ok_button",
@@ -840,11 +1056,386 @@ static void on_about(Widget w, XtPointer client, XtPointer call) {
                   (XtCallbackProc)XtDestroyWidget, (XtPointer)dialog_shell);
 
     XtVaSetValues(form, XmNdefaultButton, ok_button, NULL);
-
     XtVaSetValues(dialog_shell, XmNwidth, 600, XmNheight, 450, NULL);
 
     XtManageChild(form);
     XtPopup(dialog_shell, XtGrabNone);
+}
+
+/* ---------- Round End Dialog ---------- */
+
+static void build_round_end_dialog(void) {
+    if (G.roundend_dialog) return;
+
+    Arg args[8];
+    int n = 0;
+    XtSetArg(args[n], XmNdialogStyle, XmDIALOG_FULL_APPLICATION_MODAL); n++;
+
+    G.roundend_dialog = XmCreateMessageDialog(G.toplevel, "round_end_dialog", args, n);
+
+    /* Hide Help button */
+    Widget helpb = XmMessageBoxGetChild(G.roundend_dialog, XmDIALOG_HELP_BUTTON);
+    if (helpb) XtUnmanageChild(helpb);
+
+    /* Set static title via parent shell */
+    Widget shell = XtParent(G.roundend_dialog);
+    XtVaSetValues(shell,
+                  XmNtitle, "Round Result",
+                  XmNdeleteResponse, XmUNMAP,
+                  XmNtransientFor, G.toplevel,
+                  NULL);
+
+    /* Labels for buttons (default; may change when match finishes) */
+    XmString ok = XmStringCreateLocalized("Next Round");
+    XmString cancel = XmStringCreateLocalized("End Game");
+    XtVaSetValues(G.roundend_dialog,
+                  XmNokLabelString, ok,
+                  XmNcancelLabelString, cancel,
+                  NULL);
+    XmStringFree(ok);
+    XmStringFree(cancel);
+
+    XtAddCallback(G.roundend_dialog, XmNokCallback, on_roundend_next, NULL);
+    XtAddCallback(G.roundend_dialog, XmNcancelCallback, on_roundend_end, NULL);
+}
+
+static void show_round_end_dialog(const char *msg) {
+    build_round_end_dialog();
+
+    XmString xs = XmStringCreateLocalized((char*)(msg ? msg : ""));
+    XtVaSetValues(G.roundend_dialog,
+                  XmNmessageString, xs,
+                  NULL);
+    XmStringFree(xs);
+
+    /* If match is finished, relabel OK button */
+    if (G.rounds_played >= G.rounds_total) {
+        XmString ok = XmStringCreateLocalized("New Game...");
+        XtVaSetValues(G.roundend_dialog, XmNokLabelString, ok, NULL);
+        XmStringFree(ok);
+    } else {
+        XmString ok = XmStringCreateLocalized("Next Round");
+        XtVaSetValues(G.roundend_dialog, XmNokLabelString, ok, NULL);
+        XmStringFree(ok);
+    }
+
+    XtManageChild(G.roundend_dialog);
+
+    /* Raise */
+    Widget shell = XtParent(G.roundend_dialog);
+    if (XtIsRealized(shell)) {
+        XRaiseWindow(XtDisplay(shell), XtWindow(shell));
+    }
+}
+
+static void on_roundend_next(Widget w, XtPointer client, XtPointer call) {
+    (void)w; (void)client; (void)call;
+
+    if (G.roundend_dialog) XtUnmanageChild(G.roundend_dialog);
+
+    G.roundend_active = 0;
+
+    /* If match finished -> go back to New Game dialog */
+    if (G.rounds_played >= G.rounds_total) {
+        show_new_game_dialog(0);
+        return;
+    }
+
+    /* Advance level per round (simple + predictable) */
+    G.level = (G.level + 1) % 12;
+
+    /* Start next round */
+    reset_round();
+    G.paused = 0;
+    set_status_text();
+    redraw();
+}
+
+static void on_roundend_end(Widget w, XtPointer client, XtPointer call) {
+    (void)w; (void)client; (void)call;
+
+    if (G.roundend_dialog) XtUnmanageChild(G.roundend_dialog);
+    G.roundend_active = 0;
+
+    show_new_game_dialog(0);
+}
+
+/* ---------- New Game Dialog (robust FormDialog) ---------- */
+
+static void on_newgame_mode_changed(Widget w, XtPointer client, XtPointer call) {
+    (void)w; (void)client; (void)call;
+
+    Boolean is_1p = XmToggleButtonGetState(G.newgame_rb_1p);
+
+    XmString xs = XmStringCreateLocalized(is_1p ? "CPU Name:" : "Player 2 Name:");
+    XtVaSetValues(G.newgame_label_p2, XmNlabelString, xs, NULL);
+    XmStringFree(xs);
+
+    /* keep editable even for CPU (nice) */
+    XtSetSensitive(G.newgame_text_p2, True);
+}
+
+static void on_newgame_cancel(Widget w, XtPointer client, XtPointer call) {
+    (void)w; (void)client; (void)call;
+
+    G.paused = 1;
+    set_status_text();
+    redraw();
+
+    if (G.newgame_dialog) XtUnmanageChild(G.newgame_dialog);
+}
+
+static void on_newgame_start(Widget w, XtPointer client, XtPointer call) {
+    (void)w; (void)client; (void)call;
+
+    Boolean is_2p = XmToggleButtonGetState(G.newgame_rb_2p);
+    G.two_player = is_2p ? 1 : 0;
+
+    char *t1 = XmTextFieldGetString(G.newgame_text_p1);
+    char *t2 = XmTextFieldGetString(G.newgame_text_p2);
+    char *tr = XmTextFieldGetString(G.newgame_text_rounds);
+
+    trim_copy(G.player1_name, sizeof(G.player1_name), t1, "Player 1");
+    if (G.two_player) trim_copy(G.player2_name, sizeof(G.player2_name), t2, "Player 2");
+    else              trim_copy(G.player2_name, sizeof(G.player2_name), t2, "CPU");
+
+    int rounds = parse_int_clamped(tr, 3, 1, 99);
+    G.rounds_total = rounds;
+
+    if (t1) XtFree(t1);
+    if (t2) XtFree(t2);
+    if (tr) XtFree(tr);
+
+    /* Start a fresh match */
+    restart_game(1);
+
+    if (G.newgame_dialog) XtUnmanageChild(G.newgame_dialog);
+}
+
+static void build_new_game_dialog(void) {
+    if (G.newgame_dialog) return;
+
+    Arg args[16];
+    int n = 0;
+
+    XtSetArg(args[n], XmNdialogStyle, XmDIALOG_FULL_APPLICATION_MODAL); n++;
+    XtSetArg(args[n], XmNautoUnmanage, False); n++;
+    G.newgame_dialog = XmCreateFormDialog(G.toplevel, "newgame_dialog", args, n);
+
+    Widget shell = XtParent(G.newgame_dialog);
+    XtVaSetValues(shell,
+                  XmNtitle, "New Game",
+                  XmNdeleteResponse, XmUNMAP,
+                  XmNtransientFor, G.toplevel,
+                  XmNallowShellResize, True,
+                  NULL);
+
+    XtVaSetValues(G.newgame_dialog,
+                  XmNfractionBase, 100,
+                  XmNmarginWidth,  10,
+                  XmNmarginHeight, 10,
+                  NULL);
+
+    /* Buttons */
+    Widget start_button = XtVaCreateManagedWidget("start_button",
+                                                  xmPushButtonWidgetClass, G.newgame_dialog,
+                                                  XmNlabelString, XmStringCreateLocalized("Start"),
+                                                  XmNbottomAttachment, XmATTACH_FORM,
+                                                  XmNleftAttachment,   XmATTACH_POSITION,
+                                                  XmNleftPosition,     20,
+                                                  XmNrightAttachment,  XmATTACH_POSITION,
+                                                  XmNrightPosition,    45,
+                                                  NULL);
+    XtAddCallback(start_button, XmNactivateCallback, on_newgame_start, NULL);
+
+    Widget cancel_button = XtVaCreateManagedWidget("cancel_button",
+                                                   xmPushButtonWidgetClass, G.newgame_dialog,
+                                                   XmNlabelString, XmStringCreateLocalized("Cancel"),
+                                                   XmNbottomAttachment, XmATTACH_FORM,
+                                                   XmNleftAttachment,   XmATTACH_POSITION,
+                                                   XmNleftPosition,     55,
+                                                   XmNrightAttachment,  XmATTACH_POSITION,
+                                                   XmNrightPosition,    80,
+                                                   NULL);
+    XtAddCallback(cancel_button, XmNactivateCallback, on_newgame_cancel, NULL);
+
+    XtVaSetValues(G.newgame_dialog, XmNdefaultButton, start_button, NULL);
+
+    /* Players Frame */
+    Widget players_frame = XtVaCreateManagedWidget("players_frame",
+                                                   xmFrameWidgetClass, G.newgame_dialog,
+                                                   XmNtopAttachment,   XmATTACH_FORM,
+                                                   XmNleftAttachment,  XmATTACH_FORM,
+                                                   XmNrightAttachment, XmATTACH_FORM,
+                                                   XmNshadowType,      XmSHADOW_ETCHED_IN,
+                                                   NULL);
+
+    (void)XtVaCreateManagedWidget("players_label",
+                                  xmLabelWidgetClass, players_frame,
+                                  XmNlabelString, XmStringCreateLocalized("Number of Players"),
+                                  XmNframeChildType, XmFRAME_TITLE_CHILD,
+                                  NULL);
+
+    Widget radio_box = XmCreateRadioBox(players_frame, "radio_box", NULL, 0);
+    XtManageChild(radio_box);
+
+    G.newgame_rb_1p = XtVaCreateManagedWidget("rb_1p",
+                                              xmToggleButtonWidgetClass, radio_box,
+                                              XmNlabelString, XmStringCreateLocalized("1 - You vs CPU"),
+                                              XmNset, True,
+                                              NULL);
+    XtAddCallback(G.newgame_rb_1p, XmNvalueChangedCallback, on_newgame_mode_changed, NULL);
+
+    G.newgame_rb_2p = XtVaCreateManagedWidget("rb_2p",
+                                              xmToggleButtonWidgetClass, radio_box,
+                                              XmNlabelString, XmStringCreateLocalized("2 - Two Players"),
+                                              XmNset, False,
+                                              NULL);
+    XtAddCallback(G.newgame_rb_2p, XmNvalueChangedCallback, on_newgame_mode_changed, NULL);
+
+    /* Names + Rounds Frame */
+    Widget cfg_frame = XtVaCreateManagedWidget("cfg_frame",
+                                               xmFrameWidgetClass, G.newgame_dialog,
+                                               XmNtopAttachment,    XmATTACH_WIDGET,
+                                               XmNtopWidget,        players_frame,
+                                               XmNleftAttachment,   XmATTACH_FORM,
+                                               XmNrightAttachment,  XmATTACH_FORM,
+                                               XmNbottomAttachment, XmATTACH_WIDGET,
+                                               XmNbottomWidget,     start_button,
+                                               XmNbottomOffset,     10,
+                                               XmNshadowType,       XmSHADOW_ETCHED_IN,
+                                               NULL);
+
+    (void)XtVaCreateManagedWidget("cfg_label",
+                                  xmLabelWidgetClass, cfg_frame,
+                                  XmNlabelString, XmStringCreateLocalized("Players & Match"),
+                                  XmNframeChildType, XmFRAME_TITLE_CHILD,
+                                  NULL);
+
+    Widget cfg_form = XtVaCreateManagedWidget("cfg_form",
+                                              xmFormWidgetClass, cfg_frame,
+                                              XmNfractionBase, 100,
+                                              XmNmarginWidth,  8,
+                                              XmNmarginHeight, 8,
+                                              NULL);
+
+    /* Align all text fields to the same X by using a fixed label column */
+    enum { LABEL_COL_RIGHT = 35, TEXT_COL_LEFT = 36 };
+
+    Widget label_p1 = XtVaCreateManagedWidget("label_p1",
+                                              xmLabelWidgetClass, cfg_form,
+                                              XmNlabelString, XmStringCreateLocalized("Player 1 Name:"),
+                                              XmNtopAttachment,  XmATTACH_FORM,
+                                              XmNleftAttachment, XmATTACH_FORM,
+                                              XmNrightAttachment, XmATTACH_POSITION,
+                                              XmNrightPosition, LABEL_COL_RIGHT,
+                                              XmNalignment,      XmALIGNMENT_END,
+                                              NULL);
+
+    G.newgame_text_p1 = XtVaCreateManagedWidget("text_p1",
+                                                xmTextFieldWidgetClass, cfg_form,
+                                                XmNtopAttachment,   XmATTACH_FORM,
+                                                XmNleftAttachment,  XmATTACH_POSITION,
+                                                XmNleftPosition,    TEXT_COL_LEFT,
+                                                XmNrightAttachment, XmATTACH_FORM,
+                                                XmNcolumns,         24,
+                                                NULL);
+
+    G.newgame_label_p2 = XtVaCreateManagedWidget("label_p2",
+                                                 xmLabelWidgetClass, cfg_form,
+                                                 XmNlabelString, XmStringCreateLocalized("CPU Name:"),
+                                                 XmNtopAttachment,  XmATTACH_WIDGET,
+                                                 XmNtopWidget,      G.newgame_text_p1,
+                                                 XmNtopOffset,      8,
+                                                 XmNleftAttachment, XmATTACH_FORM,
+                                                 XmNrightAttachment, XmATTACH_POSITION,
+                                                 XmNrightPosition, LABEL_COL_RIGHT,
+                                                 XmNalignment,      XmALIGNMENT_END,
+                                                 NULL);
+
+    G.newgame_text_p2 = XtVaCreateManagedWidget("text_p2",
+                                                xmTextFieldWidgetClass, cfg_form,
+                                                XmNtopAttachment,   XmATTACH_WIDGET,
+                                                XmNtopWidget,       G.newgame_text_p1,
+                                                XmNtopOffset,       8,
+                                                XmNleftAttachment,  XmATTACH_POSITION,
+                                                XmNleftPosition,    TEXT_COL_LEFT,
+                                                XmNrightAttachment, XmATTACH_FORM,
+                                                XmNcolumns,         24,
+                                                NULL);
+
+    Widget label_r = XtVaCreateManagedWidget("label_rounds",
+                                             xmLabelWidgetClass, cfg_form,
+                                             XmNlabelString, XmStringCreateLocalized("Rounds:"),
+                                             XmNtopAttachment,  XmATTACH_WIDGET,
+                                             XmNtopWidget,      G.newgame_text_p2,
+                                             XmNtopOffset,      10,
+                                             XmNleftAttachment, XmATTACH_FORM,
+                                             XmNrightAttachment, XmATTACH_POSITION,
+                                             XmNrightPosition, LABEL_COL_RIGHT,
+                                             XmNalignment,      XmALIGNMENT_END,
+                                             NULL);
+
+    G.newgame_text_rounds = XtVaCreateManagedWidget("text_rounds",
+                                                    xmTextFieldWidgetClass, cfg_form,
+                                                    XmNtopAttachment,  XmATTACH_WIDGET,
+                                                    XmNtopWidget,      G.newgame_text_p2,
+                                                    XmNtopOffset,      10,
+                                                    XmNleftAttachment, XmATTACH_POSITION,
+                                                    XmNleftPosition,   TEXT_COL_LEFT,
+                                                    XmNcolumns,        6,
+                                                    NULL);
+
+    /* Optional: give the dialog a reasonable initial size so centering works nicely */
+    XtVaSetValues(shell, XmNwidth, 420, XmNheight, 260, NULL);
+
+    on_newgame_mode_changed(NULL, NULL, NULL);
+}
+
+static void show_new_game_dialog(int is_startup) {
+    build_new_game_dialog();
+
+    G.newgame_is_startup = is_startup;
+
+    if (!is_startup) {
+        G.newgame_prev_paused = G.paused;
+    } else {
+        G.newgame_prev_paused = 1;
+    }
+
+    /* pause while dialog is open */
+    G.paused = 1;
+    set_status_text();
+    redraw();
+
+    XmToggleButtonSetState(G.newgame_rb_1p, !G.two_player, False);
+    XmToggleButtonSetState(G.newgame_rb_2p,  G.two_player, False);
+
+    XmTextFieldSetString(G.newgame_text_p1, (G.player1_name[0] ? G.player1_name : "Player 1"));
+    XmTextFieldSetString(G.newgame_text_p2, (G.player2_name[0] ? G.player2_name : (G.two_player ? "Player 2" : "CPU")));
+
+    {
+        char tmp[16];
+        snprintf(tmp, sizeof(tmp), "%d", (G.rounds_total > 0 ? G.rounds_total : 3));
+        XmTextFieldSetString(G.newgame_text_rounds, tmp);
+    }
+
+    on_newgame_mode_changed(NULL, NULL, NULL);
+
+    /* Center over the main window */
+    center_shell_over_widget(XtParent(G.newgame_dialog), G.toplevel);
+
+    XtManageChild(G.newgame_dialog);
+
+    Widget shell = XtParent(G.newgame_dialog);
+    if (XtIsRealized(shell)) {
+        XRaiseWindow(XtDisplay(shell), XtWindow(shell));
+    }
+}
+
+static void on_new_game_menu(Widget w, XtPointer client, XtPointer call) {
+    (void)w; (void)client; (void)call;
+    show_new_game_dialog(0);
 }
 
 /* ---------- Main ---------- */
@@ -858,10 +1449,15 @@ int main(int argc, char **argv) {
     dirq_clear(&G.p2q);
     memset(G.key_down, 0, sizeof(G.key_down));
 
+    strcpy(G.player1_name, "Player 1");
+    strcpy(G.player2_name, "CPU");
+    G.rounds_total = 3;
+
     G.two_player = 0;
     for (int i=1;i<argc;i++) {
         if (arg_is(argv[i], "-2") || arg_is(argv[i], "--2") || arg_is(argv[i], "--two")) {
             G.two_player = 1;
+            strcpy(G.player2_name, "Player 2");
         }
     }
 
@@ -904,6 +1500,13 @@ int main(int argc, char **argv) {
                                                     NULL);
     Widget window_menu = XmCreatePulldownMenu(G.menu_bar, "window_menu", NULL, 0);
     XtVaSetValues(window_cascade, XmNsubMenuId, window_menu, NULL);
+
+    Widget newgame_item = XtVaCreateManagedWidget("newgame_item",
+                                                  xmPushButtonWidgetClass, window_menu,
+                                                  XmNlabelString, XmStringCreateLocalized("New Game..."),
+                                                  XmNmnemonic, 'N',
+                                                  NULL);
+    XtAddCallback(newgame_item, XmNactivateCallback, on_new_game_menu, NULL);
 
     Widget close_item = XtVaCreateManagedWidget("close_item",
                                                 xmPushButtonWidgetClass, window_menu,
@@ -985,7 +1588,6 @@ int main(int argc, char **argv) {
     XtAddCallback(G.drawing, XmNexposeCallback, on_expose, NULL);
     XtAddCallback(G.drawing, XmNresizeCallback, on_expose, NULL);
 
-    /* Input: KeyPress + KeyRelease + click-to-focus + focus pause */
     XtAddEventHandler(G.drawing, KeyPressMask | KeyReleaseMask, False, on_key, NULL);
     XtAddEventHandler(G.drawing, ButtonPressMask, False, on_click_focus, NULL);
     XtAddEventHandler(G.drawing, FocusChangeMask, False, on_focus_change, NULL);
@@ -999,7 +1601,12 @@ int main(int argc, char **argv) {
 
     on_realize(G.drawing, NULL, NULL);
 
+    /* Pause and force startup dialog */
+    G.paused = 1;
     set_status_text();
+    redraw();
+
+    show_new_game_dialog(1);
 
     G.timer = XtAppAddTimeOut(G.app, (unsigned long)G.tick_ms, on_tick, NULL);
 

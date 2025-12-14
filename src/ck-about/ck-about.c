@@ -220,17 +220,48 @@ int main(int argc, char *argv[])
                   XmNdefaultButton, okButton,
                   NULL);
 
-    about_add_standard_pages(notebook, 1,
-                             "About",
-                             "CK-Core",
-                             "(c) 2025-2026 by Dr. C. Klukas",
-                             False);
+    /* Manually add pages to insert Motif tab between CDE and OS */
+    about_add_title_page(notebook, 1, "page_app_about", "About",
+                         "CK-Core", "(c) 2025-2026 by Dr. C. Klukas");
+
+    {
+        AboutField cde_fields[4];
+        int cde_count = about_get_cde_fields(cde_fields, 4);
+        about_add_table_page(notebook, 2, "page_cde", "CDE",
+                             cde_fields, cde_count);
+    }
+
+    {
+        AboutField motif_fields[3];
+        motif_fields[0].label = "Version";
+        if (strncmp(XmVERSION_STRING, "@(#)", 4) == 0) {
+            snprintf(motif_fields[0].value, sizeof(motif_fields[0].value), "%s", XmVERSION_STRING + 4);
+        } else {
+            snprintf(motif_fields[0].value, sizeof(motif_fields[0].value), "%s", XmVERSION_STRING);
+        }
+        motif_fields[1].label = "Description";
+        snprintf(motif_fields[1].value, sizeof(motif_fields[1].value),
+                 "Motif user interface component toolkit");
+        motif_fields[2].label = "License";
+        snprintf(motif_fields[2].value, sizeof(motif_fields[2].value),
+                 "Published under LGPL v2.1");
+        about_add_table_page(notebook, 3, "page_motif", "Motif",
+                             motif_fields, 3);
+    }
+
+    {
+        AboutField os_fields[4];
+        int os_count = about_get_os_fields(os_fields, 4);
+        about_add_table_page(notebook, 4, "page_os", "OS",
+                             os_fields, os_count);
+    }
 
     /* Size + title */
     XtVaSetValues(toplevel,
                   XmNtitle,      "About CK-Core",
                   XmNminWidth,   400,
-                  XmNminHeight,  200,
+                  XmNmaxWidth,   850,
+                  XmNminHeight,  300,
                   NULL);
 
     /* WM protocol handling: DELETE + SAVE_YOURSELF */

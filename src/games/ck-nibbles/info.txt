@@ -1,0 +1,14 @@
+Makefile:
+
+CC ?= cc
+CFLAGS ?= -O2 -Wall -Wextra
+LDFLAGS ?=
+LIBS = -lXm -lXt -lX11
+
+all: ck-nibbles
+
+ck-nibbles: ck-nibbles.c
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) $(LIBS)
+
+clean:
+	rm -f ck-nibbles

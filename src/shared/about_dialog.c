@@ -4,6 +4,7 @@
 #include <Xm/Label.h>
 #include <Xm/Notebook.h>
 #include <Xm/PushB.h>
+#include <X11/Xlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -160,6 +161,63 @@ void about_add_table_page(Widget notebook, int page_number,
     Widget page = XmCreateForm(notebook, page_name ? (char *)page_name : "tablePage", args, n);
     XtManageChild(page);
 
+    /* Calculate the maximum width needed for labels */
+    Display *dpy = XtDisplay(notebook);
+    XFontStruct *font_struct = XLoadQueryFont(dpy, "-*-helvetica-bold-r-normal-*-18-*");
+    if (!font_struct) {
+        font_struct = XLoadQueryFont(dpy, "-*-helvetica-bold-r-normal-*-16-*");
+    }
+    if (!font_struct) {
+        font_struct = XLoadQueryFont(dpy, "-*-helvetica-bold-r-normal-*-14-*");
+    }
+    if (!font_struct) {
+        font_struct = XLoadQueryFont(dpy, "-*-helvetica-bold-r-normal-*-12-*");
+    }
+    if (!font_struct) {
+        font_struct = XLoadQueryFont(dpy, "fixed");
+    }
+
+    XmFontList bold_fontlist = NULL;
+    if (font_struct) {
+        bold_fontlist = XmFontListCreate(font_struct, XmFONTLIST_DEFAULT_TAG);
+    }
+
+    int max_label_width = 0;
+    if (font_struct) {
+        for (int i = 0; i < field_count; ++i) {
+            int width = XTextWidth(font_struct, fields[i].label, strlen(fields[i].label));
+            if (width > max_label_width) {
+                max_label_width = width;
+            }
+        }
+    } else {
+        /* Fallback: estimate width based on character count (rough approximation) */
+        for (int i = 0; i < field_count; ++i) {
+            int width = strlen(fields[i].label) * 8; /* ~8 pixels per character */
+            if (width > max_label_width) {
+                max_label_width = width;
+            }
+        }
+    }
+
+    /* Get page width to calculate percentage - use notebook width as it's more reliable */
+    Dimension page_width = 0;
+    XtVaGetValues(notebook, XmNwidth, &page_width, NULL);
+    if (page_width == 0) {
+        /* Try to get from toplevel */
+        Widget toplevel = XtParent(XtParent(notebook)); /* notebook -> mainForm -> toplevel */
+        if (toplevel) {
+            XtVaGetValues(toplevel, XmNwidth, &page_width, NULL);
+        }
+        if (page_width == 0) page_width = 550; /* fallback to our max width */
+    }
+
+    /* Add more padding (40 pixels) for better spacing */
+    int label_column_width = max_label_width + 40;
+    int label_column_percent = (label_column_width * 100) / page_width;
+    if (label_column_percent < 8) label_column_percent = 8;
+    if (label_column_percent > 45) label_column_percent = 45; /* cap at 45% */
+
     Widget prev_row = NULL;
     for (int i = 0; i < field_count; ++i) {
         Widget key_label, value_label;
@@ -176,14 +234,19 @@ void about_add_table_page(Widget notebook, int page_number,
         XtSetArg(args[n], XmNleftAttachment,  XmATTACH_POSITION); n++;
         XtSetArg(args[n], XmNleftPosition,    5); n++;
         XtSetArg(args[n], XmNrightAttachment, XmATTACH_POSITION); n++;
-        XtSetArg(args[n], XmNrightPosition,   40); n++;
-        XtSetArg(args[n], XmNalignment,       XmALIGNMENT_END); n++;
+        XtSetArg(args[n], XmNrightPosition,   5 + label_column_percent); n++;
+        XtSetArg(args[n], XmNalignment,       XmALIGNMENT_BEGINNING); n++;
         key_label = XmCreateLabel(page, "table_key", args, n);
 
         XmString key_xms = XmStringCreateLocalized((char*)fields[i].label);
         XtVaSetValues(key_label,
                       XmNlabelString, key_xms,
                       NULL);
+        if (bold_fontlist) {
+            XtVaSetValues(key_label,
+                          XmNfontList, bold_fontlist,
+                          NULL);
+        }
         XmStringFree(key_xms);
         XtManageChild(key_label);
 
@@ -191,7 +254,7 @@ void about_add_table_page(Widget notebook, int page_number,
         XtSetArg(args[n], XmNtopAttachment,   XmATTACH_OPPOSITE_WIDGET); n++;
         XtSetArg(args[n], XmNtopWidget,       key_label); n++;
         XtSetArg(args[n], XmNleftAttachment,  XmATTACH_POSITION); n++;
-        XtSetArg(args[n], XmNleftPosition,    45); n++;
+        XtSetArg(args[n], XmNleftPosition,    5 + label_column_percent); n++;
         XtSetArg(args[n], XmNrightAttachment, XmATTACH_POSITION); n++;
         XtSetArg(args[n], XmNrightPosition,   95); n++;
         XtSetArg(args[n], XmNalignment,       XmALIGNMENT_BEGINNING); n++;
@@ -206,6 +269,9 @@ void about_add_table_page(Widget notebook, int page_number,
 
         prev_row = key_label;
     }
+
+    /* Note: font resources are not freed here for consistency with title_page implementation */
+    /* The widgets retain references to the font list */
 
     Widget tab = XmCreatePushButton(notebook, tab_label ? (char *)tab_label : "tab", NULL, 0);
     XtVaSetValues(tab,
@@ -248,6 +314,24 @@ int about_add_standard_pages(Widget notebook, int start_page,
     int cde_count = about_get_cde_fields(cde_fields, 4);
     about_add_table_page(notebook, page++, "page_cde", "CDE",
                          cde_fields, cde_count);
+
+    {
+        AboutField motif_fields[3];
+        motif_fields[0].label = "Version";
+        if (strncmp(XmVERSION_STRING, "@(#)", 4) == 0) {
+            snprintf(motif_fields[0].value, sizeof(motif_fields[0].value), "%s", XmVERSION_STRING + 4);
+        } else {
+            snprintf(motif_fields[0].value, sizeof(motif_fields[0].value), "%s", XmVERSION_STRING);
+        }
+        motif_fields[1].label = "Description";
+        snprintf(motif_fields[1].value, sizeof(motif_fields[1].value),
+                 "Motif user interface component toolkit");
+        motif_fields[2].label = "License";
+        snprintf(motif_fields[2].value, sizeof(motif_fields[2].value),
+                 "Published under LGPL v2.1");
+        about_add_table_page(notebook, page++, "page_motif", "Motif",
+                             motif_fields, 3);
+    }
 
     AboutField os_fields[4];
     int os_count = about_get_os_fields(os_fields, 4);

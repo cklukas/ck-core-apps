@@ -24,6 +24,7 @@
 
 #include <X11/Intrinsic.h>  /* XtAppInitialize, XtDisplay, XtWindow, ... */
 #include <Xm/Xm.h>          /* XmGetColors */
+#include <Xm/AtomMgr.h>     /* XmInternAtom */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -502,6 +503,10 @@ int main(int argc, char **argv)
 
     XStoreName(dpy, win, no_embed ? "ck-clock (debug)" : "ck-clock");
 
+    Atom wm_delete_atom = XmInternAtom(dpy, "WM_DELETE_WINDOW", False);
+    /* let dtwm send WM_DELETE_WINDOW so we can exit when the panel restarts */
+    XSetWMProtocols(dpy, win, &wm_delete_atom, 1);
+
     XSelectInput(dpy, win,
                  ExposureMask |
                  StructureNotifyMask |
@@ -509,7 +514,9 @@ int main(int argc, char **argv)
 
     apply_timezone();
 
-    for (;;) {
+    int running = 1;
+
+    while (running) {
         while (XPending(dpy)) {
             XEvent ev;
             XNextEvent(dpy, &ev);
@@ -525,9 +532,19 @@ int main(int argc, char **argv)
             case ButtonPress:
                 handle_button(&ev.xbutton);
                 break;
+            case ClientMessage:
+                /* exit when the panel asks us to quit so we don't leave orphans */
+                if ((Atom)ev.xclient.message_type == wm_delete_atom) {
+                    running = 0;
+                }
+                break;
             default:
                 break;
             }
+        }
+
+        if (!running) {
+            break;
         }
 
         draw_clock();

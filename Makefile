@@ -19,7 +19,8 @@ PROGRAMS := $(BIN_DIR)/ck-about \
             $(BIN_DIR)/ck-mixer \
             $(BIN_DIR)/ck-clock \
             $(BIN_DIR)/ck-calc \
-            $(BIN_DIR)/ck-nibbles
+            $(BIN_DIR)/ck-nibbles \
+            $(BIN_DIR)/ck-mines
 
 .PHONY: all clean
 
@@ -51,6 +52,10 @@ $(BIN_DIR)/ck-calc: src/ck-calc/ck-calc.c src/ck-calc/app_state_utils.c src/ck-c
 # ck-nibbles (Motif/X11 game, with CDE session dependency)
 $(BIN_DIR)/ck-nibbles: src/games/ck-nibbles/ck-nibbles.c src/shared/about_dialog.c src/shared/about_dialog.h src/shared/session_utils.c src/shared/session_utils.h | $(BIN_DIR)
 	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/games/ck-nibbles/ck-nibbles.c src/shared/about_dialog.c src/shared/session_utils.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
+
+# ck-mines (Motif/X11 game, with CDE session dependency)
+$(BIN_DIR)/ck-mines: src/games/ck-mines/ck-mines.c src/shared/session_utils.c src/shared/session_utils.h src/shared/about_dialog.c src/shared/about_dialog.h | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/games/ck-mines/ck-mines.c src/shared/session_utils.c src/shared/about_dialog.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
 
 clean:
 	rm -rf $(BUILD_DIR)

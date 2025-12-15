@@ -144,6 +144,7 @@ typedef struct {
     int bb_w, bb_h;
 
     Pixel col_bg, col_fg, col_top, col_bottom, col_select, col_red;
+    Pixel col_yellow;
     Pixel col_led_on, col_led_off;
 
     XFontStruct *font;
@@ -677,12 +678,21 @@ static void palette_from_widget(Widget w)
         */
         G.col_led_on  = G.col_red ? G.col_red : fg;
         G.col_led_off = select;
+
+        /* Yellow for smiley face */
+        if (XAllocNamedColor(G.dpy, cmap, "yellow", &scr, &exact) ||
+            XAllocNamedColor(G.dpy, cmap, "gold", &scr, &exact)) {
+            G.col_yellow = scr.pixel;
+        } else {
+            G.col_yellow = select; // Fallback
+        }
     }
 
-    DBG2("palette: bg=%lu fg=%lu top=%lu bottom=%lu select=%lu red=%lu led_on=%lu led_off=%lu",
+    DBG2("palette: bg=%lu fg=%lu top=%lu bottom=%lu select=%lu red=%lu yellow=%lu led_on=%lu led_off=%lu",
          (unsigned long)G.col_bg, (unsigned long)G.col_fg,
          (unsigned long)G.col_top, (unsigned long)G.col_bottom,
          (unsigned long)G.col_select, (unsigned long)G.col_red,
+         (unsigned long)G.col_yellow,
          (unsigned long)G.col_led_on, (unsigned long)G.col_led_off);
 }
 
@@ -952,10 +962,16 @@ static void draw_face_to(Drawable d,int w,int h){
     draw_3d_rect(d,0,0,w,h,0);
 
     int cx=w/2, cy=h/2;
-    XSetForeground(G.dpy,G.gc,G.col_fg);
 
     int R=MAX(9,S(9));
-    XDrawArc(G.dpy,d,G.gc,cx-R,cy-R,(unsigned)(2*R),(unsigned)(2*R),0,360*64);
+
+    /* Fill the circle with yellow */
+    XSetForeground(G.dpy, G.gc, G.col_yellow);
+    XFillArc(G.dpy, d, G.gc, cx-R, cy-R, (unsigned)(2*R), (unsigned)(2*R), 0, 360*64);
+
+    /* Draw black outline */
+    XSetForeground(G.dpy, G.gc, G.col_fg);
+    XDrawArc(G.dpy, d, G.gc, cx-R, cy-R, (unsigned)(2*R), (unsigned)(2*R), 0, 360*64);
 
     if(G.face==FACE_DEAD){
         int e=MAX(3,S(3));
@@ -1379,11 +1395,8 @@ static void build_ui(void) {
                                           XmNshadowType, XmSHADOW_IN,
                                           NULL);
 
-    G.top_form = XtVaCreateManagedWidget("topRC",
-                                         xmRowColumnWidgetClass, G.top_frame,
-                                         XmNorientation, XmHORIZONTAL,
-                                         XmNpacking, XmPACK_TIGHT,
-                                         XmNspacing, (Dimension)S(12),
+    G.top_form = XtVaCreateManagedWidget("topForm",
+                                         xmFormWidgetClass, G.top_frame,
                                          XmNmarginWidth, (Dimension)PAD_PX(),
                                          XmNmarginHeight, (Dimension)PAD_PX(),
                                          NULL);
@@ -1416,6 +1429,27 @@ static void build_ui(void) {
                                          XmNresizePolicy, XmRESIZE_NONE,
                                          NULL);
     XtAddCallback(G.time_led, XmNexposeCallback, led_expose_cb, (XtPointer)(intptr_t)1);
+
+    // Attachments for top_form children
+    XtVaSetValues(G.mine_frame,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  NULL);
+
+    XtVaSetValues(G.time_frame,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  NULL);
+
+    XtVaSetValues(G.face_button,
+                  XmNleftAttachment, XmATTACH_POSITION,
+                  XmNleftPosition, 50,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  XmNleftOffset, -FACE_W_PX() / 2,
+                  NULL);
 
     /* ---------- Board frame ---------- */
     G.board_frame = XtVaCreateManagedWidget("boardFrame",

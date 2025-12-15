@@ -1067,12 +1067,6 @@ static void apply_board_geometry(void)
     }
 
     /* Let Motif relayout and flush. */
-    if (G.mainw) {
-        XtVaSetValues(G.mainw, XmNwidth,  (Dimension)MAX(200, fr_w + PAD_PX()*4),
-                              XmNheight, (Dimension)MAX(200, fr_h + S(260)),
-                              NULL);
-    }
-
     if (XtIsRealized(G.toplevel)) {
         XSync(XtDisplay(G.toplevel), False);
     }

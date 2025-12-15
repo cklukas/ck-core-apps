@@ -1455,8 +1455,8 @@ static void build_ui(void) {
                       StructureNotifyMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
                       False, board_event_handler, NULL);
 
-    /* ---------- Status bar (commandWindow of XmMainWindow!) ---------- */
-    G.status_frame = XtVaCreateManagedWidget("statusFrame", xmFrameWidgetClass, G.mainw,
+    /* ---------- Status bar ---------- */
+    G.status_frame = XtVaCreateManagedWidget("statusFrame", xmFrameWidgetClass, G.work_form,
                                              XmNshadowType, XmSHADOW_ETCHED_IN,
                                              NULL);
     G.status_label = XtVaCreateManagedWidget("statusLabel", xmLabelWidgetClass, G.status_frame,
@@ -1467,11 +1467,10 @@ static void build_ui(void) {
                                              XmNmarginBottom, 2,
                                              NULL);
 
-    /* FIX: status_frame must be commandWindow (2nd parameter), not a scrollbar slot */
-    DBG("XmMainWindowSetAreas: menubar=%p command=status_frame=%p work=%p",
-        (void*)G.menubar, (void*)G.status_frame, (void*)G.work_form);
+    DBG("XmMainWindowSetAreas: menubar=%p command=NULL work=%p",
+        (void*)G.menubar, (void*)G.work_form);
 
-    XmMainWindowSetAreas(G.mainw, G.menubar, G.status_frame, NULL, NULL, G.work_form);
+    XmMainWindowSetAreas(G.mainw, G.menubar, NULL, NULL, NULL, G.work_form);
 
     DBG("build_ui done: board_bb=%p board_da=%p (initial board %dx%d)",
         (void*)G.board_bb, (void*)G.board_da, bw0, bh0);

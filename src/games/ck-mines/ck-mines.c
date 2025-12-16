@@ -1275,8 +1275,8 @@ static void redraw_board(void)
  * Face drawing
  * ======================================================================================= */
 static void draw_face_to(Drawable d,int w,int h){
-    fill_rect(d,0,0,w,h,G.col_select);
-    draw_3d_rect(d,0,0,w,h,0);
+    
+    fill_rect(d,0,0,w,h,G.col_bg);
 
     int cx = w / 2, cy = h / 2;
 
@@ -1782,11 +1782,22 @@ static void build_ui(void) {
                                          NULL);
     XtAddCallback(G.mine_led, XmNexposeCallback, led_expose_cb, (XtPointer)(intptr_t)0);
 
+    // G.face_button = XtVaCreateManagedWidget("face", xmDrawnButtonWidgetClass, G.top_form,
+    //                                         XmNwidth,  (Dimension)FACE_W_PX(),
+    //                                         XmNheight, (Dimension)FACE_H_PX(),
+    //                                         XmNshadowType, XmSHADOW_OUT,
+    //                                         NULL);
+
     G.face_button = XtVaCreateManagedWidget("face", xmDrawnButtonWidgetClass, G.top_form,
-                                            XmNwidth,  (Dimension)FACE_W_PX(),
-                                            XmNheight, (Dimension)FACE_H_PX(),
-                                            XmNshadowType, XmSHADOW_OUT,
-                                            NULL);
+        XmNwidth,  (Dimension)FACE_W_PX(),
+        XmNheight, (Dimension)FACE_H_PX(),
+        XmNshadowThickness, 0,      /* <- remove the frame line */
+        XmNhighlightThickness, 0,
+        XmNtraversalOn, False,
+        XmNnavigationType, XmNONE,
+        XmNrecomputeSize, False,
+        NULL);
+
     XtAddCallback(G.face_button, XmNexposeCallback,   face_expose_cb, NULL);
     XtAddCallback(G.face_button, XmNactivateCallback, face_activate_cb, NULL);
     XtAddCallback(G.face_button, XmNarmCallback,      face_arm_cb, NULL);

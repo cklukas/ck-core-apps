@@ -1288,7 +1288,7 @@ static void draw_face_to(Drawable d,int w,int h){
     float mouth_y_frac = 0.55f; // Vertical position from top (lower = up)
     float mouth_width_frac = 0.5f; // Mouth width fraction of w
     float mouth_height_frac = 0.3f; // Mouth height fraction of h
-    float thickness = 1.0f; // Line thickness for multi-line draws
+    float thickness = g_ui_scale; // Line thickness for multi-line draws
 
     int min_dim = MIN(w, h);
     int R = (int)(radius_frac * min_dim);
@@ -1309,17 +1309,17 @@ static void draw_face_to(Drawable d,int w,int h){
 
     if (G.face == FACE_DEAD) {
         // Left eye (X)
-        for (int i = -thickness; i <= thickness; i++) {
+        for (int i = 0; i <= thickness; i++) {
             XDrawLine(G.dpy, d, G.gc, cx - eye_x_offset - eye_size, eye_y + i - eye_size, cx - eye_x_offset + eye_size, eye_y + i + eye_size);
             XDrawLine(G.dpy, d, G.gc, cx - eye_x_offset - eye_size, eye_y + i + eye_size, cx - eye_x_offset + eye_size, eye_y + i - eye_size);
         }
         // Right eye (X, symmetric)
-        for (int i = -thickness; i <= thickness; i++) {
+        for (int i = 0; i <= thickness; i++) {
             XDrawLine(G.dpy, d, G.gc, cx + eye_x_offset - eye_size, eye_y + i - eye_size, cx + eye_x_offset + eye_size, eye_y + i + eye_size);
             XDrawLine(G.dpy, d, G.gc, cx + eye_x_offset - eye_size, eye_y + i + eye_size, cx + eye_x_offset + eye_size, eye_y + i - eye_size);
         }
         // Frown mouth
-        for (int i = -thickness; i <= thickness; i++) {
+        for (int i = 0; i <= thickness; i++) {
             XDrawArc(G.dpy, d, G.gc, cx - mouth_width / 2, mouth_y + mouth_height/2 + i, (unsigned)mouth_width, (unsigned)mouth_height, 45 * 64, 90 * 64);
         }
     } else if (G.face == FACE_OHNO) {
@@ -1329,7 +1329,7 @@ static void draw_face_to(Drawable d,int w,int h){
         XFillArc(G.dpy, d, G.gc, cx + eye_x_offset - eye_size / 2, eye_y - eye_size / 2, (unsigned)eye_size, (unsigned)eye_size, 0, 360 * 64);
         // Surprised mouth (O)
         int o_size = MIN(mouth_width, mouth_height) / 3;
-        for (int i = -thickness; i <= thickness; i++) {
+        for (int i = 0; i <= thickness; i++) {
             XDrawArc(G.dpy, d, G.gc, cx - o_size + i, mouth_y  + i, (unsigned)(2 * o_size - 2 * i), (unsigned)(2 * o_size - 2 * i), 0, 360 * 64);
         }
     } else if (G.face == FACE_COOL) {
@@ -1339,7 +1339,7 @@ static void draw_face_to(Drawable d,int w,int h){
             XDrawLine(G.dpy, d, G.gc, cx - w / 3, glass_y + i, cx + w / 3, glass_y + i);
         }
 
-        for (int i = -thickness; i <= thickness; i++) {
+        for (int i = 0; i <= thickness; i++) {
             // draw rectangles for glasses below the line
             XFillRectangle(G.dpy, d, G.gc, cx - eye_x_offset - eye_size, glass_y + i, (unsigned)eye_size*2, (unsigned)(eye_size + thickness));
             XFillRectangle(G.dpy, d, G.gc, cx + eye_x_offset - eye_size, glass_y + i, (unsigned)eye_size*2, (unsigned)(eye_size + thickness));
@@ -1354,7 +1354,7 @@ static void draw_face_to(Drawable d,int w,int h){
         // Right eye (symmetric)
         XFillArc(G.dpy, d, G.gc, cx + eye_x_offset - eye_size / 2, eye_y - eye_size / 2, (unsigned)eye_size, (unsigned)eye_size, 0, 360 * 64);
         // Smile mouth
-        for (int i = -thickness; i <= thickness; i++) {
+        for (int i = 0; i <= thickness; i++) {
             XDrawArc(G.dpy, d, G.gc, cx - mouth_width / 2, mouth_y + i - mouth_height / 2, (unsigned)mouth_width, (unsigned)mouth_height, 225 * 64, 90 * 64);
         }
     }
@@ -1781,12 +1781,6 @@ static void build_ui(void) {
                                          XmNresizePolicy, XmRESIZE_NONE,
                                          NULL);
     XtAddCallback(G.mine_led, XmNexposeCallback, led_expose_cb, (XtPointer)(intptr_t)0);
-
-    // G.face_button = XtVaCreateManagedWidget("face", xmDrawnButtonWidgetClass, G.top_form,
-    //                                         XmNwidth,  (Dimension)FACE_W_PX(),
-    //                                         XmNheight, (Dimension)FACE_H_PX(),
-    //                                         XmNshadowType, XmSHADOW_OUT,
-    //                                         NULL);
 
     G.face_button = XtVaCreateManagedWidget("face", xmDrawnButtonWidgetClass, G.top_form,
         XmNwidth,  (Dimension)FACE_W_PX(),

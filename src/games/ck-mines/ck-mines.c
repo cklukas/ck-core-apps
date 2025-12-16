@@ -1,5 +1,5 @@
 /*
- * ck-mines.c  -  Motif/CDE Minesweeper (Win95-inspired) reimplementation
+ * ck-mines.c  -  Motif/CDE Minesweeper implementation
  *
  * Build:
  *   cc -O2 -Wall -Isrc -I/usr/local/CDE/include \
@@ -18,6 +18,7 @@
 #include <Xm/RowColumn.h>
 #include <Xm/CascadeB.h>
 #include <Xm/PushB.h>
+#include <Xm/TextF.h>
 #include <Xm/ToggleB.h>
 #include <Xm/Label.h>
 #include <Xm/Frame.h>
@@ -29,6 +30,7 @@
 #include <Xm/SeparatoG.h>
 #include <Xm/Protocols.h>
 #include <Xm/BulletinB.h>
+#include <Xm/SelectioB.h>   /* XmCreatePromptDialog, XmSelectionBoxGetChild, XmDIALOG_TEXT, ... */
 
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
@@ -179,6 +181,9 @@ typedef struct {
     int shell_mapped;
     int pending_geom;
 
+    /* Fastest times (for preset difficulties) */
+    int  best_time[3];
+    char best_name[3][64];
 } App;
 
 static App G;
@@ -199,6 +204,8 @@ static void stop_timer(void);
 static void start_timer(void);
 
 static void show_about(void);
+static void show_fastest_dialog(void);
+static void maybe_record_fastest(void);
 
 static void board_expose_cb(Widget w, XtPointer client, XtPointer call);
 static void board_resize_cb(Widget w, XtPointer client, XtPointer call);
@@ -394,6 +401,12 @@ static void load_config(void) {
     G.mines= PRESET_BEGINNER.mines;
     G.marks_enabled = 1;
 
+    /* Default fastest times */
+    for (int i=0;i<3;i++) {
+        G.best_time[i] = 0; /* 0 => none recorded yet */
+        snprintf(G.best_name[i], sizeof(G.best_name[i]), "%s", "---");
+    }
+
     FILE *f = fopen(G.cfg_path,"r");
     if (!f) {
         const char *home=getenv("HOME");
@@ -417,6 +430,12 @@ static void load_config(void) {
         else if(!strcmp(k,"rows")) G.rows=parse_int(v,G.rows);
         else if(!strcmp(k,"mines")) G.mines=parse_int(v,G.mines);
         else if(!strcmp(k,"marks")) G.marks_enabled=parse_int(v,G.marks_enabled);
+        else if(!strcmp(k,"best_beginner_time"))      G.best_time[0]=MAX(0,parse_int(v,G.best_time[0]));
+        else if(!strcmp(k,"best_intermediate_time"))  G.best_time[1]=MAX(0,parse_int(v,G.best_time[1]));
+        else if(!strcmp(k,"best_expert_time"))        G.best_time[2]=MAX(0,parse_int(v,G.best_time[2]));
+        else if(!strcmp(k,"best_beginner_name"))      { strncpy(G.best_name[0], v, sizeof(G.best_name[0])-1); G.best_name[0][sizeof(G.best_name[0])-1]=0; }
+        else if(!strcmp(k,"best_intermediate_name"))  { strncpy(G.best_name[1], v, sizeof(G.best_name[1])-1); G.best_name[1][sizeof(G.best_name[1])-1]=0; }
+        else if(!strcmp(k,"best_expert_name"))        { strncpy(G.best_name[2], v, sizeof(G.best_name[2])-1); G.best_name[2][sizeof(G.best_name[2])-1]=0; }
     }
     fclose(f);
 
@@ -442,6 +461,14 @@ static void save_config(void) {
     fprintf(f,"rows=%d\n",G.rows);
     fprintf(f,"mines=%d\n",G.mines);
     fprintf(f,"marks=%d\n",G.marks_enabled);
+
+    /* Fastest times */
+    fprintf(f,"best_beginner_time=%d\n",     MAX(0,G.best_time[0]));
+    fprintf(f,"best_beginner_name=%s\n",     G.best_name[0][0] ? G.best_name[0] : "---");
+    fprintf(f,"best_intermediate_time=%d\n", MAX(0,G.best_time[1]));
+    fprintf(f,"best_intermediate_name=%s\n", G.best_name[1][0] ? G.best_name[1] : "---");
+    fprintf(f,"best_expert_time=%d\n",       MAX(0,G.best_time[2]));
+    fprintf(f,"best_expert_name=%s\n",       G.best_name[2][0] ? G.best_name[2] : "---");
     fclose(f);
 }
 
@@ -455,6 +482,291 @@ static void set_status(const char *msg) {
     XtVaSetValues(G.status_label, XmNlabelString, xs, NULL);
     XmStringFree(xs);
 }
+/* =======================================================================================
+ * Fastest times
+ * ======================================================================================= */
+static Widget g_fastest_shell = NULL;
+static Widget g_fastest_table = NULL;
+static Widget g_fastest_note  = NULL;
+static Widget g_fastest_mode[3] = {0};
+static Widget g_fastest_time[3] = {0};
+static Widget g_fastest_name[3] = {0};
+
+static const char* diff_label_from_index(int idx) {
+    switch (idx) {
+        case 0: return PRESET_BEGINNER.name;
+        case 1: return PRESET_INTERMEDIATE.name;
+        case 2: return PRESET_EXPERT.name;
+        default: return "";
+    }
+}
+static void update_fastest_dialog_text(void) {
+    if (!g_fastest_table) return;
+
+    for (int i = 0; i < 3; i++) {
+        const char *mode = diff_label_from_index(i);
+        const char *name = (G.best_name[i][0] ? G.best_name[i] : "---");
+        char timebuf[16];
+        if (G.best_time[i] <= 0) snprintf(timebuf, sizeof(timebuf), "---");
+        else snprintf(timebuf, sizeof(timebuf), "%d", G.best_time[i]);
+
+        XmString xs_mode = XmStringCreateLocalized((char*)mode);
+        XmString xs_time = XmStringCreateLocalized(timebuf);
+        XmString xs_name = XmStringCreateLocalized((char*)name);
+        XtVaSetValues(g_fastest_mode[i], XmNlabelString, xs_mode, NULL);
+        XtVaSetValues(g_fastest_time[i], XmNlabelString, xs_time, NULL);
+        XtVaSetValues(g_fastest_name[i], XmNlabelString, xs_name, NULL);
+        XmStringFree(xs_mode);
+        XmStringFree(xs_time);
+        XmStringFree(xs_name);
+    }
+}
+
+static void fastest_reset_cb(Widget w, XtPointer client, XtPointer call) {
+    (void)w; (void)client; (void)call;
+    for (int i=0;i<3;i++) {
+        G.best_time[i] = 0;
+        snprintf(G.best_name[i], sizeof(G.best_name[i]), "%s", "---");
+    }
+    save_config();
+    update_fastest_dialog_text();
+}
+
+static void fastest_close_cb(Widget w, XtPointer client, XtPointer call) {
+    (void)w; (void)client; (void)call;
+    if (g_fastest_shell) XtUnmanageChild(g_fastest_shell);
+}
+
+static void ensure_fastest_dialog(void) {
+    if (g_fastest_shell) return;
+
+    /* Use a FormDialog to keep it WM-managed and centered reasonably. */
+    g_fastest_shell = XmCreateFormDialog(G.toplevel, "fastestDialog", NULL, 0);
+    XtVaSetValues(XtParent(g_fastest_shell),
+                  XmNtitle, "Fastest Mine Sweepers",
+                  XmNallowShellResize, True,
+                  NULL);
+
+    /*
+     * The shell already has a window title; don't duplicate it inside the dialog.
+     * Build a real 3-column table: three vertical columns packed horizontally.
+     * This avoids RowColumn packing quirks (header showing vertically / everything in one row).
+     */
+    Widget cols = XtVaCreateManagedWidget("fastestTable", xmRowColumnWidgetClass, g_fastest_shell,
+                                          XmNtopAttachment, XmATTACH_FORM,
+                                          XmNleftAttachment, XmATTACH_FORM,
+                                          XmNrightAttachment, XmATTACH_FORM,
+                                          XmNorientation, XmHORIZONTAL,
+                                          XmNpacking, XmPACK_TIGHT,
+                                          XmNspacing, S(18),
+                                          XmNmarginHeight, S(10),
+                                          XmNmarginWidth,  S(10),
+                                          NULL);
+
+    /* Keep using g_fastest_table for attachments below */
+    g_fastest_table = cols;
+
+    /* Column containers */
+    Widget col_mode = XtVaCreateManagedWidget("colMode", xmRowColumnWidgetClass, cols,
+                                              XmNorientation, XmVERTICAL,
+                                              XmNpacking, XmPACK_TIGHT,
+                                              XmNspacing, S(6),
+                                              XmNisAligned, True,
+                                              XmNentryAlignment, XmALIGNMENT_BEGINNING,
+                                              NULL);
+
+    Widget col_time = XtVaCreateManagedWidget("colTime", xmRowColumnWidgetClass, cols,
+                                              XmNorientation, XmVERTICAL,
+                                              XmNpacking, XmPACK_TIGHT,
+                                              XmNspacing, S(6),
+                                              XmNisAligned, True,
+                                              XmNentryAlignment, XmALIGNMENT_END,
+                                              NULL);
+
+    Widget col_name = XtVaCreateManagedWidget("colName", xmRowColumnWidgetClass, cols,
+                                              XmNorientation, XmVERTICAL,
+                                              XmNpacking, XmPACK_TIGHT,
+                                              XmNspacing, S(6),
+                                              XmNisAligned, True,
+                                              XmNentryAlignment, XmALIGNMENT_BEGINNING,
+                                              NULL);
+
+    /* Headers */
+    {
+        Widget h_mode = XtVaCreateManagedWidget("hdrMode", xmLabelWidgetClass, col_mode,
+                                                XmNalignment, XmALIGNMENT_BEGINNING, NULL);
+        Widget h_time = XtVaCreateManagedWidget("hdrTime", xmLabelWidgetClass, col_time,
+                                                XmNalignment, XmALIGNMENT_END, NULL);
+        Widget h_name = XtVaCreateManagedWidget("hdrName", xmLabelWidgetClass, col_name,
+                                                XmNalignment, XmALIGNMENT_BEGINNING, NULL);
+
+        XmString xs1 = XmStringCreateLocalized("Mode");
+        XmString xs2 = XmStringCreateLocalized("Time");
+        XmString xs3 = XmStringCreateLocalized("Name");
+        XtVaSetValues(h_mode, XmNlabelString, xs1, NULL);
+        XtVaSetValues(h_time, XmNlabelString, xs2, NULL);
+        XtVaSetValues(h_name, XmNlabelString, xs3, NULL);
+        XmStringFree(xs1);
+        XmStringFree(xs2);
+        XmStringFree(xs3);
+    }
+
+    /* Data rows (3) */
+    for (int i = 0; i < 3; i++) {
+        g_fastest_mode[i] = XtVaCreateManagedWidget("mode", xmLabelWidgetClass, col_mode,
+                                                    XmNalignment, XmALIGNMENT_BEGINNING,
+                                                    NULL);
+        g_fastest_time[i] = XtVaCreateManagedWidget("time", xmLabelWidgetClass, col_time,
+                                                    XmNalignment, XmALIGNMENT_END,
+                                                    NULL);
+        g_fastest_name[i] = XtVaCreateManagedWidget("name", xmLabelWidgetClass, col_name,
+                                                    XmNalignment, XmALIGNMENT_BEGINNING,
+                                                    NULL);
+    }
+
+    g_fastest_note = XtVaCreateManagedWidget("fastestNote", xmLabelWidgetClass, g_fastest_shell,
+                                             XmNtopAttachment, XmATTACH_WIDGET,
+                                             XmNtopWidget, g_fastest_table,
+                                             XmNleftAttachment, XmATTACH_FORM,
+                                             XmNrightAttachment, XmATTACH_FORM,
+                                             XmNalignment, XmALIGNMENT_BEGINNING,
+                                             XmNmarginHeight, S(0),
+                                             XmNmarginWidth,  S(10),
+                                             NULL);
+    {
+        XmString xs = XmStringCreateLocalized("(Time in seconds)");
+        XtVaSetValues(g_fastest_note, XmNlabelString, xs, NULL);
+        XmStringFree(xs);
+    }
+
+    Widget btn_rc = XtVaCreateManagedWidget("fastestButtons", xmRowColumnWidgetClass, g_fastest_shell,
+                                            XmNorientation, XmHORIZONTAL,
+                                            XmNpacking, XmPACK_TIGHT,
+                                            XmNspacing, S(8),
+                                            XmNtopAttachment, XmATTACH_WIDGET,
+                                            XmNtopWidget, g_fastest_note,
+                                            XmNleftAttachment, XmATTACH_FORM,
+                                            XmNrightAttachment, XmATTACH_FORM,
+                                            XmNbottomAttachment, XmATTACH_FORM,
+                                            XmNmarginHeight, S(8),
+                                            XmNmarginWidth,  S(10),
+                                            NULL);
+
+    Widget reset = XtVaCreateManagedWidget("Reset Scores", xmPushButtonWidgetClass, btn_rc, NULL);
+    XtAddCallback(reset, XmNactivateCallback, fastest_reset_cb, NULL);
+
+    Widget ok = XtVaCreateManagedWidget("OK", xmPushButtonWidgetClass, btn_rc, NULL);
+    XtAddCallback(ok, XmNactivateCallback, fastest_close_cb, NULL);
+
+    update_fastest_dialog_text();
+}
+
+
+static void show_fastest_dialog(void) {
+    ensure_fastest_dialog();
+    update_fastest_dialog_text();
+    XtManageChild(g_fastest_shell);
+}
+
+typedef struct {
+    int idx;   /* 0..2 */
+    int time;  /* seconds */
+    Widget dialog;
+} FastestNameCtx;
+
+static void fastest_name_ok_cb(Widget w, XtPointer client, XtPointer call) {
+    (void)w;
+    FastestNameCtx *ctx = (FastestNameCtx*)client;
+    if (!ctx) return;
+    (void)call;
+
+    Widget text = XmSelectionBoxGetChild(ctx->dialog, XmDIALOG_TEXT);
+    char *name = XmTextFieldGetString(text);
+    if (!name) name = XtNewString("Anonymous");
+    trim(name);
+    if (!name[0]) {
+        XtFree(name);
+        name = XtNewString("Anonymous");
+    }
+
+    G.best_time[ctx->idx] = ctx->time;
+    strncpy(G.best_name[ctx->idx], name, sizeof(G.best_name[ctx->idx])-1);
+    G.best_name[ctx->idx][sizeof(G.best_name[ctx->idx])-1] = 0;
+    save_config();
+
+    XtFree(name);
+
+    XtUnmanageChild(ctx->dialog);
+    XtDestroyWidget(ctx->dialog);
+
+    /* After confirming name, show the scoreboard. */
+    show_fastest_dialog();
+
+    free(ctx);
+}
+
+static void fastest_name_cancel_cb(Widget w, XtPointer client, XtPointer call) {
+    (void)w; (void)call;
+    FastestNameCtx *ctx = (FastestNameCtx*)client;
+    if (!ctx) return;
+    XtUnmanageChild(ctx->dialog);
+    XtDestroyWidget(ctx->dialog);
+    free(ctx);
+}
+
+static void prompt_for_fastest_name(int idx, int time_seconds) {
+    FastestNameCtx *ctx = (FastestNameCtx*)calloc(1, sizeof(FastestNameCtx));
+    if (!ctx) return;
+    ctx->idx = idx;
+    ctx->time = time_seconds;
+
+    Widget d = XmCreatePromptDialog(G.toplevel, "fastestName", NULL, 0);
+    ctx->dialog = d;
+
+    /* Title */
+    XtVaSetValues(XtParent(d), XmNtitle, "New Record", NULL);
+
+    char msg[256];
+    snprintf(msg, sizeof(msg),
+             "Congratulations!\n\nYou have the fastest time for %s.\nPlease enter your name:",
+             diff_label_from_index(idx));
+    XmString xmsg = XmStringCreateLocalized(msg);
+    XtVaSetValues(d, XmNselectionLabelString, xmsg, NULL);
+    XmStringFree(xmsg);
+
+    /* Default to existing name (or ---). */
+    Widget text = XmSelectionBoxGetChild(d, XmDIALOG_TEXT);
+    XmTextFieldSetString(text, G.best_name[idx][0] ? G.best_name[idx] : "---");
+    XmTextFieldSetSelection(text, 0, XmTextFieldGetLastPosition(text), CurrentTime);
+
+    /* Hide help button (not used) */
+    Widget help = XmSelectionBoxGetChild(d, XmDIALOG_HELP_BUTTON);
+    if (help) XtUnmanageChild(help);
+
+    XtAddCallback(d, XmNokCallback, fastest_name_ok_cb, (XtPointer)ctx);
+    XtAddCallback(d, XmNcancelCallback, fastest_name_cancel_cb, (XtPointer)ctx);
+
+    XtManageChild(d);
+}
+
+static int diff_to_best_index(DiffId d) {
+    if (d == DIFF_BEGINNER) return 0;
+    if (d == DIFF_INTERMEDIATE) return 1;
+    if (d == DIFF_EXPERT) return 2;
+    return -1;
+}
+
+static void maybe_record_fastest(void) {
+    int idx = diff_to_best_index(G.diff);
+    if (idx < 0 || idx > 2) return; /* only preset difficulties */
+    if (G.elapsed <= 0) return;
+
+    int best = G.best_time[idx];
+    if (best == 0 || G.elapsed < best) {
+        prompt_for_fastest_name(idx, G.elapsed);
+    }
+}
+
 
 /* =======================================================================================
  * Model helpers
@@ -547,6 +859,9 @@ static void check_win(void){
         }
         set_status("You win!");
         redraw_leds();
+
+        /* If this is a new record for the current difficulty, ask for a name. */
+        maybe_record_fastest();
     }
 }
 
@@ -630,9 +945,6 @@ static void toggle_flag_question(int index){
     redraw_leds();
 }
 
-/* =======================================================================================
- * Palette/drawing primitives
- * ======================================================================================= */
 /* =======================================================================================
  * Palette/drawing primitives  (PURE CDE/Motif palette, NO hardcoded black)
  * ======================================================================================= */
@@ -863,19 +1175,24 @@ static void draw_cell(Drawable d,int gx,int gy,int index){
 
         if(c->mine){
             int cx=px+cell/2, cy=py+cell/2;
-            int inset=MAX(2,S(2));
+            int inset=MAX(1,S(1));
             if(c->exploded) fill_rect(d,px+inset,py+inset,cell-2*inset,cell-2*inset,G.col_red);
 
             XSetForeground(G.dpy,G.gc,G.col_fg);
 
-            int r=MAX(3,S(4));
+            int r=(int)(MAX(3,S(4))*1.5f);
             XFillArc(G.dpy,d,G.gc,cx-r,cy-r,(unsigned)(2*r),(unsigned)(2*r),0,360*64);
 
             int arm=MAX(6,S(7));
-            XDrawLine(G.dpy,d,G.gc,cx-arm,cy,cx+arm,cy);
-            XDrawLine(G.dpy,d,G.gc,cx,cy-arm,cx,cy+arm);
-            XDrawLine(G.dpy,d,G.gc,cx-(arm-1),cy-(arm-1),cx+(arm-1),cy+(arm-1));
-            XDrawLine(G.dpy,d,G.gc,cx-(arm-1),cy+(arm-1),cx+(arm-1),cy-(arm-1));
+            for (int i=0; i<=1; i++) {
+                XDrawLine(G.dpy,d,G.gc,cx-arm+i,cy,cx+arm+i,cy);
+                XDrawLine(G.dpy,d,G.gc,cx-i,cy-arm,cx,cy+arm-i);
+                XDrawLine(G.dpy,d,G.gc,cx-(arm-1),cy-(arm-1)-i,cx+(arm-1),cy+(arm-1)-i);
+                XDrawLine(G.dpy,d,G.gc,cx-(arm-1)+i,cy+(arm-1),cx+(arm-1)+i,cy-(arm-1));
+            }
+            // draw white rectangle in top-left quarter of mine as highlight
+            XSetForeground(G.dpy,G.gc,G.col_select);
+            XFillRectangle(G.dpy,d,G.gc,cx-r/2+1,cy-r/2+1,(unsigned)g_ui_scale,(unsigned)g_ui_scale);
         } else if(c->adj>0){
             char buf[4]; snprintf(buf,sizeof(buf),"%d",(int)c->adj);
             draw_text_center(d,px+cell/2,py+cell/2,buf);
@@ -961,41 +1278,85 @@ static void draw_face_to(Drawable d,int w,int h){
     fill_rect(d,0,0,w,h,G.col_select);
     draw_3d_rect(d,0,0,w,h,0);
 
-    int cx=w/2, cy=h/2;
+    int cx = w / 2, cy = h / 2;
 
-    int R=MAX(9,S(9));
+    // Tunable parameters (fractions of w/h, easy to fine-tune)
+    float radius_frac = 0.4f; // Radius as fraction of min(w,h)
+    float eye_size_frac = 0.1f; // Eye size fraction of min(w,h)
+    float eye_x_offset_frac = 0.25f; // Horizontal offset from center (symmetric left/right)
+    float eye_y_frac = 0.4f; // Vertical position from top (0.0 top, 1.0 bottom; higher = down)
+    float mouth_y_frac = 0.55f; // Vertical position from top (lower = up)
+    float mouth_width_frac = 0.5f; // Mouth width fraction of w
+    float mouth_height_frac = 0.3f; // Mouth height fraction of h
+    float thickness = 1.0f; // Line thickness for multi-line draws
+
+    int min_dim = MIN(w, h);
+    int R = (int)(radius_frac * min_dim);
+    int eye_size = (int)(eye_size_frac * min_dim);
+    int eye_x_offset = (int)(eye_x_offset_frac * (w / 2.0f));
+    int eye_y = (int)(eye_y_frac * h);
+    int mouth_y = (int)(mouth_y_frac * h);
+    int mouth_width = (int)(mouth_width_frac * w);
+    int mouth_height = (int)(mouth_height_frac * h);
 
     /* Fill the circle with yellow */
     XSetForeground(G.dpy, G.gc, G.col_yellow);
-    XFillArc(G.dpy, d, G.gc, cx-R, cy-R, (unsigned)(2*R), (unsigned)(2*R), 0, 360*64);
+    XFillArc(G.dpy, d, G.gc, cx - R, cy - R, (unsigned)(2 * R), (unsigned)(2 * R), 0, 360 * 64);
 
     /* Draw black outline */
     XSetForeground(G.dpy, G.gc, G.col_fg);
-    XDrawArc(G.dpy, d, G.gc, cx-R, cy-R, (unsigned)(2*R), (unsigned)(2*R), 0, 360*64);
+    XDrawArc(G.dpy, d, G.gc, cx - R, cy - R, (unsigned)(2 * R), (unsigned)(2 * R), 0, 360 * 64);
 
-    if(G.face==FACE_DEAD){
-        int e=MAX(3,S(3));
-        XDrawLine(G.dpy,d,G.gc,cx-2*e,cy-e,cx-e,cy-2*e);
-        XDrawLine(G.dpy,d,G.gc,cx-2*e,cy-2*e,cx-e,cy-e);
-        XDrawLine(G.dpy,d,G.gc,cx+e,cy-e,cx+2*e,cy-2*e);
-        XDrawLine(G.dpy,d,G.gc,cx+e,cy-2*e,cx+2*e,cy-e);
-        XDrawArc(G.dpy,d,G.gc,cx-2*e,cy,(unsigned)(4*e),(unsigned)(3*e),45*64,90*64);
-    } else if(G.face==FACE_OHNO){
-        int e=MAX(3,S(3));
-        XFillArc(G.dpy,d,G.gc,cx-2*e,cy-2*e,(unsigned)e,(unsigned)e,0,360*64);
-        XFillArc(G.dpy,d,G.gc,cx+e,cy-2*e,(unsigned)e,(unsigned)e,0,360*64);
-        XDrawArc(G.dpy,d,G.gc,cx-e,cy+e,(unsigned)(2*e),(unsigned)(2*e),0,360*64);
-    } else if(G.face==FACE_COOL){
-        int e=MAX(3,S(3));
-        XDrawLine(G.dpy,d,G.gc,cx-3*e,cy-2*e,cx+3*e,cy-2*e);
-        XDrawRectangle(G.dpy,d,G.gc,cx-4*e,cy-3*e,(unsigned)(3*e),(unsigned)(2*e));
-        XDrawRectangle(G.dpy,d,G.gc,cx+e,cy-3*e,(unsigned)(3*e),(unsigned)(2*e));
-        XDrawArc(G.dpy,d,G.gc,cx-2*e,cy-e,(unsigned)(4*e),(unsigned)(3*e),225*64,90*64);
+    if (G.face == FACE_DEAD) {
+        // Left eye (X)
+        for (int i = -thickness; i <= thickness; i++) {
+            XDrawLine(G.dpy, d, G.gc, cx - eye_x_offset - eye_size, eye_y + i - eye_size, cx - eye_x_offset + eye_size, eye_y + i + eye_size);
+            XDrawLine(G.dpy, d, G.gc, cx - eye_x_offset - eye_size, eye_y + i + eye_size, cx - eye_x_offset + eye_size, eye_y + i - eye_size);
+        }
+        // Right eye (X, symmetric)
+        for (int i = -thickness; i <= thickness; i++) {
+            XDrawLine(G.dpy, d, G.gc, cx + eye_x_offset - eye_size, eye_y + i - eye_size, cx + eye_x_offset + eye_size, eye_y + i + eye_size);
+            XDrawLine(G.dpy, d, G.gc, cx + eye_x_offset - eye_size, eye_y + i + eye_size, cx + eye_x_offset + eye_size, eye_y + i - eye_size);
+        }
+        // Frown mouth
+        for (int i = -thickness; i <= thickness; i++) {
+            XDrawArc(G.dpy, d, G.gc, cx - mouth_width / 2, mouth_y + mouth_height/2 + i, (unsigned)mouth_width, (unsigned)mouth_height, 45 * 64, 90 * 64);
+        }
+    } else if (G.face == FACE_OHNO) {
+        // Left eye (small circle)
+        XFillArc(G.dpy, d, G.gc, cx - eye_x_offset - eye_size / 2, eye_y - eye_size / 2, (unsigned)eye_size, (unsigned)eye_size, 0, 360 * 64);
+        // Right eye (symmetric)
+        XFillArc(G.dpy, d, G.gc, cx + eye_x_offset - eye_size / 2, eye_y - eye_size / 2, (unsigned)eye_size, (unsigned)eye_size, 0, 360 * 64);
+        // Surprised mouth (O)
+        int o_size = MIN(mouth_width, mouth_height) / 3;
+        for (int i = -thickness; i <= thickness; i++) {
+            XDrawArc(G.dpy, d, G.gc, cx - o_size + i, mouth_y  + i, (unsigned)(2 * o_size - 2 * i), (unsigned)(2 * o_size - 2 * i), 0, 360 * 64);
+        }
+    } else if (G.face == FACE_COOL) {
+        // Sunglasses line
+        int glass_y = eye_y;
+        for (int i = 0; i <= thickness; i++) {
+            XDrawLine(G.dpy, d, G.gc, cx - w / 3, glass_y + i, cx + w / 3, glass_y + i);
+        }
+
+        for (int i = -thickness; i <= thickness; i++) {
+            // draw rectangles for glasses below the line
+            XFillRectangle(G.dpy, d, G.gc, cx - eye_x_offset - eye_size, glass_y + i, (unsigned)eye_size*2, (unsigned)(eye_size + thickness));
+            XFillRectangle(G.dpy, d, G.gc, cx + eye_x_offset - eye_size, glass_y + i, (unsigned)eye_size*2, (unsigned)(eye_size + thickness));
+        }
+
+        for (int i = -thickness; i <= thickness; i++) {
+            XDrawArc(G.dpy, d, G.gc, cx - mouth_width / 2, mouth_y + i - mouth_height / 2, (unsigned)mouth_width, (unsigned)mouth_height, 225 * 64, 90 * 64);
+        }
     } else {
-        int e=MAX(3,S(3));
-        XFillArc(G.dpy,d,G.gc,cx-2*e,cy-2*e,(unsigned)e,(unsigned)e,0,360*64);
-        XFillArc(G.dpy,d,G.gc,cx+e,cy-2*e,(unsigned)e,(unsigned)e,0,360*64);
-        XDrawArc(G.dpy,d,G.gc,cx-2*e,cy-e,(unsigned)(4*e),(unsigned)(3*e),225*64,90*64);
+        // Left eye
+        XFillArc(G.dpy, d, G.gc, cx - eye_x_offset - eye_size / 2, eye_y - eye_size / 2, (unsigned)eye_size, (unsigned)eye_size, 0, 360 * 64);
+        // Right eye (symmetric)
+        XFillArc(G.dpy, d, G.gc, cx + eye_x_offset - eye_size / 2, eye_y - eye_size / 2, (unsigned)eye_size, (unsigned)eye_size, 0, 360 * 64);
+        // Smile mouth
+        for (int i = -thickness; i <= thickness; i++) {
+            XDrawArc(G.dpy, d, G.gc, cx - mouth_width / 2, mouth_y + i - mouth_height / 2, (unsigned)mouth_width, (unsigned)mouth_height, 225 * 64, 90 * 64);
+        }
     }
 }
 
@@ -1321,6 +1682,9 @@ static void wm_save_yourself_cb(Widget w,XtPointer client,XtPointer call){
     (void)w;(void)client;(void)call;
     save_config();
 }
+static void cb_fastest(Widget w,XtPointer c,XtPointer call){ (void)w;(void)c;(void)call;
+    show_fastest_dialog();
+}
 
 /* =======================================================================================
  * UI building
@@ -1350,6 +1714,11 @@ static void create_menu(Widget parent){
 
     XtVaCreateManagedWidget("sep3", xmSeparatorGadgetClass, game_pd, NULL);
 
+    Widget mi_fast = XtVaCreateManagedWidget("Fastest Mine Sweepers...", xmPushButtonWidgetClass, game_pd, NULL);
+    XtAddCallback(mi_fast, XmNactivateCallback, cb_fastest, NULL);
+
+    XtVaCreateManagedWidget("sep4", xmSeparatorGadgetClass, game_pd, NULL);
+
     Widget mi_exit = XtVaCreateManagedWidget("Exit", xmPushButtonWidgetClass, game_pd, NULL);
     XtAddCallback(mi_exit, XmNactivateCallback, cb_exit, NULL);
 
@@ -1370,6 +1739,7 @@ static void create_menu(Widget parent){
     XtManageChild(menubar);
     G.menubar = menubar;
 }
+
 
 static void build_ui(void) {
     G.mainw = XtVaCreateManagedWidget("mainw",
@@ -1417,10 +1787,10 @@ static void build_ui(void) {
                                             XmNheight, (Dimension)FACE_H_PX(),
                                             XmNshadowType, XmSHADOW_OUT,
                                             NULL);
-    XtAddCallback(G.face_button, XmNexposeCallback,  face_expose_cb, NULL);
+    XtAddCallback(G.face_button, XmNexposeCallback,   face_expose_cb, NULL);
     XtAddCallback(G.face_button, XmNactivateCallback, face_activate_cb, NULL);
-    XtAddCallback(G.face_button, XmNarmCallback,     face_arm_cb, NULL);
-    XtAddCallback(G.face_button, XmNdisarmCallback,  face_disarm_cb, NULL);
+    XtAddCallback(G.face_button, XmNarmCallback,      face_arm_cb, NULL);
+    XtAddCallback(G.face_button, XmNdisarmCallback,   face_disarm_cb, NULL);
 
     G.time_frame = XtVaCreateManagedWidget("timeFrame", xmFrameWidgetClass, G.top_form,
                                            XmNshadowType, XmSHADOW_IN, NULL);

@@ -34,6 +34,10 @@
 
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
+#include <X11/xpm.h>
+
+#include "../../shared/about_dialog.h"
+#include "ck-mines.l.pm"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -187,6 +191,184 @@ typedef struct {
 } App;
 
 static App G;
+static Widget g_about_shell = NULL;
+
+static void about_destroy_cb(Widget w, XtPointer client, XtPointer call)
+{
+    (void)w;
+    (void)client;
+    (void)call;
+    g_about_shell = NULL;
+}
+
+static Pixmap mines_scale_pixmap_nearest(Display *dpy,
+                                         Pixmap src,
+                                         unsigned int src_w,
+                                         unsigned int src_h,
+                                         unsigned int depth,
+                                         float scale)
+{
+    if (!dpy || src == None) return None;
+    if (scale <= 1.0f) return src;
+    if (src_w == 0 || src_h == 0) return src;
+
+    unsigned int dst_w = (unsigned int)(src_w * scale + 0.5f);
+    unsigned int dst_h = (unsigned int)(src_h * scale + 0.5f);
+    if (dst_w < 1) dst_w = 1;
+    if (dst_h < 1) dst_h = 1;
+
+    XImage *src_img = XGetImage(dpy, src, 0, 0, src_w, src_h, AllPlanes, ZPixmap);
+    if (!src_img) return src;
+
+    Window root = DefaultRootWindow(dpy);
+    Pixmap dst = XCreatePixmap(dpy, root, dst_w, dst_h, depth);
+    if (dst == None) {
+        XDestroyImage(src_img);
+        return src;
+    }
+
+    Visual *visual = DefaultVisual(dpy, DefaultScreen(dpy));
+    XImage *dst_img = XCreateImage(dpy, visual, depth, ZPixmap, 0, NULL, dst_w, dst_h, 32, 0);
+    if (!dst_img) {
+        XFreePixmap(dpy, dst);
+        XDestroyImage(src_img);
+        return src;
+    }
+    if (dst_img->bytes_per_line <= 0) {
+        int bpp = dst_img->bits_per_pixel;
+        dst_img->bytes_per_line = (int)((dst_w * (unsigned int)bpp + 7u) / 8u);
+    }
+    dst_img->data = (char *)calloc((size_t)dst_img->bytes_per_line, (size_t)dst_h);
+    if (!dst_img->data) {
+        XDestroyImage(dst_img);
+        XFreePixmap(dpy, dst);
+        XDestroyImage(src_img);
+        return src;
+    }
+
+    for (unsigned int y = 0; y < dst_h; ++y) {
+        unsigned int sy = (unsigned int)((float)y / scale);
+        if (sy >= src_h) sy = src_h - 1;
+        for (unsigned int x = 0; x < dst_w; ++x) {
+            unsigned int sx = (unsigned int)((float)x / scale);
+            if (sx >= src_w) sx = src_w - 1;
+            unsigned long p = XGetPixel(src_img, (int)sx, (int)sy);
+            XPutPixel(dst_img, (int)x, (int)y, p);
+        }
+    }
+
+    GC gc = XCreateGC(dpy, dst, 0, NULL);
+    XPutImage(dpy, dst, gc, dst_img, 0, 0, 0, 0, dst_w, dst_h);
+    XFreeGC(dpy, gc);
+
+    XDestroyImage(dst_img);
+    XDestroyImage(src_img);
+
+    XFreePixmap(dpy, src);
+    return dst;
+}
+
+static Pixmap mines_create_flattened_pixmap_from_xpm_data(Display *dpy,
+                                                          char **xpm_data,
+                                                          Widget background_widget,
+                                                          float scale)
+{
+    if (!dpy || !xpm_data) return None;
+
+    Pixmap src = None;
+    Pixmap mask = None;
+    XpmAttributes attr;
+    memset(&attr, 0, sizeof(attr));
+    attr.valuemask = XpmSize;
+    int status = XpmCreatePixmapFromData(dpy,
+                                         DefaultRootWindow(dpy),
+                                         xpm_data,
+                                         &src,
+                                         &mask,
+                                         &attr);
+    if (status != XpmSuccess || src == None) {
+        if (src != None) XFreePixmap(dpy, src);
+        if (mask != None) XFreePixmap(dpy, mask);
+        return None;
+    }
+
+    Pixel bg = BlackPixel(dpy, DefaultScreen(dpy));
+    if (background_widget) XtVaGetValues(background_widget, XmNbackground, &bg, NULL);
+
+    Window root = DefaultRootWindow(dpy);
+    unsigned int depth = (unsigned int)DefaultDepth(dpy, DefaultScreen(dpy));
+    Pixmap dst = XCreatePixmap(dpy, root, attr.width, attr.height, depth);
+    if (dst == None) {
+        if (mask != None) XFreePixmap(dpy, mask);
+        return src;
+    }
+
+    XGCValues gcv;
+    memset(&gcv, 0, sizeof(gcv));
+    gcv.foreground = bg;
+    gcv.function = GXcopy;
+    GC gc = XCreateGC(dpy, dst, GCForeground | GCFunction, &gcv);
+    XFillRectangle(dpy, dst, gc, 0, 0, attr.width, attr.height);
+    if (mask != None) {
+        XSetClipMask(dpy, gc, mask);
+        XSetClipOrigin(dpy, gc, 0, 0);
+    }
+    XCopyArea(dpy, src, dst, gc, 0, 0, attr.width, attr.height, 0, 0);
+    XSetClipMask(dpy, gc, None);
+
+    XFreeGC(dpy, gc);
+    XFreePixmap(dpy, src);
+    if (mask != None) XFreePixmap(dpy, mask);
+
+    if (scale > 1.0f) {
+        return mines_scale_pixmap_nearest(dpy, dst, attr.width, attr.height, depth, scale);
+    }
+    return dst;
+}
+
+static void mines_add_icon_to_about_title_page(Widget notebook)
+{
+    if (!notebook) return;
+    Widget page = XtNameToWidget(notebook, "page_app_about");
+    if (!page) return;
+
+    Display *dpy = XtDisplay(notebook);
+    Pixmap icon = mines_create_flattened_pixmap_from_xpm_data(dpy, ck_mines_l_pm, page, g_ui_scale);
+    if (icon == None) return;
+
+    Arg args[12];
+    int n = 0;
+    XtSetArg(args[n], XmNtopAttachment, XmATTACH_FORM); n++;
+    XtSetArg(args[n], XmNleftAttachment, XmATTACH_FORM); n++;
+    XtSetArg(args[n], XmNtopOffset, 12); n++;
+    XtSetArg(args[n], XmNleftOffset, 12); n++;
+    XtSetArg(args[n], XmNlabelType, XmPIXMAP); n++;
+    XtSetArg(args[n], XmNlabelPixmap, icon); n++;
+    XtSetArg(args[n], XmNmarginWidth, 0); n++;
+    XtSetArg(args[n], XmNmarginHeight, 0); n++;
+    XtSetArg(args[n], XmNtraversalOn, False); n++;
+    Widget icon_label = XmCreateLabel(page, "mines_page_icon", args, n);
+    if (icon_label) XtManageChild(icon_label);
+
+    Widget title = XtNameToWidget(page, "label_title");
+    if (title && icon_label) {
+        XtVaSetValues(title,
+                      XmNleftAttachment, XmATTACH_WIDGET,
+                      XmNleftWidget, icon_label,
+                      XmNleftOffset, 12,
+                      XmNalignment, XmALIGNMENT_BEGINNING,
+                      NULL);
+    }
+    Widget subtitle = XtNameToWidget(page, "label_subtitle");
+    if (subtitle && icon_label) {
+        XtVaSetValues(subtitle,
+                      XmNleftAttachment, XmATTACH_WIDGET,
+                      XmNleftWidget, icon_label,
+                      XmNleftOffset, 12,
+                      XmNalignment, XmALIGNMENT_BEGINNING,
+                      NULL);
+    }
+}
 
 /* ---------------------------------------------------------------------------------------
  * Forward decls
@@ -1883,20 +2065,34 @@ static void build_ui(void) {
  * About
  * ======================================================================================= */
 static void show_about(void){
-    Widget mbox = XmCreateInformationDialog(G.toplevel,"about",NULL,0);
-    XmString title = XmStringCreateLocalized("About Mines");
-    XmString msg = XmStringCreateLocalized(
-        "Minesweeper for CDE/Motif.\n\n"
-        "Debug:\n  CK_MINES_DEBUG=0..3\n"
-        "  CK_MINES_BACKBUF=1\n"
-        "  CK_MINES_SCALE=2.0\n"
-    );
-    XtVaSetValues(mbox, XmNdialogTitle,title, XmNmessageString,msg, NULL);
-    XmStringFree(title);
-    XmStringFree(msg);
-    XtUnmanageChild(XmMessageBoxGetChild(mbox, XmDIALOG_CANCEL_BUTTON));
-    XtUnmanageChild(XmMessageBoxGetChild(mbox, XmDIALOG_HELP_BUTTON));
-    XtManageChild(mbox);
+    if (g_about_shell && XtIsWidget(g_about_shell)) {
+        XtPopup(g_about_shell, XtGrabNone);
+        if (XtIsRealized(g_about_shell)) {
+            XRaiseWindow(XtDisplay(g_about_shell), XtWindow(g_about_shell));
+        }
+        return;
+    }
+
+    Widget shell = NULL;
+    Widget notebook = about_dialog_build(G.toplevel, "about_mines", "About Mines", &shell);
+    if (!notebook || !shell) return;
+
+    g_about_shell = shell;
+    XtAddCallback(g_about_shell, XmNdestroyCallback, about_destroy_cb, NULL);
+
+    about_add_standard_pages(notebook, 1,
+                             "Mines",
+                             "Mines Game for CK-Core",
+                             " (c) 2025 C. Klukas\n\nDebug:\n  CK_MINES_DEBUG=0..3\n  CK_MINES_BACKBUF=1\n  CK_MINES_SCALE=2.0",
+                             True);
+    mines_add_icon_to_about_title_page(notebook);
+
+    XtVaSetValues(shell,
+                  XmNwidth, 700,
+                  XmNheight, 550,
+                  NULL);
+
+    XtPopup(shell, XtGrabNone);
 }
 
 /* =======================================================================================
@@ -2023,6 +2219,7 @@ int main(int argc,char **argv){
     XtAddEventHandler(G.toplevel, StructureNotifyMask, False, toplevel_event_handler, NULL);
 
     XtRealizeWidget(G.toplevel);
+    about_set_window_icon_from_xpm(G.toplevel, ck_mines_l_pm);
 
     init_x_stuff();
 

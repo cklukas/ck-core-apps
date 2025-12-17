@@ -36,16 +36,21 @@
 
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
+#include <X11/xpm.h>
 
 #include "../../shared/about_dialog.h"
 #include "../../shared/session_utils.h"
+
+#include "images/ck-nibbles.l.pm"
 
 #include <Dt/Session.h>
 #include <Dt/Dt.h>
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <time.h>
@@ -127,6 +132,9 @@ typedef struct {
     XtAppContext app;
     Display *dpy;
     Window win;
+    Pixmap icon_pixmap;
+    Pixmap icon_mask;
+    Pixmap about_icon_pixmap;
 
     char current_status[256];
     int show_grid;
@@ -236,6 +244,20 @@ static void on_roundend_end(Widget w, XtPointer client, XtPointer call);
 
 static void on_toplevel_configure(Widget w, XtPointer client, XEvent *ev, Boolean *cont);
 static int  startup_dialog_shown = 0;
+static int  g_debug_icons = 0;
+static float g_about_ui_scale = 1.0f;
+
+static void dbg_icons(const char *fmt, ...) {
+    if (!g_debug_icons) return;
+
+    setvbuf(stderr, NULL, _IONBF, 0);
+
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    fputc('\n', stderr);
+    va_end(ap);
+}
 
 /* ---------- Dialog positioning helper ---------- */
 
@@ -343,16 +365,6 @@ static void trim_copy(char *dst, size_t dstsz, const char *src, const char *fall
     if (n >= dstsz) n = dstsz-1;
     memcpy(dst, src, n);
     dst[n] = '\0';
-}
-
-static int parse_int_clamped(const char *s, int defv, int minv, int maxv) {
-    if (!s) return defv;
-    while (*s==' ' || *s=='\t' || *s=='\n' || *s=='\r') s++;
-    if (!*s) return defv;
-    int v = atoi(s);
-    if (v < minv) v = minv;
-    if (v > maxv) v = maxv;
-    return v;
 }
 
 /* strict: must be a clean integer token and in [minv,maxv] */
@@ -1158,9 +1170,324 @@ static void setup_graphics(void) {
     G.s2.color = G.col_s2;
 }
 
+static float query_x_dpi(Display *dpy) {
+    int scr = DefaultScreen(dpy);
+    int px = DisplayWidth(dpy, scr);
+    int mm = DisplayWidthMM(dpy, scr);
+    if (mm <= 0) return 96.0f;
+    return (float)px * 25.4f / (float)mm;
+}
+
+static float clamp_f(float v, float lo, float hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static Pixmap create_pixmap_from_xpm_data(const char *source_desc, char **data, Pixmap *mask_out) {
+    Display *dpy = XtDisplay(G.toplevel);
+    if (!dpy || !data) {
+        dbg_icons("[ck-nibbles] xpm: cannot load (%s): dpy=%p data=%p",
+                  source_desc ? source_desc : "n/a",
+                  (void *)dpy,
+                  (void *)data);
+        return None;
+    }
+
+    Pixmap pixmap = None;
+    Pixmap mask = None;
+    XpmAttributes attr;
+    memset(&attr, 0, sizeof(attr));
+    attr.valuemask = XpmSize;
+
+    dbg_icons("[ck-nibbles] xpm: loading from compiled-in data (%s)", source_desc ? source_desc : "n/a");
+
+    int status = XpmCreatePixmapFromData(dpy,
+                                         DefaultRootWindow(dpy),
+                                         data,
+                                         &pixmap,
+                                         &mask,
+                                         &attr);
+    if (g_debug_icons) {
+        const char *err = XpmGetErrorString(status);
+        dbg_icons("[ck-nibbles] xpm: status=%d (%s) pixmap=0x%lx mask=0x%lx size=%ux%u",
+                  status,
+                  err ? err : "n/a",
+                  (unsigned long)pixmap,
+                  (unsigned long)mask,
+                  (unsigned)attr.width,
+                  (unsigned)attr.height);
+    }
+    if (status != XpmSuccess) {
+        if (pixmap != None) XFreePixmap(dpy, pixmap);
+        if (mask != None) XFreePixmap(dpy, mask);
+        return None;
+    }
+
+    if (mask_out) {
+        *mask_out = mask;
+    } else if (mask != None) {
+        XFreePixmap(dpy, mask);
+    }
+
+    return pixmap;
+}
+
+static Pixmap scale_pixmap_nearest(Display *dpy,
+                                   Pixmap src,
+                                   unsigned int src_w,
+                                   unsigned int src_h,
+                                   unsigned int depth,
+                                   float scale)
+{
+    if (!dpy || src == None) return None;
+    if (scale <= 1.0f) return src;
+    if (src_w == 0 || src_h == 0) return src;
+
+    unsigned int dst_w = (unsigned int)(src_w * scale + 0.5f);
+    unsigned int dst_h = (unsigned int)(src_h * scale + 0.5f);
+    if (dst_w < 1) dst_w = 1;
+    if (dst_h < 1) dst_h = 1;
+
+    XImage *src_img = XGetImage(dpy, src, 0, 0, src_w, src_h, AllPlanes, ZPixmap);
+    if (!src_img) {
+        dbg_icons("[ck-nibbles] xpm: XGetImage failed for scaling src=0x%lx", (unsigned long)src);
+        return src;
+    }
+
+    Window root = DefaultRootWindow(dpy);
+    Pixmap dst = XCreatePixmap(dpy, root, dst_w, dst_h, depth);
+    if (dst == None) {
+        dbg_icons("[ck-nibbles] xpm: XCreatePixmap failed for scaling to %ux%u", dst_w, dst_h);
+        XDestroyImage(src_img);
+        return src;
+    }
+
+    Visual *visual = DefaultVisual(dpy, DefaultScreen(dpy));
+    XImage *dst_img = XCreateImage(dpy, visual, depth, ZPixmap, 0, NULL, dst_w, dst_h, 32, 0);
+    if (!dst_img) {
+        dbg_icons("[ck-nibbles] xpm: XCreateImage failed for scaling to %ux%u", dst_w, dst_h);
+        XFreePixmap(dpy, dst);
+        XDestroyImage(src_img);
+        return src;
+    }
+    if (dst_img->bytes_per_line <= 0) {
+        int bpp = dst_img->bits_per_pixel;
+        dst_img->bytes_per_line = (int)((dst_w * (unsigned int)bpp + 7u) / 8u);
+    }
+    dst_img->data = (char *)calloc((size_t)dst_img->bytes_per_line, (size_t)dst_h);
+    if (!dst_img->data) {
+        dbg_icons("[ck-nibbles] xpm: OOM creating scaled image buffer %ux%u", dst_w, dst_h);
+        XDestroyImage(dst_img);
+        XFreePixmap(dpy, dst);
+        XDestroyImage(src_img);
+        return src;
+    }
+
+    for (unsigned int y = 0; y < dst_h; ++y) {
+        unsigned int sy = (unsigned int)((float)y / scale);
+        if (sy >= src_h) sy = src_h - 1;
+        for (unsigned int x = 0; x < dst_w; ++x) {
+            unsigned int sx = (unsigned int)((float)x / scale);
+            if (sx >= src_w) sx = src_w - 1;
+            unsigned long p = XGetPixel(src_img, (int)sx, (int)sy);
+            XPutPixel(dst_img, (int)x, (int)y, p);
+        }
+    }
+
+    GC gc = XCreateGC(dpy, dst, 0, NULL);
+    XPutImage(dpy, dst, gc, dst_img, 0, 0, 0, 0, dst_w, dst_h);
+    XFreeGC(dpy, gc);
+
+    XDestroyImage(dst_img);
+    XDestroyImage(src_img);
+
+    XFreePixmap(dpy, src);
+    dbg_icons("[ck-nibbles] xpm: scaled pixmap to %ux%u (scale=%.2f)", dst_w, dst_h, scale);
+    return dst;
+}
+
+static Pixmap create_flattened_pixmap_from_xpm_data(const char *source_desc,
+                                                    char **data,
+                                                    Widget background_widget)
+{
+    Pixmap mask = None;
+    Pixmap src = create_pixmap_from_xpm_data(source_desc, data, &mask);
+    if (src == None) return None;
+
+    Display *dpy = XtDisplay(G.toplevel);
+
+    Window root = DefaultRootWindow(dpy);
+    Window dummy_root = None;
+    int x = 0, y = 0;
+    unsigned int w = 0, h = 0, bw = 0, depth = 0;
+    if (!XGetGeometry(dpy, src, &dummy_root, &x, &y, &w, &h, &bw, &depth)) {
+        dbg_icons("[ck-nibbles] xpm: XGetGeometry failed (%s) src=0x%lx", source_desc ? source_desc : "n/a", (unsigned long)src);
+        if (mask != None) XFreePixmap(dpy, mask);
+        return src;
+    }
+
+    Pixel bg = BlackPixel(dpy, DefaultScreen(dpy));
+    if (background_widget) {
+        XtVaGetValues(background_widget, XmNbackground, &bg, NULL);
+    }
+    dbg_icons("[ck-nibbles] xpm: flattening (%s) using bg_pixel=0x%lx size=%ux%u depth=%u mask=0x%lx",
+              source_desc ? source_desc : "n/a",
+              (unsigned long)bg,
+              w, h,
+              depth,
+              (unsigned long)mask);
+
+    Pixmap dst = XCreatePixmap(dpy, root, w, h, depth);
+    if (dst == None) {
+        dbg_icons("[ck-nibbles] xpm: XCreatePixmap failed (%s)", source_desc ? source_desc : "n/a");
+        if (mask != None) XFreePixmap(dpy, mask);
+        return src;
+    }
+
+    XGCValues gcv;
+    memset(&gcv, 0, sizeof(gcv));
+    gcv.foreground = bg;
+    gcv.function = GXcopy;
+    GC gc = XCreateGC(dpy, dst, GCForeground | GCFunction, &gcv);
+    XFillRectangle(dpy, dst, gc, 0, 0, w, h);
+
+    if (mask != None) {
+        XSetClipMask(dpy, gc, mask);
+        XSetClipOrigin(dpy, gc, 0, 0);
+    }
+    XCopyArea(dpy, src, dst, gc, 0, 0, w, h, 0, 0);
+    XSetClipMask(dpy, gc, None);
+
+    XFreeGC(dpy, gc);
+    XFreePixmap(dpy, src);
+    if (mask != None) XFreePixmap(dpy, mask);
+
+    return dst;
+}
+
+static void setup_window_icon(void) {
+    if (!G.toplevel || G.icon_pixmap != None) return;
+    Display *dpy = XtDisplay(G.toplevel);
+    if (!dpy) return;
+
+    Pixmap mask = None;
+    dbg_icons("[ck-nibbles] window icon: requesting icon pixmap from src/games/ck-nibbles/images/ck-nibbles.l.pm (nibbles_l_pm)");
+    Pixmap pixmap = create_pixmap_from_xpm_data("src/games/ck-nibbles/images/ck-nibbles.l.pm:nibbles_l_pm", nibbles_l_pm, &mask);
+    if (pixmap == None) {
+        dbg_icons("[ck-nibbles] window icon: failed to load xpm");
+        return;
+    }
+
+    G.icon_pixmap = pixmap;
+    if (mask != None) {
+        G.icon_mask = mask;
+    }
+
+    Window win = XtWindow(G.toplevel);
+    if (win == None) {
+        dbg_icons("[ck-nibbles] window icon: XtWindow(toplevel) is None");
+        return;
+    }
+
+    XWMHints hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.flags = IconPixmapHint;
+    hints.icon_pixmap = pixmap;
+    if (mask != None) {
+        hints.flags |= IconMaskHint;
+        hints.icon_mask = mask;
+    }
+    XSetWMHints(dpy, win, &hints);
+    dbg_icons("[ck-nibbles] window icon: set WM hints on win=0x%lx pixmap=0x%lx mask=0x%lx",
+              (unsigned long)win,
+              (unsigned long)pixmap,
+              (unsigned long)mask);
+}
+
+static Pixmap ensure_about_icon_pixmap(Widget background_widget) {
+    if (G.about_icon_pixmap != None) return G.about_icon_pixmap;
+    dbg_icons("[ck-nibbles] about icon: base is large icon src/games/ck-nibbles/images/ck-nibbles.l.pm (nibbles_l_pm)");
+
+    Pixmap flat = create_flattened_pixmap_from_xpm_data(
+        "src/games/ck-nibbles/images/ck-nibbles.l.pm:nibbles_l_pm",
+        nibbles_l_pm,
+        background_widget ? background_widget : G.toplevel);
+
+    if (flat == None) {
+        dbg_icons("[ck-nibbles] about icon: failed to build flattened base pixmap");
+        return None;
+    }
+
+    Window dummy_root = None;
+    int x = 0, y = 0;
+    unsigned int w = 0, h = 0, bw = 0, depth = 0;
+    if (!XGetGeometry(XtDisplay(G.toplevel), flat, &dummy_root, &x, &y, &w, &h, &bw, &depth)) {
+        dbg_icons("[ck-nibbles] about icon: XGetGeometry failed for flat pixmap=0x%lx", (unsigned long)flat);
+        G.about_icon_pixmap = flat;
+    } else {
+        float s = clamp_f(g_about_ui_scale, 1.0f, 4.0f);
+        dbg_icons("[ck-nibbles] about icon: dpi-derived scale=%.2f (base %ux%u)", s, w, h);
+        G.about_icon_pixmap = scale_pixmap_nearest(XtDisplay(G.toplevel), flat, w, h, depth, s);
+    }
+
+    dbg_icons("[ck-nibbles] about icon: pixmap=0x%lx", (unsigned long)G.about_icon_pixmap);
+    return G.about_icon_pixmap;
+}
+
+static void add_about_icon_to_page(Widget notebook, Pixmap pixmap) {
+    if (!notebook || pixmap == None) return;
+    Widget page = XtNameToWidget(notebook, "page_app_about");
+    if (!page) {
+        dbg_icons("[ck-nibbles] about icon: page_app_about not found");
+        return;
+    }
+
+    Arg args[12];
+    int n = 0;
+    XtSetArg(args[n], XmNtopAttachment, XmATTACH_FORM); n++;
+    XtSetArg(args[n], XmNleftAttachment, XmATTACH_FORM); n++;
+    XtSetArg(args[n], XmNtopOffset, 12); n++;
+    XtSetArg(args[n], XmNleftOffset, 12); n++;
+    XtSetArg(args[n], XmNlabelType, XmPIXMAP); n++;
+    XtSetArg(args[n], XmNlabelPixmap, pixmap); n++;
+    XtSetArg(args[n], XmNalignment, XmALIGNMENT_CENTER); n++;
+    XtSetArg(args[n], XmNmarginWidth, 0); n++;
+    XtSetArg(args[n], XmNmarginHeight, 0); n++;
+    XtSetArg(args[n], XmNtraversalOn, False); n++;
+    Widget icon_label = XmCreateLabel(page, "nibbles_page_icon", args, n);
+    if (icon_label) XtManageChild(icon_label);
+    dbg_icons("[ck-nibbles] about icon: added label=%p with pixmap=0x%lx",
+              (void *)icon_label,
+              (unsigned long)pixmap);
+
+    /* Avoid overlapping the title/subtitle labels (about_add_title_page anchors them at the form). */
+    if (icon_label) {
+        Widget title = XtNameToWidget(page, "label_title");
+        if (title) {
+            XtVaSetValues(title,
+                          XmNleftAttachment, XmATTACH_WIDGET,
+                          XmNleftWidget, icon_label,
+                          XmNleftOffset, 12,
+                          XmNalignment, XmALIGNMENT_BEGINNING,
+                          NULL);
+        }
+        Widget subtitle = XtNameToWidget(page, "label_subtitle");
+        if (subtitle) {
+            XtVaSetValues(subtitle,
+                          XmNleftAttachment, XmATTACH_WIDGET,
+                          XmNleftWidget, icon_label,
+                          XmNleftOffset, 12,
+                          XmNalignment, XmALIGNMENT_BEGINNING,
+                          NULL);
+        }
+    }
+}
+
 static void on_realize(Widget w, XtPointer client, XtPointer call) {
     (void)w; (void)client; (void)call;
     setup_graphics();
+    setup_window_icon();
 
     /*
      * IMPORTANT:
@@ -1198,56 +1525,32 @@ static void on_toggle_grid(Widget w, XtPointer client, XtPointer call) {
 static void on_about(Widget w, XtPointer client, XtPointer call) {
     (void)w; (void)client; (void)call;
 
-    Widget dialog_shell = XmCreateDialogShell(G.toplevel, "about_dialog", NULL, 0);
-    XtVaSetValues(dialog_shell,
-                  XmNtitle, "About Nibbles",
-                  XmNdeleteResponse, XmDESTROY,
-                  NULL);
-
-    Widget form = XtVaCreateManagedWidget("form",
-                                          xmFormWidgetClass, dialog_shell,
-                                          XmNmarginWidth,  10,
-                                          XmNmarginHeight, 10,
-                                          NULL);
-
-    Widget notebook = XmCreateNotebook(form, "notebook", NULL, 0);
-    XtVaSetValues(notebook,
-                  XmNtopAttachment,    XmATTACH_FORM,
-                  XmNleftAttachment,   XmATTACH_FORM,
-                  XmNrightAttachment,  XmATTACH_FORM,
-                  XmNbottomAttachment, XmATTACH_FORM,
-                  NULL);
-    XtManageChild(notebook);
+    Widget dialog_shell = NULL;
+    Widget notebook = about_dialog_build(G.toplevel, "about_dialog", "About Nibbles", &dialog_shell);
+    if (!notebook || !dialog_shell) return;
+    dbg_icons("[ck-nibbles] about dialog: shell=%p notebook=%p", (void *)dialog_shell, (void *)notebook);
 
     about_add_standard_pages(notebook, 1,
                              "Nibbles",
                              "Nibbles",
-                             "Snake Game\n\nControls:\nArrows: Move P1\nWASD: Move P2 (if enabled)\nP: Pause\nR: Restart (round)",
-                             False);
+                             "Snake Game\n\nControls:\nArrows: Move Player 1\nWASD: Move Player 2 (if enabled)\nP: Pause\nR: Restart (round)",
+                             True);
 
-    Widget ok_button = XtVaCreateManagedWidget("ok_button",
-                                               xmPushButtonWidgetClass, form,
-                                               XmNlabelString, XmStringCreateLocalized("OK"),
-                                               XmNbottomAttachment, XmATTACH_FORM,
-                                               XmNleftAttachment,   XmATTACH_POSITION,
-                                               XmNrightAttachment,  XmATTACH_POSITION,
-                                               XmNleftPosition,     40,
-                                               XmNrightPosition,    60,
-                                               NULL);
+    /* Build a "flattened" pixmap so XPM transparency doesn't render as garbage in XmLabel. */
+    Widget page = XtNameToWidget(notebook, "page_app_about");
+    dbg_icons("[ck-nibbles] about icon: using page=%p as background reference", (void *)page);
+    Pixmap about_pixmap = ensure_about_icon_pixmap(page ? page : notebook);
+    if (about_pixmap != None) {
+        add_about_icon_to_page(notebook, about_pixmap);
+    } else {
+        dbg_icons("[ck-nibbles] about dialog: about pixmap is None (not adding icon)");
+    }
 
-    XtVaSetValues(notebook,
-                  XmNbottomAttachment, XmATTACH_WIDGET,
-                  XmNbottomWidget,     ok_button,
-                  XmNbottomOffset,     10,
+    XtVaSetValues(dialog_shell,
+                  XmNwidth, 700,
+                  XmNheight, 450,
                   NULL);
 
-    XtAddCallback(ok_button, XmNactivateCallback,
-                  (XtCallbackProc)XtDestroyWidget, (XtPointer)dialog_shell);
-
-    XtVaSetValues(form, XmNdefaultButton, ok_button, NULL);
-    XtVaSetValues(dialog_shell, XmNwidth, 600, XmNheight, 450, NULL);
-
-    XtManageChild(form);
     XtPopup(dialog_shell, XtGrabNone);
 }
 
@@ -1704,6 +2007,16 @@ static void on_toplevel_configure(Widget w, XtPointer client, XEvent *ev, Boolea
 
 static int arg_is(const char *a, const char *b) { return a && b && strcmp(a,b)==0; }
 
+static int env_truthy(const char *name) {
+    const char *v = getenv(name);
+    if (!v || !*v) return 0;
+    if (strcmp(v, "0") == 0) return 0;
+    if (strcasecmp(v, "false") == 0) return 0;
+    if (strcasecmp(v, "no") == 0) return 0;
+    if (strcasecmp(v, "off") == 0) return 0;
+    return 1;
+}
+
 int main(int argc, char **argv) {
     memset(&G, 0, sizeof(G));
     G.current_status[0] = '\0';
@@ -1724,6 +2037,8 @@ int main(int argc, char **argv) {
     }
 
     init_exec_path(G.exec_path, sizeof(G.exec_path), argv[0]);
+
+    g_debug_icons = env_truthy("CK_NIBBLES_DEBUG_ICONS");
 
     char *session_id = session_parse_argument(&argc, argv);
     G.session_data = session_data_create(session_id);
@@ -1746,6 +2061,13 @@ int main(int argc, char **argv) {
                                    XmNtitle, "Nibbles",
                                    XmNiconName, "Nibbles",
                                    NULL);
+
+    {
+        Display *dpy = XtDisplay(G.toplevel);
+        float dpi = query_x_dpi(dpy);
+        g_about_ui_scale = clamp_f(dpi / 96.0f, 1.0f, 4.0f);
+        dbg_icons("[ck-nibbles] about icon: dpi=%.1f -> ui_scale=%.2f", dpi, g_about_ui_scale);
+    }
 
     DtInitialize(XtDisplay(G.toplevel), G.toplevel, "CkNibbles", "CkNibbles");
 
@@ -1921,4 +2243,3 @@ int main(int argc, char **argv) {
     session_data_free(G.session_data);
     return 0;
 }
-

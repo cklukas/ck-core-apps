@@ -221,8 +221,7 @@ int main(int argc, char *argv[])
                   NULL);
 
     /* Manually add pages to insert Motif tab between CDE and OS */
-    about_add_title_page(notebook, 1, "page_app_about", "About",
-                         "CK-Core", "(c) 2025-2026 by Dr. C. Klukas");
+    about_add_ck_core_page(notebook, 1, "page_app_about", "About");
 
     {
         AboutField cde_fields[4];
@@ -292,6 +291,7 @@ int main(int argc, char *argv[])
 
     /* Realize widgets */
     XtRealizeWidget(toplevel);
+    about_set_window_icon_ck_core(toplevel);
 
     /* Center window on first launch (avoid top-left placement) */
     if (!restored_geometry) {

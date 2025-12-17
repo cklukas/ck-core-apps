@@ -4,11 +4,16 @@
 #include <Xm/Label.h>
 #include <Xm/Notebook.h>
 #include <Xm/PushB.h>
+#include <Xm/DialogS.h>
 #include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#include <X11/xpm.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <Dt/Dt.h>
+
+#include "ck-core.l.pm"
 
 static void run_cmd_single_line(const char *cmd, char *buf, size_t size)
 {
@@ -76,11 +81,195 @@ int about_get_cde_fields(AboutField fields[], int max_fields)
     return 4;
 }
 
-void about_add_title_page(Widget notebook, int page_number,
-                          const char *page_name,
-                          const char *tab_label,
-                          const char *title_text,
-                          const char *subtitle_text)
+static float query_x_dpi(Display *dpy) {
+    int scr = DefaultScreen(dpy);
+    int px = DisplayWidth(dpy, scr);
+    int mm = DisplayWidthMM(dpy, scr);
+    if (mm <= 0) return 96.0f;
+    return (float)px * 25.4f / (float)mm;
+}
+
+static float clamp_f(float v, float lo, float hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static Pixmap scale_pixmap_nearest(Display *dpy,
+                                   Pixmap src,
+                                   unsigned int src_w,
+                                   unsigned int src_h,
+                                   unsigned int depth,
+                                   float scale)
+{
+    if (!dpy || src == None) return None;
+    if (scale <= 1.0f) return src;
+    if (src_w == 0 || src_h == 0) return src;
+
+    unsigned int dst_w = (unsigned int)(src_w * scale + 0.5f);
+    unsigned int dst_h = (unsigned int)(src_h * scale + 0.5f);
+    if (dst_w < 1) dst_w = 1;
+    if (dst_h < 1) dst_h = 1;
+
+    XImage *src_img = XGetImage(dpy, src, 0, 0, src_w, src_h, AllPlanes, ZPixmap);
+    if (!src_img) return src;
+
+    Window root = DefaultRootWindow(dpy);
+    Pixmap dst = XCreatePixmap(dpy, root, dst_w, dst_h, depth);
+    if (dst == None) {
+        XDestroyImage(src_img);
+        return src;
+    }
+
+    Visual *visual = DefaultVisual(dpy, DefaultScreen(dpy));
+    XImage *dst_img = XCreateImage(dpy, visual, depth, ZPixmap, 0, NULL, dst_w, dst_h, 32, 0);
+    if (!dst_img) {
+        XFreePixmap(dpy, dst);
+        XDestroyImage(src_img);
+        return src;
+    }
+    if (dst_img->bytes_per_line <= 0) {
+        int bpp = dst_img->bits_per_pixel;
+        dst_img->bytes_per_line = (int)((dst_w * (unsigned int)bpp + 7u) / 8u);
+    }
+    dst_img->data = (char *)calloc((size_t)dst_img->bytes_per_line, (size_t)dst_h);
+    if (!dst_img->data) {
+        XDestroyImage(dst_img);
+        XFreePixmap(dpy, dst);
+        XDestroyImage(src_img);
+        return src;
+    }
+
+    for (unsigned int y = 0; y < dst_h; ++y) {
+        unsigned int sy = (unsigned int)((float)y / scale);
+        if (sy >= src_h) sy = src_h - 1;
+        for (unsigned int x = 0; x < dst_w; ++x) {
+            unsigned int sx = (unsigned int)((float)x / scale);
+            if (sx >= src_w) sx = src_w - 1;
+            unsigned long p = XGetPixel(src_img, (int)sx, (int)sy);
+            XPutPixel(dst_img, (int)x, (int)y, p);
+        }
+    }
+
+    GC gc = XCreateGC(dpy, dst, 0, NULL);
+    XPutImage(dpy, dst, gc, dst_img, 0, 0, 0, 0, dst_w, dst_h);
+    XFreeGC(dpy, gc);
+
+    XDestroyImage(dst_img);
+    XDestroyImage(src_img);
+
+    XFreePixmap(dpy, src);
+    return dst;
+}
+
+static Pixmap create_flattened_pixmap_from_xpm_data(Display *dpy,
+                                                    char **xpm_data,
+                                                    Widget background_widget,
+                                                    float scale)
+{
+    if (!dpy || !xpm_data) return None;
+
+    Pixmap src = None;
+    Pixmap mask = None;
+
+    XpmAttributes attr;
+    memset(&attr, 0, sizeof(attr));
+    attr.valuemask = XpmSize;
+
+    int status = XpmCreatePixmapFromData(dpy,
+                                         DefaultRootWindow(dpy),
+                                         xpm_data,
+                                         &src,
+                                         &mask,
+                                         &attr);
+    if (status != XpmSuccess || src == None) {
+        if (src != None) XFreePixmap(dpy, src);
+        if (mask != None) XFreePixmap(dpy, mask);
+        return None;
+    }
+
+    Pixel bg = BlackPixel(dpy, DefaultScreen(dpy));
+    if (background_widget) {
+        XtVaGetValues(background_widget, XmNbackground, &bg, NULL);
+    }
+
+    Window root = DefaultRootWindow(dpy);
+    unsigned int depth = (unsigned int)DefaultDepth(dpy, DefaultScreen(dpy));
+    Pixmap dst = XCreatePixmap(dpy, root, attr.width, attr.height, depth);
+    if (dst == None) {
+        if (mask != None) XFreePixmap(dpy, mask);
+        return src;
+    }
+
+    XGCValues gcv;
+    memset(&gcv, 0, sizeof(gcv));
+    gcv.foreground = bg;
+    gcv.function = GXcopy;
+    GC gc = XCreateGC(dpy, dst, GCForeground | GCFunction, &gcv);
+    XFillRectangle(dpy, dst, gc, 0, 0, attr.width, attr.height);
+
+    if (mask != None) {
+        XSetClipMask(dpy, gc, mask);
+        XSetClipOrigin(dpy, gc, 0, 0);
+    }
+    XCopyArea(dpy, src, dst, gc, 0, 0, attr.width, attr.height, 0, 0);
+    XSetClipMask(dpy, gc, None);
+
+    XFreeGC(dpy, gc);
+    XFreePixmap(dpy, src);
+    if (mask != None) XFreePixmap(dpy, mask);
+
+    if (scale > 1.0f) {
+        return scale_pixmap_nearest(dpy, dst, attr.width, attr.height, depth, scale);
+    }
+
+    return dst;
+}
+
+static void add_icon_to_title_page(Widget page, Pixmap pixmap)
+{
+    if (!page || pixmap == None) return;
+
+    Arg args[12];
+    int n = 0;
+    XtSetArg(args[n], XmNtopAttachment, XmATTACH_FORM); n++;
+    XtSetArg(args[n], XmNleftAttachment, XmATTACH_FORM); n++;
+    XtSetArg(args[n], XmNtopOffset, 12); n++;
+    XtSetArg(args[n], XmNleftOffset, 12); n++;
+    XtSetArg(args[n], XmNlabelType, XmPIXMAP); n++;
+    XtSetArg(args[n], XmNlabelPixmap, pixmap); n++;
+    XtSetArg(args[n], XmNmarginWidth, 0); n++;
+    XtSetArg(args[n], XmNmarginHeight, 0); n++;
+    XtSetArg(args[n], XmNtraversalOn, False); n++;
+    Widget icon_label = XmCreateLabel(page, "page_icon", args, n);
+    if (icon_label) XtManageChild(icon_label);
+
+    Widget title = XtNameToWidget(page, "label_title");
+    if (title && icon_label) {
+        XtVaSetValues(title,
+                      XmNleftAttachment, XmATTACH_WIDGET,
+                      XmNleftWidget, icon_label,
+                      XmNleftOffset, 12,
+                      XmNalignment, XmALIGNMENT_BEGINNING,
+                      NULL);
+    }
+
+    Widget subtitle = XtNameToWidget(page, "label_subtitle");
+    if (subtitle && icon_label) {
+        XtVaSetValues(subtitle,
+                      XmNleftAttachment, XmATTACH_WIDGET,
+                      XmNleftWidget, icon_label,
+                      XmNleftOffset, 12,
+                      XmNalignment, XmALIGNMENT_BEGINNING,
+                      NULL);
+    }
+}
+
+Widget about_add_title_page(Widget notebook, int page_number,
+                           const char *page_name,
+                           const char *tab_label,
+                           const char *title_text,
+                           const char *subtitle_text)
 {
     Arg args[8];
     int n = 0;
@@ -146,14 +335,142 @@ void about_add_title_page(Widget notebook, int page_number,
                   XmNnotebookChildType, XmMAJOR_TAB,
                   XmNpageNumber,        page_number,
                   NULL);
+
+    return page;
 }
 
-void about_add_table_page(Widget notebook, int page_number,
-                          const char *page_name,
-                          const char *tab_label,
-                          AboutField fields[], int field_count)
+Widget about_add_ck_core_page(Widget notebook, int page_number,
+                              const char *page_name,
+                              const char *tab_label)
 {
-    if (!notebook || !fields || field_count <= 0) return;
+    if (!notebook) return NULL;
+
+    Widget page = about_add_title_page(notebook, page_number,
+                                       page_name ? page_name : "page_ckcore",
+                                       tab_label ? tab_label : "CK-Core",
+                                       "CK-Core",
+                                       "(c) 2025-2026 by Dr. C. Klukas");
+
+    Display *dpy = XtDisplay(notebook);
+    float dpi = query_x_dpi(dpy);
+    float scale = clamp_f(dpi / 96.0f, 1.0f, 4.0f);
+    Pixmap icon = create_flattened_pixmap_from_xpm_data(dpy, ck_core_l_pm, page, scale);
+    add_icon_to_title_page(page, icon);
+    return page;
+}
+
+int about_set_window_icon_from_xpm(Widget toplevel, char **xpm_data)
+{
+    if (!toplevel || !xpm_data) return 0;
+    if (!XtIsRealized(toplevel)) return 0;
+
+    Display *dpy = XtDisplay(toplevel);
+    Window win = XtWindow(toplevel);
+    if (!dpy || win == None) return 0;
+
+    Pixmap pixmap = None;
+    Pixmap mask = None;
+
+    int status = XpmCreatePixmapFromData(dpy,
+                                         DefaultRootWindow(dpy),
+                                         xpm_data,
+                                         &pixmap,
+                                         &mask,
+                                         NULL);
+    if (status != XpmSuccess || pixmap == None) {
+        if (pixmap != None) XFreePixmap(dpy, pixmap);
+        if (mask != None) XFreePixmap(dpy, mask);
+        return 0;
+    }
+
+    XWMHints hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.flags = IconPixmapHint;
+    hints.icon_pixmap = pixmap;
+    if (mask != None) {
+        hints.flags |= IconMaskHint;
+        hints.icon_mask = mask;
+    }
+    XSetWMHints(dpy, win, &hints);
+    return 1;
+}
+
+int about_set_window_icon_ck_core(Widget toplevel)
+{
+    return about_set_window_icon_from_xpm(toplevel, ck_core_l_pm);
+}
+
+Widget about_dialog_build(Widget parent,
+                          const char *shell_name,
+                          const char *title,
+                          Widget *out_shell)
+{
+    if (!parent) return NULL;
+
+    Widget shell = XmCreateDialogShell(parent,
+                                       shell_name ? (char *)shell_name : "about_dialog",
+                                       NULL, 0);
+    if (!shell) return NULL;
+
+    XtVaSetValues(shell,
+                  XmNdeleteResponse, XmDESTROY,
+                  XmNallowShellResize, True,
+                  XmNtransientFor, parent,
+                  XmNtitle, title ? title : "About",
+                  NULL);
+
+    Widget form = XmCreateForm(shell, "aboutForm", NULL, 0);
+    XtManageChild(form);
+    XtVaSetValues(form,
+                  XmNmarginWidth, 10,
+                  XmNmarginHeight, 10,
+                  NULL);
+
+    Arg args[8];
+    int n = 0;
+    XtSetArg(args[n], XmNtopAttachment,    XmATTACH_FORM); n++;
+    XtSetArg(args[n], XmNleftAttachment,   XmATTACH_FORM); n++;
+    XtSetArg(args[n], XmNrightAttachment,  XmATTACH_FORM); n++;
+    XtSetArg(args[n], XmNbottomAttachment, XmATTACH_FORM); n++;
+    Widget notebook = XmCreateNotebook(form, "aboutNotebook", args, n);
+    XtVaSetValues(notebook,
+                  XmNmarginWidth,  12,
+                  XmNmarginHeight, 12,
+                  NULL);
+    XtManageChild(notebook);
+
+    XmString ok_label = XmStringCreateLocalized("OK");
+    Widget ok_button = XtVaCreateManagedWidget("aboutOk",
+                                                xmPushButtonWidgetClass, form,
+                                                XmNlabelString, ok_label,
+                                                XmNbottomAttachment, XmATTACH_FORM,
+                                                XmNbottomOffset, 8,
+                                                XmNleftAttachment, XmATTACH_POSITION,
+                                                XmNrightAttachment, XmATTACH_POSITION,
+                                                XmNleftPosition, 40,
+                                                XmNrightPosition, 60,
+                                                NULL);
+    XmStringFree(ok_label);
+    XtAddCallback(ok_button, XmNactivateCallback, (XtCallbackProc)XtDestroyWidget, (XtPointer)shell);
+
+    XtVaSetValues(notebook,
+                  XmNbottomAttachment, XmATTACH_WIDGET,
+                  XmNbottomWidget,     ok_button,
+                  XmNbottomOffset,     8,
+                  NULL);
+
+    XtVaSetValues(form, XmNdefaultButton, ok_button, NULL);
+
+    if (out_shell) *out_shell = shell;
+    return notebook;
+}
+
+Widget about_add_table_page(Widget notebook, int page_number,
+                           const char *page_name,
+                           const char *tab_label,
+                           AboutField fields[], int field_count)
+{
+    if (!notebook || !fields || field_count <= 0) return NULL;
 
     Arg args[8];
     int n = 0;
@@ -288,6 +605,8 @@ void about_add_table_page(Widget notebook, int page_number,
                   XmNnotebookChildType, XmMAJOR_TAB,
                   XmNpageNumber,        page_number,
                   NULL);
+
+    return page;
 }
 
 int about_add_standard_pages(Widget notebook, int start_page,
@@ -305,9 +624,7 @@ int about_add_standard_pages(Widget notebook, int start_page,
     }
 
     if (include_ck_core_tab) {
-        about_add_title_page(notebook, page++, "page_ckcore", "CK-Core",
-                             "CK-Core",
-                             "(c) 2025-2026 by Dr. C. Klukas");
+        about_add_ck_core_page(notebook, page++, "page_ckcore", "CK-Core");
     }
 
     AboutField cde_fields[4];

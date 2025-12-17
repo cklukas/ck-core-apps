@@ -12,7 +12,7 @@ CDE_LIB ?= $(CDE_PREFIX)/lib
 
 CDE_CFLAGS := -I$(CDE_INC)
 CDE_LDFLAGS := -L$(CDE_LIB)
-CDE_LIBS := -lDtSvc -lDtXinerama -lDtWidget -ltt -lXm -lXt -lSM -lICE -lXinerama -lX11
+CDE_LIBS := -lDtSvc -lDtXinerama -lDtWidget -ltt -lXm -lXt -lSM -lICE -lXinerama -lX11 -lXpm
 
 PROGRAMS := $(BIN_DIR)/ck-about \
             $(BIN_DIR)/ck-load \

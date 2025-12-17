@@ -34,6 +34,7 @@
 #include <stdlib.h>
 #include <strings.h>
 #include <string.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #ifndef MIN
@@ -2516,6 +2517,19 @@ static void sample_button_press(Widget w, XtPointer client, XEvent *event, Boole
  * UI callbacks
  * ------------------------------------------------------------------------------------------------- */
 
+static void on_new_window(Widget w, XtPointer client, XtPointer call)
+{
+    (void)w;
+    (void)client;
+    (void)call;
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        execl(G.exec_path, G.exec_path, (char *)NULL);
+        _exit(1);
+    }
+}
+
 static void on_close(Widget w, XtPointer client, XtPointer call)
 {
     (void)w;
@@ -3058,6 +3072,16 @@ static void create_menu(Widget parent)
 
     Widget window_pd = XmCreatePulldownMenu(menubar, "windowPD", NULL, 0);
     XtVaCreateManagedWidget("Window", xmCascadeButtonWidgetClass, menubar, XmNsubMenuId, window_pd, NULL);
+
+    XmString s_new_acc = XmStringCreateLocalized("Ctrl+N");
+    Widget mi_new = XtVaCreateManagedWidget("New",
+                                            xmPushButtonWidgetClass, window_pd,
+                                            XmNaccelerator, "Ctrl<Key>N",
+                                            XmNacceleratorText, s_new_acc,
+                                            NULL);
+    XmStringFree(s_new_acc);
+    XtAddCallback(mi_new, XmNactivateCallback, on_new_window, NULL);
+
     XmString s_acc = XmStringCreateLocalized("Alt+F4");
     Widget mi_close = XtVaCreateManagedWidget("Close",
                                               xmPushButtonWidgetClass, window_pd,

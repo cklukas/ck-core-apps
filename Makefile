@@ -19,12 +19,22 @@ PROGRAMS := $(BIN_DIR)/ck-about \
             $(BIN_DIR)/ck-mixer \
             $(BIN_DIR)/ck-clock \
             $(BIN_DIR)/ck-calc \
+            $(BIN_DIR)/ck-character-map \
             $(BIN_DIR)/ck-nibbles \
             $(BIN_DIR)/ck-mines
 
-.PHONY: all clean
+.PHONY: all clean ck-about ck-load ck-mixer ck-clock ck-calc ck-character-map ck-nibbles ck-mines
 
 all: $(PROGRAMS)
+
+ck-about: $(BIN_DIR)/ck-about
+ck-load: $(BIN_DIR)/ck-load
+ck-mixer: $(BIN_DIR)/ck-mixer
+ck-clock: $(BIN_DIR)/ck-clock
+ck-calc: $(BIN_DIR)/ck-calc
+ck-character-map: $(BIN_DIR)/ck-character-map
+ck-nibbles: $(BIN_DIR)/ck-nibbles
+ck-mines: $(BIN_DIR)/ck-mines
 
 $(BIN_DIR):
 	@mkdir -p $@
@@ -48,6 +58,10 @@ $(BIN_DIR)/ck-clock: src/ck-clock/ck-clock.c | $(BIN_DIR)
 # ck-calc
 $(BIN_DIR)/ck-calc: src/ck-calc/ck-calc.c src/ck-calc/app_state_utils.c src/ck-calc/logic/display_api.c src/ck-calc/logic/formula_eval.c src/ck-calc/logic/calc_state.c src/ck-calc/logic/input_handler.c src/ck-calc/ui/keypad_layout.c src/ck-calc/ui/sci_visuals.c src/ck-calc/ui/window_metrics.c src/ck-calc/clipboard.c src/ck-calc/ui/menu_handlers.c src/shared/session_utils.c src/shared/session_utils.h src/shared/about_dialog.c src/shared/about_dialog.h src/shared/config_utils.c src/shared/config_utils.h src/shared/cde_palette.c src/shared/cde_palette.h | $(BIN_DIR)
 	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-calc/ck-calc.c src/ck-calc/app_state_utils.c src/ck-calc/logic/display_api.c src/ck-calc/logic/formula_eval.c src/ck-calc/logic/calc_state.c src/ck-calc/logic/input_handler.c src/ck-calc/ui/keypad_layout.c src/ck-calc/ui/sci_visuals.c src/ck-calc/ui/window_metrics.c src/ck-calc/clipboard.c src/ck-calc/ui/menu_handlers.c src/shared/session_utils.c src/shared/about_dialog.c src/shared/config_utils.c src/shared/cde_palette.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS) -lm
+
+# ck-character-map
+$(BIN_DIR)/ck-character-map: src/ck-character-map/ck-character-map.c src/shared/session_utils.c src/shared/session_utils.h src/shared/about_dialog.c src/shared/about_dialog.h | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-character-map/ck-character-map.c src/shared/session_utils.c src/shared/about_dialog.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
 
 # ck-nibbles (Motif/X11 game, with CDE session dependency)
 $(BIN_DIR)/ck-nibbles: src/games/ck-nibbles/ck-nibbles.c src/shared/about_dialog.c src/shared/about_dialog.h src/shared/session_utils.c src/shared/session_utils.h | $(BIN_DIR)

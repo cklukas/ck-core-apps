@@ -2,6 +2,7 @@
 
 Small CDE panel utilities:
 - `ck-about` — CDE/version information notebook
+- `ck-character-map` — character map / glyph browser (Motif/CDE)
 - `ck-load` — CPU load meter
 - `ck-mixer` — simple mixer using ALSA
 - `ck-clock` — analog Cairo clock for the front panel

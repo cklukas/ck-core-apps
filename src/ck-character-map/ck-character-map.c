@@ -4,6 +4,7 @@
 #include <Xm/RowColumn.h>
 #include <Xm/Label.h>
 #include <Xm/PushB.h>
+#include <Xm/ToggleB.h>
 #include <Xm/TextF.h>
 #include <Xm/DrawingA.h>
 #include <Xm/ScrolledW.h>
@@ -12,6 +13,7 @@
 #include <Xm/CascadeB.h>
 #include <Xm/Protocols.h>
 #include <Xm/MessageB.h>
+#include <Xm/SelectioB.h>
 #include <Xm/SeparatoG.h>
 #include <Xm/CutPaste.h>
 
@@ -40,6 +42,8 @@
 #ifndef MAX
 #define MAX(a,b) ((a)>(b)?(a):(b))
 #endif
+
+#define DEFAULT_SAMPLE_TEXT "The quick brown fox jumps over the lazy dog 1234567890"
 
 typedef struct FontSizeEntry {
     int pixel_size;
@@ -71,6 +75,26 @@ typedef struct FontFace {
     int size_cap;
 } FontFace;
 
+typedef struct FontEncoding {
+    char *key;       /* e.g. "iso10646-1" */
+    char *display;   /* user-visible */
+    int *face_indices;
+    int face_count;
+    int face_cap;
+} FontEncoding;
+
+typedef struct FontGroup {
+    char *key;       /* e.g. "misc|fixed" or "alias|fixed" */
+    char *display;   /* e.g. "fixed" or "fixed (misc)" */
+    char *foundry;
+    char *family;
+    bool is_alias;
+
+    FontEncoding *encodings;
+    int enc_count;
+    int enc_cap;
+} FontGroup;
+
 typedef struct AppState {
     XtAppContext app_context;
     Widget toplevel;
@@ -79,11 +103,28 @@ typedef struct AppState {
 
     Widget work_form;
     Widget control_form;
-    Widget font_combo;
+    Widget group_combo;
+    Widget encoding_combo;
+    Widget bold_toggle;
+    Widget italic_toggle;
     Widget size_combo;
     Widget update_btn;
-    int font_combo_items;
+    int group_combo_items;
+    int encoding_combo_items;
     int size_combo_items;
+    bool updating_controls;
+
+    Widget selected_font_label;
+    Widget font_file_label;
+    Widget sample_preview;
+    XtIntervalId sample_reflow_timer;
+    Dimension last_sample_w;
+    char *sample_text;
+    char **sample_lines;
+    int sample_line_count;
+    int sample_line_cap;
+    Widget sample_dialog;
+    Widget selected_char_label;
 
     Widget scrolled;
     Widget drawing;
@@ -103,7 +144,16 @@ typedef struct AppState {
     int face_count;
     int face_cap;
 
-    int selected_face;
+    FontGroup *groups;
+    int group_count;
+    int group_cap;
+
+    int selected_group;
+    int selected_encoding;
+    bool want_bold;
+    bool want_italic;
+
+    int selected_face; /* index into faces (resolved from group+encoding+style) */
     int selected_size;
 
     XFontStruct *font;
@@ -141,6 +191,9 @@ typedef struct AppState {
 } AppState;
 
 static AppState G;
+
+static void update_selected_char_label_none(void);
+static void update_selected_char_label_code(unsigned int code);
 
 /* -------------------------------------------------------------------------------------------------
  * Small utilities
@@ -280,6 +333,8 @@ typedef struct XlfdParts {
     int resy;
 } XlfdParts;
 
+static bool str_contains_ci(const char *s, const char *sub);
+
 static bool parse_xlfd(const char *name, XlfdParts *out)
 {
     if (!name || !out) return false;
@@ -305,6 +360,193 @@ static bool parse_xlfd(const char *name, XlfdParts *out)
     out->resy = (fields[10] && fields[10][0]) ? atoi(fields[10]) : 0;
 
     return true;
+}
+
+typedef struct AliasFontParts {
+    char *base;
+    char *weight;
+    char *slant;
+    int point_size;
+} AliasFontParts;
+
+static void alias_font_parts_free(AliasFontParts *p)
+{
+    if (!p) return;
+    free(p->base);
+    free(p->weight);
+    free(p->slant);
+    memset(p, 0, sizeof(*p));
+}
+
+static bool token_all_digits(const char *s)
+{
+    if (!s || !s[0]) return false;
+    for (const unsigned char *p = (const unsigned char *)s; *p; ++p) {
+        if (!isdigit(*p)) return false;
+    }
+    return true;
+}
+
+static bool token_all_alpha(const char *s)
+{
+    if (!s || !s[0]) return false;
+    for (const unsigned char *p = (const unsigned char *)s; *p; ++p) {
+        if (!isalpha(*p)) return false;
+    }
+    return true;
+}
+
+typedef struct AliasStyleFlags {
+    bool bold;
+    bool demi;
+    bool black;
+    bool italic;
+    bool oblique;
+    bool regular;
+} AliasStyleFlags;
+
+static bool alias_style_token_flags(const char *t, AliasStyleFlags *f)
+{
+    if (!t || !t[0]) return false;
+    if (!f) return false;
+    if (!token_all_alpha(t)) return false;
+
+    bool is_style = false;
+    if (str_contains_ci(t, "italic")) { f->italic = true; is_style = true; }
+    if (str_contains_ci(t, "oblique")) { f->oblique = true; is_style = true; }
+    if (str_contains_ci(t, "bold")) { f->bold = true; is_style = true; }
+    if (str_contains_ci(t, "demi")) { f->demi = true; is_style = true; }
+    if (str_contains_ci(t, "black")) { f->black = true; is_style = true; }
+
+    if (strcasecmp(t, "roman") == 0 ||
+        strcasecmp(t, "regular") == 0 ||
+        strcasecmp(t, "medium") == 0 ||
+        strcasecmp(t, "book") == 0 ||
+        strcasecmp(t, "normal") == 0) {
+        is_style = true;
+        f->regular = true;
+    }
+
+    if (!is_style) return false;
+
+    return true;
+}
+
+static char *join_tokens(char **tokens, int count, char sep)
+{
+    if (!tokens || count <= 0) return NULL;
+
+    size_t need = 1;
+    int real = 0;
+    for (int i = 0; i < count; ++i) {
+        if (!tokens[i] || !tokens[i][0]) continue;
+        need += strlen(tokens[i]) + 1;
+        real++;
+    }
+    if (real == 0) return NULL;
+
+    char *out = (char *)malloc(need);
+    if (!out) return NULL;
+    out[0] = '\0';
+
+    bool first = true;
+    for (int i = 0; i < count; ++i) {
+        const char *t = tokens[i];
+        if (!t || !t[0]) continue;
+        if (!first) {
+            size_t len = strlen(out);
+            out[len] = sep;
+            out[len + 1] = '\0';
+        }
+        strncat(out, t, need - strlen(out) - 1);
+        first = false;
+    }
+    return out;
+}
+
+static bool parse_alias_font_name(const char *name, AliasFontParts *out)
+{
+    if (!name || !name[0] || !out) return false;
+    memset(out, 0, sizeof(*out));
+
+    char *dup = xstrdup(name);
+    if (!dup) return false;
+
+    char *tokens[32];
+    int n = split_preserve_empty(dup, '-', tokens, 32);
+    if (n <= 0) {
+        free(dup);
+        return false;
+    }
+
+    int pt = 0;
+    if (n >= 2 && token_all_digits(tokens[n - 1])) {
+        int v = atoi(tokens[n - 1]);
+        if (v >= 4 && v <= 200) {
+            pt = v;
+            n--;
+        }
+    }
+
+    AliasStyleFlags flags;
+    memset(&flags, 0, sizeof(flags));
+    char *base_tokens[32];
+    int base_n = 0;
+    for (int i = 0; i < n; ++i) {
+        if (alias_style_token_flags(tokens[i], &flags)) continue;
+        base_tokens[base_n++] = tokens[i];
+    }
+
+    const char *weight_s = "medium";
+    if (flags.black) weight_s = "black";
+    else if (flags.demi && flags.bold) weight_s = "demibold";
+    else if (flags.demi) weight_s = "demi";
+    else if (flags.bold) weight_s = "bold";
+    else if (flags.regular) weight_s = "medium";
+
+    char slant_c = 'r';
+    if (flags.italic) slant_c = 'i';
+    else if (flags.oblique) slant_c = 'o';
+
+    char *weight = xstrdup(weight_s);
+    if (!weight) {
+        free(dup);
+        return false;
+    }
+
+    char *base = (base_n > 0) ? join_tokens(base_tokens, base_n, '-') : join_tokens(tokens, n, '-');
+    if (!base) {
+        free(weight);
+        free(dup);
+        return false;
+    }
+
+    out->base = base;
+    out->weight = weight;
+    out->slant = (char *)malloc(2);
+    if (!out->slant) {
+        alias_font_parts_free(out);
+        free(dup);
+        return false;
+    }
+    out->slant[0] = slant_c;
+    out->slant[1] = '\0';
+    out->point_size = pt;
+
+    free(dup);
+    return true;
+}
+
+static char *make_alias_face_key(const AliasFontParts *p)
+{
+    if (!p || !p->base) return NULL;
+    const char *w = (p->weight && p->weight[0]) ? p->weight : "medium";
+    const char *s = (p->slant && p->slant[0]) ? p->slant : "r";
+    size_t need = strlen("aliasface|") + strlen(p->base) + strlen(w) + strlen(s) + 4;
+    char *k = (char *)malloc(need);
+    if (!k) return NULL;
+    snprintf(k, need, "aliasface|%s|%s|%s", p->base, w, s);
+    return k;
 }
 
 static char *make_face_key_from_xlfd(const XlfdParts *x)
@@ -395,6 +637,251 @@ static int face_find_by_key(const char *key)
         if (G.faces[i].key && strcmp(G.faces[i].key, key) == 0) return i;
     }
     return -1;
+}
+
+static void font_encoding_free(FontEncoding *e)
+{
+    if (!e) return;
+    free(e->key);
+    free(e->display);
+    free(e->face_indices);
+    memset(e, 0, sizeof(*e));
+}
+
+static void font_group_free(FontGroup *g)
+{
+    if (!g) return;
+    free(g->key);
+    free(g->display);
+    free(g->foundry);
+    free(g->family);
+    for (int i = 0; i < g->enc_count; ++i) {
+        font_encoding_free(&g->encodings[i]);
+    }
+    free(g->encodings);
+    memset(g, 0, sizeof(*g));
+}
+
+static void free_font_groups(void)
+{
+    for (int i = 0; i < G.group_count; ++i) {
+        font_group_free(&G.groups[i]);
+    }
+    free(G.groups);
+    G.groups = NULL;
+    G.group_count = 0;
+    G.group_cap = 0;
+}
+
+static bool group_ensure_capacity(void)
+{
+    if (G.group_count + 1 <= G.group_cap) return true;
+    int new_cap = (G.group_cap == 0) ? 64 : (G.group_cap * 2);
+    FontGroup *ng = (FontGroup *)realloc(G.groups, (size_t)new_cap * sizeof(FontGroup));
+    if (!ng) return false;
+    memset(ng + G.group_cap, 0, (size_t)(new_cap - G.group_cap) * sizeof(FontGroup));
+    G.groups = ng;
+    G.group_cap = new_cap;
+    return true;
+}
+
+static bool encoding_ensure_capacity(FontGroup *g)
+{
+    if (!g) return false;
+    if (g->enc_count + 1 <= g->enc_cap) return true;
+    int new_cap = (g->enc_cap == 0) ? 8 : (g->enc_cap * 2);
+    FontEncoding *ne = (FontEncoding *)realloc(g->encodings, (size_t)new_cap * sizeof(FontEncoding));
+    if (!ne) return false;
+    memset(ne + g->enc_cap, 0, (size_t)(new_cap - g->enc_cap) * sizeof(FontEncoding));
+    g->encodings = ne;
+    g->enc_cap = new_cap;
+    return true;
+}
+
+static bool encoding_faces_ensure_capacity(FontEncoding *e)
+{
+    if (!e) return false;
+    if (e->face_count + 1 <= e->face_cap) return true;
+    int new_cap = (e->face_cap == 0) ? 32 : (e->face_cap * 2);
+    int *nf = (int *)realloc(e->face_indices, (size_t)new_cap * sizeof(int));
+    if (!nf) return false;
+    e->face_indices = nf;
+    e->face_cap = new_cap;
+    return true;
+}
+
+static int group_find_by_key(const char *key)
+{
+    if (!key) return -1;
+    for (int i = 0; i < G.group_count; ++i) {
+        if (G.groups[i].key && strcmp(G.groups[i].key, key) == 0) return i;
+    }
+    return -1;
+}
+
+static int encoding_find_by_key(const FontGroup *g, const char *key)
+{
+    if (!g || !key) return -1;
+    for (int i = 0; i < g->enc_count; ++i) {
+        if (g->encodings[i].key && strcmp(g->encodings[i].key, key) == 0) return i;
+    }
+    return -1;
+}
+
+static char *make_group_key_for_face(const FontFace *f)
+{
+    if (!f) return NULL;
+    if (!f->is_xlfd) {
+        const char *name = f->display ? f->display : (f->key ? f->key : "font");
+        size_t need = strlen("alias|") + strlen(name) + 1;
+        char *k = (char *)malloc(need);
+        if (!k) return NULL;
+        snprintf(k, need, "alias|%s", name);
+        return k;
+    }
+
+    const char *foundry = f->foundry ? f->foundry : "*";
+    const char *family = f->family ? f->family : "*";
+    size_t need = strlen(foundry) + strlen(family) + 2;
+    char *k = (char *)malloc(need);
+    if (!k) return NULL;
+    snprintf(k, need, "%s|%s", foundry, family);
+    return k;
+}
+
+static char *make_encoding_key_for_face(const FontFace *f)
+{
+    if (!f) return NULL;
+    if (!f->is_xlfd) return xstrdup("default");
+    const char *reg = f->registry ? f->registry : "*";
+    const char *enc = f->encoding ? f->encoding : "*";
+    size_t need = strlen(reg) + strlen(enc) + 2;
+    char *k = (char *)malloc(need);
+    if (!k) return NULL;
+    snprintf(k, need, "%s-%s", reg, enc);
+    return k;
+}
+
+static int cmp_groups(const void *a, const void *b)
+{
+    const FontGroup *ga = (const FontGroup *)a;
+    const FontGroup *gb = (const FontGroup *)b;
+    const char *da = ga->display ? ga->display : "";
+    const char *db = gb->display ? gb->display : "";
+    return strcasecmp(da, db);
+}
+
+static int cmp_encodings(const void *a, const void *b)
+{
+    const FontEncoding *ea = (const FontEncoding *)a;
+    const FontEncoding *eb = (const FontEncoding *)b;
+    const char *ka = ea->key ? ea->key : "";
+    const char *kb = eb->key ? eb->key : "";
+
+    if (strcmp(ka, "default") == 0 && strcmp(kb, "default") != 0) return -1;
+    if (strcmp(ka, "default") != 0 && strcmp(kb, "default") == 0) return 1;
+    return strcasecmp(ka, kb);
+}
+
+static void build_font_groups(void)
+{
+    free_font_groups();
+
+    for (int i = 0; i < G.face_count; ++i) {
+        FontFace *f = &G.faces[i];
+
+        char *gkey = make_group_key_for_face(f);
+        if (!gkey) continue;
+        int gidx = group_find_by_key(gkey);
+        if (gidx < 0) {
+            if (!group_ensure_capacity()) {
+                free(gkey);
+                continue;
+            }
+            gidx = G.group_count++;
+            FontGroup *g = &G.groups[gidx];
+            memset(g, 0, sizeof(*g));
+            g->key = gkey;
+            g->is_alias = !f->is_xlfd;
+            g->foundry = f->is_xlfd ? xstrdup(f->foundry ? f->foundry : "*") : NULL;
+            g->family = f->is_xlfd ? xstrdup(f->family ? f->family : "font")
+                                   : xstrdup(f->display ? f->display : (f->key ? f->key : "font"));
+        } else {
+            free(gkey);
+        }
+
+        FontGroup *g = &G.groups[gidx];
+
+        char *ekey = make_encoding_key_for_face(f);
+        if (!ekey) continue;
+        int eidx = encoding_find_by_key(g, ekey);
+        if (eidx < 0) {
+            if (!encoding_ensure_capacity(g)) {
+                free(ekey);
+                continue;
+            }
+            eidx = g->enc_count++;
+            FontEncoding *e = &g->encodings[eidx];
+            memset(e, 0, sizeof(*e));
+            e->key = ekey;
+            if (strcmp(ekey, "default") == 0) {
+                e->display = xstrdup("(default)");
+            } else {
+                e->display = xstrdup(ekey);
+            }
+        } else {
+            free(ekey);
+        }
+
+        FontEncoding *e = &g->encodings[eidx];
+        if (!encoding_faces_ensure_capacity(e)) continue;
+        e->face_indices[e->face_count++] = i;
+    }
+
+    /* Compute display names: show foundry only if needed to disambiguate. */
+    for (int i = 0; i < G.group_count; ++i) {
+        FontGroup *g = &G.groups[i];
+        free(g->display);
+        g->display = NULL;
+        if (g->is_alias) {
+            g->display = xstrdup(g->family ? g->family : "font");
+            continue;
+        }
+
+        bool dup_family = false;
+        for (int j = 0; j < G.group_count; ++j) {
+            if (i == j) continue;
+            FontGroup *h = &G.groups[j];
+            if (h->is_alias) continue;
+            if (!g->family || !h->family) continue;
+            if (strcmp(g->family, h->family) == 0) {
+                dup_family = true;
+                break;
+            }
+        }
+
+        const char *fam = g->family ? g->family : "font";
+        const char *fnd = g->foundry ? g->foundry : "*";
+        if (dup_family) {
+            size_t need = strlen(fam) + strlen(fnd) + 4;
+            g->display = (char *)malloc(need);
+            if (g->display) snprintf(g->display, need, "%s (%s)", fam, fnd);
+        } else {
+            g->display = xstrdup(fam);
+        }
+    }
+
+    /* Sort encodings inside each group for stable UI. */
+    for (int i = 0; i < G.group_count; ++i) {
+        FontGroup *g = &G.groups[i];
+        if (g->enc_count > 1) {
+            qsort(g->encodings, (size_t)g->enc_count, sizeof(FontEncoding), cmp_encodings);
+        }
+    }
+
+    if (G.group_count > 1) {
+        qsort(G.groups, (size_t)G.group_count, sizeof(FontGroup), cmp_groups);
+    }
 }
 
 static bool face_ensure_capacity(void)
@@ -591,18 +1078,43 @@ static void load_font_faces(void)
 
             free(x.dup);
         } else {
-            /* Font alias (e.g. "fixed"). Treat as its own face with a single "default" size. */
-            int idx = face_find_by_key(name);
+            /* Font alias (e.g. "fixed", "lucidasans-italic-12"). */
+            AliasFontParts ap;
+            if (!parse_alias_font_name(name, &ap)) {
+                continue;
+            }
+
+            char *key = make_alias_face_key(&ap);
+            if (!key) {
+                alias_font_parts_free(&ap);
+                continue;
+            }
+
+            int idx = face_find_by_key(key);
             if (idx < 0) {
-                if (!face_ensure_capacity()) continue;
+                if (!face_ensure_capacity()) {
+                    free(key);
+                    alias_font_parts_free(&ap);
+                    continue;
+                }
                 idx = G.face_count++;
                 FontFace *f = &G.faces[idx];
                 memset(f, 0, sizeof(*f));
                 f->is_xlfd = false;
-                f->key = xstrdup(name);
-                f->display = xstrdup(name);
-                (void)face_add_size(f, 0, 0, name);
+                f->key = key;
+                f->display = xstrdup(ap.base);
+                f->family = xstrdup(ap.base);
+                f->weight = xstrdup(ap.weight);
+                f->slant = xstrdup(ap.slant);
+            } else {
+                free(key);
             }
+
+            FontFace *f = &G.faces[idx];
+            int pt_deci = (ap.point_size > 0) ? (ap.point_size * 10) : 0;
+            (void)face_add_size(f, 0, pt_deci, name);
+
+            alias_font_parts_free(&ap);
         }
     }
 
@@ -622,6 +1134,334 @@ static void load_font_faces(void)
     if (G.face_count > 1) {
         qsort(G.faces, (size_t)G.face_count, sizeof(FontFace), cmp_faces);
     }
+
+    build_font_groups();
+}
+
+/* -------------------------------------------------------------------------------------------------
+ * Font file lookup
+ * ------------------------------------------------------------------------------------------------- */
+
+static char *xfont_get_property_string(Display *dpy, const XFontStruct *font, const char *prop_name)
+{
+    if (!dpy || !font || !prop_name || !prop_name[0]) return NULL;
+
+    Atom a = XInternAtom(dpy, prop_name, False);
+    if (a == None) return NULL;
+
+    for (int i = 0; i < font->n_properties; ++i) {
+        if (font->properties[i].name != a) continue;
+        char *name = XGetAtomName(dpy, (Atom)font->properties[i].card32);
+        if (!name) return NULL;
+        char *out = xstrdup(name);
+        XFree(name);
+        return out;
+    }
+    return NULL;
+}
+
+static char *skip_ws(char *s)
+{
+    if (!s) return NULL;
+    while (*s && isspace((unsigned char)*s)) s++;
+    return s;
+}
+
+static void rstrip_ws(char *s)
+{
+    if (!s) return;
+    size_t n = strlen(s);
+    while (n > 0 && isspace((unsigned char)s[n - 1])) {
+        s[n - 1] = '\0';
+        n--;
+    }
+}
+
+static void rstrip_newline(char *s)
+{
+    if (!s) return;
+    size_t n = strlen(s);
+    while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r')) {
+        s[n - 1] = '\0';
+        n--;
+    }
+}
+
+static bool parse_fonts_dir_line(char *line, char **out_file, char **out_name)
+{
+    if (out_file) *out_file = NULL;
+    if (out_name) *out_name = NULL;
+    if (!line || !out_file || !out_name) return false;
+
+    rstrip_newline(line);
+    char *p = skip_ws(line);
+    if (!p || !p[0]) return false;
+
+    char *file = p;
+    while (*p && !isspace((unsigned char)*p)) p++;
+    if (!*p) return false;
+    *p++ = '\0';
+
+    p = skip_ws(p);
+    if (!p || !p[0]) return false;
+    rstrip_ws(p);
+
+    *out_file = file;
+    *out_name = p;
+    return true;
+}
+
+static char *join_dir_file(const char *dir, const char *file)
+{
+    if (!dir || !dir[0] || !file || !file[0]) return NULL;
+    if (file[0] == '/') return xstrdup(file);
+
+    size_t dlen = strlen(dir);
+    bool slash = (dir[dlen - 1] == '/');
+    size_t need = dlen + strlen(file) + (slash ? 1 : 2);
+    char *out = (char *)malloc(need);
+    if (!out) return NULL;
+    if (slash) snprintf(out, need, "%s%s", dir, file);
+    else snprintf(out, need, "%s/%s", dir, file);
+    return out;
+}
+
+static char *font_path_entry_dir(const char *entry)
+{
+    if (!entry || entry[0] != '/') return NULL;
+
+    const char *colon = strchr(entry, ':');
+    size_t len = colon ? (size_t)(colon - entry) : strlen(entry);
+    while (len > 1 && entry[len - 1] == '/') len--;
+
+    char *out = (char *)malloc(len + 1);
+    if (!out) return NULL;
+    memcpy(out, entry, len);
+    out[len] = '\0';
+    return out;
+}
+
+static char *find_font_file_in_dir_index(const char *dir, const char *index_name, const char *font_name)
+{
+    if (!dir || !dir[0] || !index_name || !index_name[0] || !font_name || !font_name[0]) return NULL;
+    if (dir[0] != '/') return NULL;
+
+    char path[PATH_MAX];
+    size_t dlen = strlen(dir);
+    bool slash = (dir[dlen - 1] == '/');
+    snprintf(path, sizeof(path), "%s%s%s", dir, slash ? "" : "/", index_name);
+
+    FILE *fp = fopen(path, "r");
+    if (!fp) return NULL;
+
+    char line[4096];
+    if (!fgets(line, sizeof(line), fp)) {
+        fclose(fp);
+        return NULL;
+    }
+
+    while (fgets(line, sizeof(line), fp)) {
+        char *file = NULL;
+        char *name = NULL;
+        if (!parse_fonts_dir_line(line, &file, &name)) continue;
+        if (strcmp(name, font_name) != 0) continue;
+        fclose(fp);
+        return join_dir_file(dir, file);
+    }
+
+    fclose(fp);
+    return NULL;
+}
+
+static char *find_font_file_in_dir(const char *dir, const char *font_name)
+{
+    char *p = find_font_file_in_dir_index(dir, "fonts.dir", font_name);
+    if (p) return p;
+    return find_font_file_in_dir_index(dir, "fonts.scale", font_name);
+}
+
+static char *parse_quoted_or_token(char **io_p)
+{
+    if (!io_p || !*io_p) return NULL;
+    char *p = skip_ws(*io_p);
+    if (!p || !p[0]) {
+        *io_p = p;
+        return NULL;
+    }
+
+    char *out = NULL;
+    if (*p == '"') {
+        p++;
+        out = p;
+        while (*p && *p != '"') p++;
+        if (*p == '"') {
+            *p = '\0';
+            p++;
+        }
+    } else {
+        out = p;
+        while (*p && !isspace((unsigned char)*p)) p++;
+        if (*p) {
+            *p = '\0';
+            p++;
+        }
+    }
+
+    *io_p = p;
+    return out;
+}
+
+static char *resolve_font_alias_in_dir(const char *dir, const char *alias_name)
+{
+    if (!dir || !dir[0] || !alias_name || !alias_name[0]) return NULL;
+    if (dir[0] != '/') return NULL;
+
+    char path[PATH_MAX];
+    size_t dlen = strlen(dir);
+    bool slash = (dir[dlen - 1] == '/');
+    snprintf(path, sizeof(path), "%s%sfonts.alias", dir, slash ? "" : "/");
+
+    FILE *fp = fopen(path, "r");
+    if (!fp) return NULL;
+
+    char line[4096];
+    while (fgets(line, sizeof(line), fp)) {
+        rstrip_newline(line);
+        char *p = skip_ws(line);
+        if (!p || !p[0]) continue;
+        if (*p == '!' || *p == '#') continue;
+
+        char *alias = parse_quoted_or_token(&p);
+        char *target = parse_quoted_or_token(&p);
+        if (!alias || !target) continue;
+        if (strcmp(alias, alias_name) != 0) continue;
+
+        fclose(fp);
+        return xstrdup(target);
+    }
+
+    fclose(fp);
+    return NULL;
+}
+
+static char *make_xlfd_zero_size_name(const char *font_name)
+{
+    XlfdParts x;
+    if (!parse_xlfd(font_name, &x)) return NULL;
+
+    char buf[512];
+    snprintf(buf, sizeof(buf),
+             "-%s-%s-%s-%s-%s-%s-%d-%d-%d-%d-%s-0-%s-%s",
+             x.f[1] ? x.f[1] : "*",
+             x.f[2] ? x.f[2] : "*",
+             x.f[3] ? x.f[3] : "*",
+             x.f[4] ? x.f[4] : "*",
+             x.f[5] ? x.f[5] : "*",
+             x.f[6] ? x.f[6] : "",
+             0, 0, 0, 0,
+             x.f[11] ? x.f[11] : "*",
+             x.f[13] ? x.f[13] : "*",
+             x.f[14] ? x.f[14] : "*");
+
+    free(x.dup);
+    return xstrdup(buf);
+}
+
+static char *x11_find_font_file_path(Display *dpy, const char *font_name)
+{
+    if (!dpy || !font_name || !font_name[0]) return NULL;
+
+    int npaths = 0;
+    char **paths = XGetFontPath(dpy, &npaths);
+    if (!paths || npaths <= 0) {
+        if (paths) XFreeFontPath(paths);
+        return NULL;
+    }
+
+    char *out = NULL;
+    char *cur = xstrdup(font_name);
+    if (!cur) {
+        XFreeFontPath(paths);
+        return NULL;
+    }
+
+    for (int depth = 0; depth < 4 && cur && cur[0] && !out; ++depth) {
+        for (int i = 0; i < npaths && !out; ++i) {
+            char *dir = font_path_entry_dir(paths[i]);
+            if (!dir) continue;
+            out = find_font_file_in_dir(dir, cur);
+            free(dir);
+        }
+
+        if (!out && cur[0] == '-') {
+            char *zero = make_xlfd_zero_size_name(cur);
+            if (zero) {
+                for (int i = 0; i < npaths && !out; ++i) {
+                    char *dir = font_path_entry_dir(paths[i]);
+                    if (!dir) continue;
+                    out = find_font_file_in_dir(dir, zero);
+                    free(dir);
+                }
+                free(zero);
+            }
+        }
+
+        if (out) break;
+
+        char *resolved = NULL;
+        for (int i = 0; i < npaths && !resolved; ++i) {
+            char *dir = font_path_entry_dir(paths[i]);
+            if (!dir) continue;
+            resolved = resolve_font_alias_in_dir(dir, cur);
+            free(dir);
+        }
+        if (!resolved || strcmp(resolved, cur) == 0) {
+            free(resolved);
+            break;
+        }
+        free(cur);
+        cur = resolved;
+    }
+
+    free(cur);
+    XFreeFontPath(paths);
+    return out;
+}
+
+static void update_font_file_label_for_loaded_font(void)
+{
+    if (!G.font_file_label) return;
+
+    char *loaded_name = NULL;
+    if (G.dpy && G.font) {
+        loaded_name = xfont_get_property_string(G.dpy, G.font, "FONT");
+    }
+
+    const char *name = loaded_name;
+    if (!name || !name[0]) {
+        if (G.selected_face >= 0 && G.selected_face < G.face_count) {
+            FontFace *f = &G.faces[G.selected_face];
+            if (f && f->size_count > 0) {
+                int sidx = G.selected_size;
+                if (sidx < 0 || sidx >= f->size_count) sidx = 0;
+                name = f->sizes[sidx].xlfd_name;
+            }
+        }
+    }
+
+    char *path = (name && name[0]) ? x11_find_font_file_path(G.dpy, name) : NULL;
+
+    char buf[2048];
+    const char *n = (name && name[0]) ? name : "(unknown)";
+    const char *p = (path && path[0]) ? path : "(unknown)";
+    snprintf(buf, sizeof(buf), "Loaded font: %s\nFont file: %s", n, p);
+
+    XmString s = XmStringCreateLocalized(buf);
+    XtVaSetValues(G.font_file_label, XmNlabelString, s, NULL);
+    XmStringFree(s);
+
+    free(path);
+    free(loaded_name);
 }
 
 /* -------------------------------------------------------------------------------------------------
@@ -1007,6 +1847,51 @@ static int utf8_encode(uint32_t cp, char out[8])
     return 0;
 }
 
+static bool utf8_decode_next(const char **io_p, uint32_t *out_cp)
+{
+    if (!io_p || !*io_p || !out_cp) return false;
+    const unsigned char *s = (const unsigned char *)(*io_p);
+    if (!s[0]) return false;
+
+    unsigned char c0 = s[0];
+    if (c0 < 0x80) {
+        *out_cp = (uint32_t)c0;
+        *io_p = (const char *)(s + 1);
+        return true;
+    }
+
+    if ((c0 & 0xE0) == 0xC0 && (s[1] & 0xC0) == 0x80) {
+        uint32_t cp = ((uint32_t)(c0 & 0x1Fu) << 6) | (uint32_t)(s[1] & 0x3Fu);
+        if (cp < 0x80) cp = 0xFFFDu;
+        *out_cp = cp;
+        *io_p = (const char *)(s + 2);
+        return true;
+    }
+
+    if ((c0 & 0xF0) == 0xE0 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80) {
+        uint32_t cp = ((uint32_t)(c0 & 0x0Fu) << 12) | ((uint32_t)(s[1] & 0x3Fu) << 6) | (uint32_t)(s[2] & 0x3Fu);
+        if (cp < 0x800) cp = 0xFFFDu;
+        *out_cp = cp;
+        *io_p = (const char *)(s + 3);
+        return true;
+    }
+
+    if ((c0 & 0xF8) == 0xF0 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80 && (s[3] & 0xC0) == 0x80) {
+        uint32_t cp = ((uint32_t)(c0 & 0x07u) << 18) |
+                      ((uint32_t)(s[1] & 0x3Fu) << 12) |
+                      ((uint32_t)(s[2] & 0x3Fu) << 6) |
+                      (uint32_t)(s[3] & 0x3Fu);
+        if (cp < 0x10000 || cp > 0x10FFFFu) cp = 0xFFFDu;
+        *out_cp = cp;
+        *io_p = (const char *)(s + 4);
+        return true;
+    }
+
+    *out_cp = 0xFFFDu;
+    *io_p = (const char *)(s + 1);
+    return true;
+}
+
 static void append_glyph_to_text(unsigned int code)
 {
     if (!G.text_field) return;
@@ -1052,7 +1937,9 @@ static void drawing_button_press(Widget w, XtPointer client, XEvent *event, Bool
 
     int old = G.selected_glyph_index;
     G.selected_glyph_index = idx;
-    append_glyph_to_text(G.glyphs[idx]);
+    unsigned int code = G.glyphs[idx];
+    append_glyph_to_text(code);
+    update_selected_char_label_code(code);
 
     if (old >= 0 && old < G.glyph_count) {
         int ox = (old % G.cols) * G.cell_w;
@@ -1097,6 +1984,431 @@ static void clip_configure_event(Widget w, XtPointer client, XEvent *event, Bool
 
     if (G.reflow_timer) return;
     G.reflow_timer = XtAppAddTimeOut(G.app_context, 0, reflow_timeout_cb, NULL);
+}
+
+/* -------------------------------------------------------------------------------------------------
+ * Sample preview + selected character info
+ * ------------------------------------------------------------------------------------------------- */
+
+static void update_selected_char_label_none(void)
+{
+    if (!G.selected_char_label) return;
+    XmString s = XmStringCreateLocalized("Selected character: (none)");
+    XtVaSetValues(G.selected_char_label, XmNlabelString, s, NULL);
+    XmStringFree(s);
+}
+
+static void update_selected_char_label_code(unsigned int code)
+{
+    if (!G.selected_char_label) return;
+
+    char glyph[8];
+    glyph[0] = '\0';
+    if (utf8_encode(code, glyph) <= 0) snprintf(glyph, sizeof(glyph), "?");
+
+    char shown[64];
+    shown[0] = '\0';
+    if (code == (unsigned int)' ') snprintf(shown, sizeof(shown), "' '");
+    else if (code == (unsigned int)'\n') snprintf(shown, sizeof(shown), "'\\\\n'");
+    else if (code == (unsigned int)'\t') snprintf(shown, sizeof(shown), "'\\\\t'");
+    else if (code < 0x20u || code == 0x7Fu) snprintf(shown, sizeof(shown), "(control)");
+    else snprintf(shown, sizeof(shown), "%s", glyph);
+
+    char buf[256];
+    snprintf(buf, sizeof(buf), "Selected character %u (0x%X): %s", code, code, shown);
+
+    XmString s = XmStringCreateLocalized(buf);
+    XtVaSetValues(G.selected_char_label, XmNlabelString, s, NULL);
+    XmStringFree(s);
+}
+
+static void sample_lines_clear(void)
+{
+    for (int i = 0; i < G.sample_line_count; ++i) free(G.sample_lines[i]);
+    free(G.sample_lines);
+    G.sample_lines = NULL;
+    G.sample_line_count = 0;
+    G.sample_line_cap = 0;
+}
+
+static bool sample_lines_ensure_capacity(void)
+{
+    if (G.sample_line_count + 1 <= G.sample_line_cap) return true;
+    int new_cap = (G.sample_line_cap == 0) ? 8 : (G.sample_line_cap * 2);
+    char **nl = (char **)realloc(G.sample_lines, (size_t)new_cap * sizeof(char *));
+    if (!nl) return false;
+    memset(nl + G.sample_line_cap, 0, (size_t)(new_cap - G.sample_line_cap) * sizeof(char *));
+    G.sample_lines = nl;
+    G.sample_line_cap = new_cap;
+    return true;
+}
+
+static bool sample_lines_push(const char *line)
+{
+    if (!sample_lines_ensure_capacity()) return false;
+    G.sample_lines[G.sample_line_count++] = xstrdup(line ? line : "");
+    return (G.sample_lines[G.sample_line_count - 1] != NULL);
+}
+
+static bool utf8_to_single_byte(const char *utf8, char **out_bytes, int *out_len)
+{
+    if (out_bytes) *out_bytes = NULL;
+    if (out_len) *out_len = 0;
+    if (!utf8 || !out_bytes || !out_len) return false;
+
+    size_t max = strlen(utf8);
+    char *buf = (char *)malloc(max + 1);
+    if (!buf) return false;
+
+    int n = 0;
+    const char *p = utf8;
+    while (p && *p) {
+        uint32_t cp = 0;
+        if (!utf8_decode_next(&p, &cp)) break;
+        if (cp <= 0xFFu) buf[n++] = (char)(cp & 0xFFu);
+        else buf[n++] = '?';
+    }
+    buf[n] = '\0';
+    *out_bytes = buf;
+    *out_len = n;
+    return true;
+}
+
+static bool utf8_to_char2b(const char *utf8, XChar2b **out_chars, int *out_len)
+{
+    if (out_chars) *out_chars = NULL;
+    if (out_len) *out_len = 0;
+    if (!utf8 || !out_chars || !out_len) return false;
+
+    size_t max = strlen(utf8);
+    XChar2b *buf = (XChar2b *)malloc(max * sizeof(XChar2b));
+    if (!buf) return false;
+
+    int n = 0;
+    const char *p = utf8;
+    while (p && *p) {
+        uint32_t cp = 0;
+        if (!utf8_decode_next(&p, &cp)) break;
+        if (cp > 0xFFFFu) cp = (uint32_t)'?';
+        buf[n].byte1 = (unsigned char)((cp >> 8) & 0xFFu);
+        buf[n].byte2 = (unsigned char)(cp & 0xFFu);
+        n++;
+    }
+    *out_chars = buf;
+    *out_len = n;
+    return true;
+}
+
+static int sample_measure_pixels(const char *utf8)
+{
+    if (!utf8 || !utf8[0]) return 0;
+    if (!G.font) return (int)strlen(utf8) * 8;
+
+    if (!G.font_is_two_byte) {
+        char *bytes = NULL;
+        int n = 0;
+        if (!utf8_to_single_byte(utf8, &bytes, &n) || !bytes) return (int)strlen(utf8) * 8;
+        int w = XTextWidth(G.font, bytes, n);
+        free(bytes);
+        return w;
+    }
+
+    XChar2b *chs = NULL;
+    int n = 0;
+    if (!utf8_to_char2b(utf8, &chs, &n) || !chs) return (int)strlen(utf8) * 8;
+    int w = XTextWidth16(G.font, chs, n);
+    free(chs);
+    return w;
+}
+
+static void sample_rewrap_for_width(Dimension widget_w)
+{
+    sample_lines_clear();
+
+    const char *text = (G.sample_text && G.sample_text[0]) ? G.sample_text : DEFAULT_SAMPLE_TEXT;
+    if (!text || !text[0]) {
+        (void)sample_lines_push("");
+        return;
+    }
+
+    int pad = 8;
+    int max_w = (int)widget_w - pad * 2 - 2;
+    if (max_w < 1) max_w = 1;
+
+    char *cur = NULL;
+
+    const char *p = text;
+    while (p && *p) {
+        while (*p == ' ' || *p == '\t' || *p == '\r') p++;
+        if (!*p) break;
+
+        if (*p == '\n') {
+            (void)sample_lines_push(cur ? cur : "");
+            free(cur);
+            cur = NULL;
+            p++;
+            continue;
+        }
+
+        const char *w0 = p;
+        while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') p++;
+        size_t wlen = (size_t)(p - w0);
+        if (wlen == 0) continue;
+
+        char *word = (char *)malloc(wlen + 1);
+        if (!word) break;
+        memcpy(word, w0, wlen);
+        word[wlen] = '\0';
+
+        if (!cur || !cur[0]) {
+            free(cur);
+            cur = word;
+            continue;
+        }
+
+        size_t cur_len = strlen(cur);
+        size_t need = cur_len + 1 + wlen + 1;
+        char *cand = (char *)malloc(need);
+        if (!cand) {
+            free(word);
+            break;
+        }
+        snprintf(cand, need, "%s %s", cur, word);
+
+        if (sample_measure_pixels(cand) <= max_w) {
+            free(cur);
+            cur = cand;
+            free(word);
+        } else {
+            (void)sample_lines_push(cur);
+            free(cur);
+            cur = word;
+            free(cand);
+        }
+    }
+
+    if (cur) {
+        (void)sample_lines_push(cur);
+        free(cur);
+    }
+
+    if (G.sample_line_count == 0) (void)sample_lines_push(text);
+}
+
+static void sample_preview_draw(void)
+{
+    if (!G.dpy || !G.sample_preview || !XtIsRealized(G.sample_preview)) return;
+
+    Window win = XtWindow(G.sample_preview);
+    if (win == None) return;
+    ensure_gcs();
+    if (!G.gc_text) return;
+
+    Dimension w = 0, h = 0;
+    XtVaGetValues(G.sample_preview, XmNwidth, &w, XmNheight, &h, NULL);
+    if (w < 1 || h < 1) return;
+
+    XClearArea(G.dpy, win, 0, 0, 0, 0, False);
+
+    int pad = 8;
+    int asc = (G.font) ? G.font->ascent : 12;
+    int des = (G.font) ? G.font->descent : 4;
+    int line_h = MAX(1, asc + des + 2);
+
+    int y = pad + asc;
+    for (int i = 0; i < G.sample_line_count; ++i) {
+        const char *line = G.sample_lines[i] ? G.sample_lines[i] : "";
+        if (!line[0]) {
+            y += line_h;
+            continue;
+        }
+        int x = pad;
+        if (!G.font || !G.font_is_two_byte) {
+            char *bytes = NULL;
+            int n = 0;
+            if (utf8_to_single_byte(line, &bytes, &n) && bytes) {
+                XDrawString(G.dpy, win, G.gc_text, x, y, bytes, n);
+                free(bytes);
+            }
+        } else {
+            XChar2b *chs = NULL;
+            int n = 0;
+            if (utf8_to_char2b(line, &chs, &n) && chs) {
+                XDrawString16(G.dpy, win, G.gc_text, x, y, chs, n);
+                free(chs);
+            }
+        }
+        y += line_h;
+    }
+}
+
+static void sample_preview_update_layout(void)
+{
+    if (!G.sample_preview) return;
+    Dimension w = 0, cur_h = 0;
+    XtVaGetValues(G.sample_preview, XmNwidth, &w, XmNheight, &cur_h, NULL);
+    if (w < 1) w = 1;
+
+    sample_rewrap_for_width(w);
+
+    int pad = 8;
+    int asc = (G.font) ? G.font->ascent : 12;
+    int des = (G.font) ? G.font->descent : 4;
+    int line_h = MAX(1, asc + des + 2);
+    int lines = MAX(1, G.sample_line_count);
+    Dimension need_h = (Dimension)(pad + pad + lines * line_h);
+    if (need_h < 30) need_h = 30;
+
+    if (cur_h != need_h) {
+        XtVaSetValues(G.sample_preview, XmNheight, need_h, NULL);
+    }
+
+    G.last_sample_w = w;
+}
+
+static void sample_preview_update_and_draw(void)
+{
+    sample_preview_update_layout();
+    sample_preview_draw();
+}
+
+static void sample_expose_cb(Widget w, XtPointer client, XtPointer call)
+{
+    (void)w;
+    (void)client;
+    XmDrawingAreaCallbackStruct *cbs = (XmDrawingAreaCallbackStruct *)call;
+    if (!cbs || !cbs->event) return;
+    if (cbs->event->type != Expose) return;
+
+    if (G.sample_line_count == 0) sample_preview_update_layout();
+    sample_preview_draw();
+}
+
+static void sample_reflow_timeout_cb(XtPointer client_data, XtIntervalId *id)
+{
+    (void)client_data;
+    (void)id;
+    G.sample_reflow_timer = 0;
+    sample_preview_update_and_draw();
+}
+
+static void sample_configure_event(Widget w, XtPointer client, XEvent *event, Boolean *cont)
+{
+    (void)w;
+    (void)client;
+    (void)cont;
+    if (!event || event->type != ConfigureNotify) return;
+
+    XConfigureEvent *cev = (XConfigureEvent *)event;
+    if ((Dimension)cev->width == G.last_sample_w) return;
+
+    if (G.sample_reflow_timer) return;
+    G.sample_reflow_timer = XtAppAddTimeOut(G.app_context, 0, sample_reflow_timeout_cb, NULL);
+}
+
+static void sample_dialog_destroy_cb(Widget w, XtPointer client, XtPointer call)
+{
+    (void)w;
+    (void)client;
+    (void)call;
+    G.sample_dialog = NULL;
+}
+
+static Widget sample_dialog_text_widget(Widget dialog)
+{
+    if (!dialog) return NULL;
+    return XmSelectionBoxGetChild(dialog, XmDIALOG_TEXT);
+}
+
+static void sample_dialog_set_text(Widget dialog, const char *text)
+{
+    Widget t = sample_dialog_text_widget(dialog);
+    if (!t) return;
+    XmTextFieldSetString(t, (char *)(text ? text : ""));
+    XmTextFieldSetInsertionPosition(t, (XmTextPosition)strlen(text ? text : ""));
+}
+
+static void sample_dialog_default_cb(Widget w, XtPointer client, XtPointer call)
+{
+    (void)w;
+    (void)client;
+    (void)call;
+    if (!G.sample_dialog) return;
+    sample_dialog_set_text(G.sample_dialog, DEFAULT_SAMPLE_TEXT);
+}
+
+static void sample_dialog_cancel_cb(Widget w, XtPointer client, XtPointer call)
+{
+    (void)w;
+    (void)client;
+    (void)call;
+    if (G.sample_dialog) XtUnmanageChild(G.sample_dialog);
+}
+
+static void sample_dialog_ok_cb(Widget w, XtPointer client, XtPointer call)
+{
+    (void)w;
+    (void)client;
+    (void)call;
+    if (!G.sample_dialog) return;
+    Widget t = sample_dialog_text_widget(G.sample_dialog);
+    if (!t) {
+        XtUnmanageChild(G.sample_dialog);
+        return;
+    }
+    char *s = XmTextFieldGetString(t);
+    if (s) {
+        free(G.sample_text);
+        G.sample_text = xstrdup(s);
+        XtFree(s);
+    }
+    sample_preview_update_and_draw();
+    XtUnmanageChild(G.sample_dialog);
+}
+
+static void show_sample_dialog(void)
+{
+    if (!G.toplevel) return;
+    if (!G.sample_dialog || !XtIsWidget(G.sample_dialog)) {
+        Arg args[4];
+        Cardinal n = 0;
+        XtSetArg(args[n], XmNautoUnmanage, False); n++;
+        XtSetArg(args[n], XmNdialogStyle, XmDIALOG_PRIMARY_APPLICATION_MODAL); n++;
+        G.sample_dialog = XmCreatePromptDialog(G.toplevel, "sampleTextDialog", args, n);
+        if (!G.sample_dialog) return;
+
+        Widget helpb = XmSelectionBoxGetChild(G.sample_dialog, XmDIALOG_HELP_BUTTON);
+        if (helpb) {
+            XmString s_def = XmStringCreateLocalized("Default");
+            XtVaSetValues(helpb, XmNlabelString, s_def, NULL);
+            XmStringFree(s_def);
+            XtAddCallback(helpb, XmNactivateCallback, sample_dialog_default_cb, NULL);
+        }
+
+        Widget okb = XmSelectionBoxGetChild(G.sample_dialog, XmDIALOG_OK_BUTTON);
+        if (okb) XtAddCallback(okb, XmNactivateCallback, sample_dialog_ok_cb, NULL);
+
+        Widget cancelb = XmSelectionBoxGetChild(G.sample_dialog, XmDIALOG_CANCEL_BUTTON);
+        if (cancelb) XtAddCallback(cancelb, XmNactivateCallback, sample_dialog_cancel_cb, NULL);
+
+        XmString s_label = XmStringCreateLocalized("Sample text:");
+        XtVaSetValues(G.sample_dialog, XmNselectionLabelString, s_label, NULL);
+        XmStringFree(s_label);
+
+        XtAddCallback(XtParent(G.sample_dialog), XmNdestroyCallback, sample_dialog_destroy_cb, NULL);
+    }
+
+    sample_dialog_set_text(G.sample_dialog, (G.sample_text && G.sample_text[0]) ? G.sample_text : DEFAULT_SAMPLE_TEXT);
+    XtManageChild(G.sample_dialog);
+}
+
+static void sample_button_press(Widget w, XtPointer client, XEvent *event, Boolean *cont)
+{
+    (void)w;
+    (void)client;
+    (void)cont;
+    if (!event || event->type != ButtonPress) return;
+    show_sample_dialog();
 }
 
 /* -------------------------------------------------------------------------------------------------
@@ -1171,6 +2483,46 @@ static void combobox_clear_counted(Widget combo, int *io_count)
     XmComboBoxUpdate(combo);
 }
 
+static void combobox_set_selected_position_and_text(Widget combo, int pos, const char *label)
+{
+    if (!combo) return;
+    if (pos < 1) pos = 1;
+
+    bool prev = G.updating_controls;
+    G.updating_controls = true;
+    XtVaSetValues(combo, XmNselectedPosition, pos, NULL);
+    if (label && label[0]) {
+        XmString s = XmStringCreateLocalized((char *)label);
+        XmComboBoxSetItem(combo, s);
+        XmStringFree(s);
+    }
+    XmComboBoxUpdate(combo);
+    G.updating_controls = prev;
+}
+
+static void update_selected_font_label(void)
+{
+    if (!G.selected_font_label) return;
+
+    const char *name = NULL;
+    if (G.selected_face >= 0 && G.selected_face < G.face_count) {
+        FontFace *f = &G.faces[G.selected_face];
+        if (f && f->size_count > 0) {
+            int sidx = G.selected_size;
+            if (sidx < 0 || sidx >= f->size_count) sidx = 0;
+            if (f->sizes[sidx].xlfd_name) name = f->sizes[sidx].xlfd_name;
+        }
+    }
+
+    char buf[1024];
+    if (name && name[0]) snprintf(buf, sizeof(buf), "%s:", name);
+    else snprintf(buf, sizeof(buf), "(no font selected):");
+
+    XmString s = XmStringCreateLocalized(buf);
+    XtVaSetValues(G.selected_font_label, XmNlabelString, s, NULL);
+    XmStringFree(s);
+}
+
 static void populate_size_combo_for_face(int face_index, int prefer_pixel, int prefer_point_deci)
 {
     if (face_index < 0 || face_index >= G.face_count) return;
@@ -1205,20 +2557,345 @@ static void populate_size_combo_for_face(int face_index, int prefer_pixel, int p
         }
     }
 
-    XtVaSetValues(G.size_combo, XmNselectedPosition, sel, NULL);
+    const char *label = (sel >= 1 && sel <= f->size_count && f->sizes[sel - 1].label) ? f->sizes[sel - 1].label : NULL;
+    combobox_set_selected_position_and_text(G.size_combo, sel, label ? label : "default");
     G.selected_size = sel - 1;
 }
 
-static void on_font_selected(Widget w, XtPointer client, XtPointer call)
+static void current_size_preference(int *out_pixel, int *out_point_deci)
+{
+    if (out_pixel) *out_pixel = 0;
+    if (out_point_deci) *out_point_deci = 0;
+    if (G.selected_face < 0 || G.selected_face >= G.face_count) return;
+    FontFace *f = &G.faces[G.selected_face];
+    if (!f || f->size_count <= 0) return;
+    int sidx = G.selected_size;
+    if (sidx < 0 || sidx >= f->size_count) sidx = 0;
+    if (out_pixel) *out_pixel = f->sizes[sidx].pixel_size;
+    if (out_point_deci) *out_point_deci = f->sizes[sidx].point_size_deci;
+}
+
+static bool str_contains_ci(const char *s, const char *sub)
+{
+    if (!s || !sub || !sub[0]) return false;
+    size_t n = strlen(sub);
+    for (size_t i = 0; s[i]; ++i) {
+        size_t j = 0;
+        for (; j < n; ++j) {
+            char a = s[i + j];
+            if (!a) break;
+            char b = sub[j];
+            if (tolower((unsigned char)a) != tolower((unsigned char)b)) break;
+        }
+        if (j == n) return true;
+    }
+    return false;
+}
+
+static bool weight_is_bold(const char *w)
+{
+    if (!w || !w[0]) return false;
+    if (str_contains_ci(w, "bold")) return true;
+    if (str_contains_ci(w, "demi")) return true;
+    if (str_contains_ci(w, "black")) return true;
+    return false;
+}
+
+static bool slant_is_italic(const char *s)
+{
+    if (!s || !s[0]) return false;
+    char c = (char)tolower((unsigned char)s[0]);
+    return (c == 'i' || c == 'o');
+}
+
+static int weight_rank(const char *w, bool want_bold)
+{
+    if (!w || !w[0]) return 100;
+    if (want_bold) {
+        if (strcasecmp(w, "bold") == 0) return 0;
+        if (str_contains_ci(w, "bold")) return 1;
+        if (str_contains_ci(w, "demi")) return 2;
+        if (str_contains_ci(w, "black")) return 3;
+        return 20;
+    }
+    if (strcasecmp(w, "medium") == 0) return 0;
+    if (strcasecmp(w, "regular") == 0) return 1;
+    if (strcasecmp(w, "book") == 0) return 2;
+    return 20;
+}
+
+static int slant_rank(const char *s, bool want_italic)
+{
+    if (!s || !s[0]) return 100;
+    char c = (char)tolower((unsigned char)s[0]);
+    if (want_italic) {
+        if (c == 'i') return 0;
+        if (c == 'o') return 1;
+        return 20;
+    }
+    if (c == 'r' || c == 'n') return 0;
+    return 20;
+}
+
+static void encoding_style_availability(const FontEncoding *e, bool has[2][2])
+{
+    has[0][0] = has[0][1] = has[1][0] = has[1][1] = false;
+    if (!e) return;
+    for (int i = 0; i < e->face_count; ++i) {
+        int fi = e->face_indices[i];
+        if (fi < 0 || fi >= G.face_count) continue;
+        FontFace *f = &G.faces[fi];
+        bool b = weight_is_bold(f->weight);
+        bool it = slant_is_italic(f->slant);
+        has[b ? 1 : 0][it ? 1 : 0] = true;
+    }
+}
+
+static int find_best_face_for_encoding(const FontEncoding *e, bool want_bold, bool want_italic)
+{
+    if (!e) return -1;
+    int best = -1;
+    int best_score = INT_MAX;
+    for (int i = 0; i < e->face_count; ++i) {
+        int fi = e->face_indices[i];
+        if (fi < 0 || fi >= G.face_count) continue;
+        FontFace *f = &G.faces[fi];
+        bool b = weight_is_bold(f->weight);
+        bool it = slant_is_italic(f->slant);
+        if (b != want_bold || it != want_italic) continue;
+        int score = weight_rank(f->weight, want_bold) * 100 + slant_rank(f->slant, want_italic);
+        if (score < best_score) {
+            best_score = score;
+            best = fi;
+        }
+    }
+    return best;
+}
+
+static void populate_encoding_combo_for_group(int group_index, const char *prefer_key)
+{
+    combobox_clear_counted(G.encoding_combo, &G.encoding_combo_items);
+    G.selected_encoding = -1;
+    if (group_index < 0 || group_index >= G.group_count) return;
+    FontGroup *g = &G.groups[group_index];
+    if (!g || g->enc_count <= 0) return;
+
+    for (int i = 0; i < g->enc_count; ++i) {
+        const char *label = g->encodings[i].display ? g->encodings[i].display : g->encodings[i].key;
+        XmString s = XmStringCreateLocalized((char *)(label ? label : "encoding"));
+        XmComboBoxAddItem(G.encoding_combo, s, i + 1, False);
+        G.encoding_combo_items++;
+        XmStringFree(s);
+    }
+    XmComboBoxUpdate(G.encoding_combo);
+
+    int sel = 1;
+    if (prefer_key && prefer_key[0]) {
+        for (int i = 0; i < g->enc_count; ++i) {
+            if (g->encodings[i].key && strcmp(g->encodings[i].key, prefer_key) == 0) {
+                sel = i + 1;
+                break;
+            }
+        }
+    } else {
+        for (int i = 0; i < g->enc_count; ++i) {
+            if (g->encodings[i].key && strcmp(g->encodings[i].key, "iso10646-1") == 0) {
+                sel = i + 1;
+                break;
+            }
+        }
+    }
+
+    const char *label = (sel >= 1 && sel <= g->enc_count)
+                            ? (g->encodings[sel - 1].display ? g->encodings[sel - 1].display : g->encodings[sel - 1].key)
+                            : NULL;
+    combobox_set_selected_position_and_text(G.encoding_combo, sel, label ? label : "encoding");
+    G.selected_encoding = sel - 1;
+}
+
+typedef enum {
+    CHANGE_NONE = 0,
+    CHANGE_GROUP,
+    CHANGE_ENCODING,
+    CHANGE_BOLD,
+    CHANGE_ITALIC
+} ChangeReason;
+
+static void update_variant_from_controls(ChangeReason reason, int prefer_pixel, int prefer_point_deci)
+{
+    if (G.selected_group < 0 || G.selected_group >= G.group_count) return;
+    FontGroup *g = &G.groups[G.selected_group];
+    if (!g || g->enc_count <= 0) return;
+
+    if (G.selected_encoding < 0 || G.selected_encoding >= g->enc_count) {
+        G.selected_encoding = 0;
+    }
+    FontEncoding *e = &g->encodings[G.selected_encoding];
+
+    bool has[2][2];
+    encoding_style_availability(e, has);
+
+    bool can_bold = has[1][0] || has[1][1];
+    bool can_italic = has[0][1] || has[1][1];
+
+    bool bold = G.want_bold;
+    bool italic = G.want_italic;
+    if (!can_bold) bold = false;
+    if (!can_italic) italic = false;
+
+    if (!has[bold ? 1 : 0][italic ? 1 : 0]) {
+        if (reason == CHANGE_BOLD) {
+            if (bold) {
+                if (has[1][italic ? 1 : 0]) {
+                    /* keep italic as-is */
+                } else if (italic && has[1][0]) {
+                    italic = false;
+                } else if (!italic && has[1][1]) {
+                    italic = true;
+                }
+            } else {
+                if (has[0][italic ? 1 : 0]) {
+                    /* keep italic as-is */
+                } else if (italic && has[0][0]) {
+                    italic = false;
+                } else if (!italic && has[0][1]) {
+                    italic = true;
+                }
+            }
+        } else if (reason == CHANGE_ITALIC) {
+            if (italic) {
+                if (has[bold ? 1 : 0][1]) {
+                    /* keep bold as-is */
+                } else if (bold && has[0][1]) {
+                    bold = false;
+                } else if (!bold && has[1][1]) {
+                    bold = true;
+                }
+            } else {
+                if (has[bold ? 1 : 0][0]) {
+                    /* keep bold as-is */
+                } else if (bold && has[0][0]) {
+                    bold = false;
+                } else if (!bold && has[1][0]) {
+                    bold = true;
+                }
+            }
+        } else {
+            if (has[0][0]) {
+                bold = false;
+                italic = false;
+            } else if (has[0][1]) {
+                bold = false;
+                italic = true;
+            } else if (has[1][0]) {
+                bold = true;
+                italic = false;
+            } else if (has[1][1]) {
+                bold = true;
+                italic = true;
+            }
+        }
+        if (!has[bold ? 1 : 0][italic ? 1 : 0]) {
+            for (int b = 0; b <= 1; ++b) {
+                for (int it = 0; it <= 1; ++it) {
+                    if (has[b][it]) {
+                        bold = (b != 0);
+                        italic = (it != 0);
+                        b = 2;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    G.want_bold = bold;
+    G.want_italic = italic;
+
+    G.updating_controls = true;
+    XtSetSensitive(G.bold_toggle, can_bold ? True : False);
+    XtSetSensitive(G.italic_toggle, can_italic ? True : False);
+    XmToggleButtonSetState(G.bold_toggle, bold ? True : False, False);
+    XmToggleButtonSetState(G.italic_toggle, italic ? True : False, False);
+    G.updating_controls = false;
+
+    int face = find_best_face_for_encoding(e, bold, italic);
+    if (face < 0 && e->face_count > 0) {
+        face = e->face_indices[0];
+    }
+    G.selected_face = face;
+    if (face >= 0) {
+        populate_size_combo_for_face(face, prefer_pixel, prefer_point_deci);
+    }
+    update_selected_font_label();
+}
+
+static void on_group_selected(Widget w, XtPointer client, XtPointer call)
 {
     (void)w;
     (void)client;
     XmComboBoxCallbackStruct *cbs = (XmComboBoxCallbackStruct *)call;
     if (!cbs) return;
+    if (G.updating_controls) return;
     int pos = (int)cbs->item_position;
-    if (pos < 1 || pos > G.face_count) return;
-    G.selected_face = pos - 1;
-    populate_size_combo_for_face(G.selected_face, 0, 0);
+    if (pos < 1 || pos > G.group_count) return;
+
+    const char *prev_enc_key = NULL;
+    if (G.selected_group >= 0 && G.selected_group < G.group_count) {
+        FontGroup *prev_g = &G.groups[G.selected_group];
+        if (prev_g && G.selected_encoding >= 0 && G.selected_encoding < prev_g->enc_count) {
+            prev_enc_key = prev_g->encodings[G.selected_encoding].key;
+        }
+    }
+
+    G.selected_group = pos - 1;
+    populate_encoding_combo_for_group(G.selected_group, prev_enc_key);
+
+    int prefer_pixel = 0, prefer_point = 0;
+    current_size_preference(&prefer_pixel, &prefer_point);
+    update_variant_from_controls(CHANGE_GROUP, prefer_pixel, prefer_point);
+}
+
+static void on_encoding_selected(Widget w, XtPointer client, XtPointer call)
+{
+    (void)w;
+    (void)client;
+    XmComboBoxCallbackStruct *cbs = (XmComboBoxCallbackStruct *)call;
+    if (!cbs) return;
+    if (G.updating_controls) return;
+    int pos = (int)cbs->item_position;
+    if (G.selected_group < 0 || G.selected_group >= G.group_count) return;
+    FontGroup *g = &G.groups[G.selected_group];
+    if (!g || pos < 1 || pos > g->enc_count) return;
+    G.selected_encoding = pos - 1;
+
+    int prefer_pixel = 0, prefer_point = 0;
+    current_size_preference(&prefer_pixel, &prefer_point);
+    update_variant_from_controls(CHANGE_ENCODING, prefer_pixel, prefer_point);
+}
+
+static void on_bold_toggled(Widget w, XtPointer client, XtPointer call)
+{
+    (void)w;
+    (void)client;
+    if (G.updating_controls) return;
+    XmToggleButtonCallbackStruct *cbs = (XmToggleButtonCallbackStruct *)call;
+    G.want_bold = (cbs && cbs->set) ? true : false;
+    int prefer_pixel = 0, prefer_point = 0;
+    current_size_preference(&prefer_pixel, &prefer_point);
+    update_variant_from_controls(CHANGE_BOLD, prefer_pixel, prefer_point);
+}
+
+static void on_italic_toggled(Widget w, XtPointer client, XtPointer call)
+{
+    (void)w;
+    (void)client;
+    if (G.updating_controls) return;
+    XmToggleButtonCallbackStruct *cbs = (XmToggleButtonCallbackStruct *)call;
+    G.want_italic = (cbs && cbs->set) ? true : false;
+    int prefer_pixel = 0, prefer_point = 0;
+    current_size_preference(&prefer_pixel, &prefer_point);
+    update_variant_from_controls(CHANGE_ITALIC, prefer_pixel, prefer_point);
 }
 
 static void on_size_selected(Widget w, XtPointer client, XtPointer call)
@@ -1227,11 +2904,13 @@ static void on_size_selected(Widget w, XtPointer client, XtPointer call)
     (void)client;
     XmComboBoxCallbackStruct *cbs = (XmComboBoxCallbackStruct *)call;
     if (!cbs) return;
+    if (G.updating_controls) return;
     int pos = (int)cbs->item_position;
     int face = G.selected_face;
     if (face < 0 || face >= G.face_count) return;
     if (pos < 1 || pos > G.faces[face].size_count) return;
     G.selected_size = pos - 1;
+    update_selected_font_label();
 }
 
 static void apply_selected_font(void)
@@ -1261,12 +2940,16 @@ static void apply_selected_font(void)
 
     recompute_cell_metrics();
     build_glyph_list_from_font(G.font);
+    update_selected_char_label_none();
 
     ensure_gcs();
     if (G.gc_text && G.font) {
         XSetFont(G.dpy, G.gc_text, G.font->fid);
         XSetFont(G.dpy, G.gc_sel_text, G.font->fid);
     }
+
+    sample_preview_update_and_draw();
+    update_font_file_label_for_loaded_font();
 
     recompute_grid_geometry();
     redraw_all();
@@ -1321,84 +3004,152 @@ static void build_ui(void)
                                           NULL);
 
     /* Top control bar */
-    G.control_form = XtVaCreateManagedWidget("controlForm",
-                                             xmFormWidgetClass, G.work_form,
+    G.control_form = XtVaCreateManagedWidget("controlBar",
+                                             xmRowColumnWidgetClass, G.work_form,
                                              XmNtopAttachment, XmATTACH_FORM,
                                              XmNleftAttachment, XmATTACH_FORM,
                                              XmNrightAttachment, XmATTACH_FORM,
+                                             XmNorientation, XmVERTICAL,
+                                             XmNpacking, XmPACK_TIGHT,
+                                             XmNspacing, 6,
+                                             XmNmarginWidth, 0,
+                                             XmNmarginHeight, 0,
                                              NULL);
 
+    Widget row1 = XtVaCreateManagedWidget("controlRow1",
+                                          xmRowColumnWidgetClass, G.control_form,
+                                          XmNorientation, XmHORIZONTAL,
+                                          XmNpacking, XmPACK_TIGHT,
+                                          XmNspacing, 6,
+                                          NULL);
+
     XmString s_font = XmStringCreateLocalized("Font:");
-    Widget font_label = XtVaCreateManagedWidget("fontLabel",
-                                                xmLabelWidgetClass, G.control_form,
-                                                XmNlabelString, s_font,
-                                                XmNtopAttachment, XmATTACH_FORM,
-                                                XmNleftAttachment, XmATTACH_FORM,
-                                                XmNalignment, XmALIGNMENT_BEGINNING,
-                                                XmNmarginTop, 4,
-                                                XmNmarginBottom, 4,
-                                                NULL);
+    XtVaCreateManagedWidget("fontLabel",
+                            xmLabelWidgetClass, row1,
+                            XmNlabelString, s_font,
+                            XmNalignment, XmALIGNMENT_BEGINNING,
+                            NULL);
     XmStringFree(s_font);
 
-    G.font_combo = XtVaCreateManagedWidget("fontCombo",
-                                           xmComboBoxWidgetClass, G.control_form,
-                                           XmNcomboBoxType, XmDROP_DOWN_LIST,
-                                           XmNvisibleItemCount, 14,
-                                           XmNtopAttachment, XmATTACH_FORM,
-                                           XmNleftAttachment, XmATTACH_WIDGET,
-                                           XmNleftWidget, font_label,
-                                           XmNrightAttachment, XmATTACH_POSITION,
-                                           XmNrightPosition, 65,
-                                           XmNmarginWidth, 4,
-                                           XmNmarginHeight, 4,
-                                           NULL);
-    XtAddCallback(G.font_combo, XmNselectionCallback, on_font_selected, NULL);
+    G.group_combo = XtVaCreateManagedWidget("fontCombo",
+                                            xmComboBoxWidgetClass, row1,
+                                            XmNcomboBoxType, XmDROP_DOWN_LIST,
+                                            XmNvisibleItemCount, 16,
+                                            XmNmarginWidth, 4,
+                                            XmNmarginHeight, 4,
+                                            XmNwidth, 320,
+                                            NULL);
+    XtAddCallback(G.group_combo, XmNselectionCallback, on_group_selected, NULL);
+
+    XmString s_bold = XmStringCreateLocalized("Bold");
+    G.bold_toggle = XtVaCreateManagedWidget("boldToggle",
+                                            xmToggleButtonWidgetClass, row1,
+                                            XmNlabelString, s_bold,
+                                            XmNset, False,
+                                            NULL);
+    XmStringFree(s_bold);
+    XtAddCallback(G.bold_toggle, XmNvalueChangedCallback, on_bold_toggled, NULL);
+
+    XmString s_italic = XmStringCreateLocalized("Italic");
+    G.italic_toggle = XtVaCreateManagedWidget("italicToggle",
+                                              xmToggleButtonWidgetClass, row1,
+                                              XmNlabelString, s_italic,
+                                              XmNset, False,
+                                              NULL);
+    XmStringFree(s_italic);
+    XtAddCallback(G.italic_toggle, XmNvalueChangedCallback, on_italic_toggled, NULL);
+
+    Widget row2 = XtVaCreateManagedWidget("controlRow2",
+                                          xmRowColumnWidgetClass, G.control_form,
+                                          XmNorientation, XmHORIZONTAL,
+                                          XmNpacking, XmPACK_TIGHT,
+                                          XmNspacing, 6,
+                                          NULL);
+
+    XmString s_enc = XmStringCreateLocalized("Encoding:");
+    XtVaCreateManagedWidget("encLabel",
+                            xmLabelWidgetClass, row2,
+                            XmNlabelString, s_enc,
+                            XmNalignment, XmALIGNMENT_BEGINNING,
+                            NULL);
+    XmStringFree(s_enc);
+
+    G.encoding_combo = XtVaCreateManagedWidget("encodingCombo",
+                                               xmComboBoxWidgetClass, row2,
+                                               XmNcomboBoxType, XmDROP_DOWN_LIST,
+                                               XmNvisibleItemCount, 12,
+                                               XmNmarginWidth, 4,
+                                               XmNmarginHeight, 4,
+                                               XmNwidth, 180,
+                                               NULL);
+    XtAddCallback(G.encoding_combo, XmNselectionCallback, on_encoding_selected, NULL);
 
     XmString s_size = XmStringCreateLocalized("Size:");
-    Widget size_label = XtVaCreateManagedWidget("sizeLabel",
-                                                xmLabelWidgetClass, G.control_form,
-                                                XmNlabelString, s_size,
-                                                XmNtopAttachment, XmATTACH_FORM,
-                                                XmNleftAttachment, XmATTACH_WIDGET,
-                                                XmNleftWidget, G.font_combo,
-                                                XmNalignment, XmALIGNMENT_BEGINNING,
-                                                XmNmarginTop, 4,
-                                                XmNmarginBottom, 4,
-                                                XmNmarginLeft, 8,
-                                                NULL);
+    XtVaCreateManagedWidget("sizeLabel",
+                            xmLabelWidgetClass, row2,
+                            XmNlabelString, s_size,
+                            XmNalignment, XmALIGNMENT_BEGINNING,
+                            NULL);
     XmStringFree(s_size);
 
     G.size_combo = XtVaCreateManagedWidget("sizeCombo",
-                                           xmComboBoxWidgetClass, G.control_form,
+                                           xmComboBoxWidgetClass, row2,
                                            XmNcomboBoxType, XmDROP_DOWN_LIST,
                                            XmNvisibleItemCount, 12,
-                                           XmNtopAttachment, XmATTACH_FORM,
-                                           XmNleftAttachment, XmATTACH_WIDGET,
-                                           XmNleftWidget, size_label,
-                                           XmNrightAttachment, XmATTACH_POSITION,
-                                           XmNrightPosition, 85,
                                            XmNmarginWidth, 4,
                                            XmNmarginHeight, 4,
+                                           XmNwidth, 120,
                                            NULL);
     XtAddCallback(G.size_combo, XmNselectionCallback, on_size_selected, NULL);
 
     XmString s_update = XmStringCreateLocalized("Update");
     G.update_btn = XtVaCreateManagedWidget("updateBtn",
-                                           xmPushButtonWidgetClass, G.control_form,
+                                           xmPushButtonWidgetClass, row2,
                                            XmNlabelString, s_update,
-                                           XmNtopAttachment, XmATTACH_FORM,
-                                           XmNrightAttachment, XmATTACH_FORM,
                                            XmNmarginWidth, 10,
                                            XmNmarginHeight, 4,
                                            NULL);
     XmStringFree(s_update);
     XtAddCallback(G.update_btn, XmNactivateCallback, on_update, NULL);
 
+    /* Selected full font name (resolved from the comboboxes). */
+    XmString s_sel_font = XmStringCreateLocalized("(no font selected):");
+    G.selected_font_label = XtVaCreateManagedWidget("selectedFontLabel",
+                                                    xmLabelWidgetClass, G.work_form,
+                                                    XmNlabelString, s_sel_font,
+                                                    XmNalignment, XmALIGNMENT_BEGINNING,
+                                                    XmNtopAttachment, XmATTACH_WIDGET,
+                                                    XmNtopWidget, G.control_form,
+                                                    XmNtopOffset, 6,
+                                                    XmNleftAttachment, XmATTACH_FORM,
+                                                    XmNrightAttachment, XmATTACH_FORM,
+                                                    XmNmarginBottom, 2,
+                                                    NULL);
+    XmStringFree(s_sel_font);
+
+    /* Sample text preview (click to edit). */
+    G.sample_preview = XtVaCreateManagedWidget("samplePreview",
+                                               xmDrawingAreaWidgetClass, G.work_form,
+                                               XmNtopAttachment, XmATTACH_WIDGET,
+                                               XmNtopWidget, G.selected_font_label,
+                                               XmNtopOffset, 4,
+                                               XmNleftAttachment, XmATTACH_FORM,
+                                               XmNrightAttachment, XmATTACH_FORM,
+                                               XmNheight, 50,
+                                               XmNresizePolicy, XmRESIZE_NONE,
+                                               XmNshadowThickness, 1,
+                                               XmNshadowType, XmSHADOW_IN,
+                                               NULL);
+
+    XtAddCallback(G.sample_preview, XmNexposeCallback, sample_expose_cb, NULL);
+    XtAddEventHandler(G.sample_preview, ButtonPressMask, False, sample_button_press, NULL);
+    XtAddEventHandler(G.sample_preview, StructureNotifyMask, False, sample_configure_event, NULL);
+
     /* Separator */
     Widget sep = XtVaCreateManagedWidget("sep",
                                          xmSeparatorGadgetClass, G.work_form,
                                          XmNtopAttachment, XmATTACH_WIDGET,
-                                         XmNtopWidget, G.control_form,
+                                         XmNtopWidget, G.sample_preview,
                                          XmNleftAttachment, XmATTACH_FORM,
                                          XmNrightAttachment, XmATTACH_FORM,
                                          XmNtopOffset, 6,
@@ -1413,11 +3164,39 @@ static void build_ui(void)
                                             XmNbottomAttachment, XmATTACH_FORM,
                                             NULL);
 
+    XmString s_sel = XmStringCreateLocalized("Selected character: (none)");
+    G.selected_char_label = XtVaCreateManagedWidget("selectedCharLabel",
+                                                    xmLabelWidgetClass, G.bottom_form,
+                                                    XmNlabelString, s_sel,
+                                                    XmNtopAttachment, XmATTACH_FORM,
+                                                    XmNleftAttachment, XmATTACH_FORM,
+                                                    XmNrightAttachment, XmATTACH_FORM,
+                                                    XmNalignment, XmALIGNMENT_BEGINNING,
+                                                    XmNmarginBottom, 4,
+                                                    NULL);
+    XmStringFree(s_sel);
+
+    XmString s_file = XmStringCreateLocalized("Font file: (unknown)");
+    G.font_file_label = XtVaCreateManagedWidget("fontFileLabel",
+                                                xmLabelWidgetClass, G.bottom_form,
+                                                XmNlabelString, s_file,
+                                                XmNtopAttachment, XmATTACH_WIDGET,
+                                                XmNtopWidget, G.selected_char_label,
+                                                XmNtopOffset, 2,
+                                                XmNleftAttachment, XmATTACH_FORM,
+                                                XmNrightAttachment, XmATTACH_FORM,
+                                                XmNalignment, XmALIGNMENT_BEGINNING,
+                                                XmNmarginBottom, 6,
+                                                NULL);
+    XmStringFree(s_file);
+
     XmString s_chars = XmStringCreateLocalized("Characters to copy:");
     Widget chars_label = XtVaCreateManagedWidget("charsLabel",
                                                  xmLabelWidgetClass, G.bottom_form,
                                                  XmNlabelString, s_chars,
-                                                 XmNtopAttachment, XmATTACH_FORM,
+                                                 XmNtopAttachment, XmATTACH_WIDGET,
+                                                 XmNtopWidget, G.font_file_label,
+                                                 XmNtopOffset, 2,
                                                  XmNleftAttachment, XmATTACH_FORM,
                                                  XmNalignment, XmALIGNMENT_BEGINNING,
                                                  XmNmarginBottom, 4,
@@ -1499,9 +3278,21 @@ static void cb_wm_save_yourself(Widget w, XtPointer client, XtPointer call)
 
     session_capture_geometry(w, G.session_data, "x", "y", "w", "h");
 
+    if (G.selected_group >= 0 && G.selected_group < G.group_count) {
+        FontGroup *g = &G.groups[G.selected_group];
+        if (g->key) session_data_set(G.session_data, "group_key", g->key);
+        if (G.selected_encoding >= 0 && G.selected_encoding < g->enc_count) {
+            FontEncoding *e = &g->encodings[G.selected_encoding];
+            if (e->key) session_data_set(G.session_data, "encoding_key", e->key);
+        }
+    }
+
+    session_data_set_int(G.session_data, "bold", G.want_bold ? 1 : 0);
+    session_data_set_int(G.session_data, "italic", G.want_italic ? 1 : 0);
+
     if (G.selected_face >= 0 && G.selected_face < G.face_count) {
         FontFace *f = &G.faces[G.selected_face];
-        if (f->key) session_data_set(G.session_data, "font_key", f->key);
+        if (f->key) session_data_set(G.session_data, "font_key", f->key); /* backward-compatible */
         if (G.selected_size >= 0 && G.selected_size < f->size_count) {
             session_data_set_int(G.session_data, "pixel_size", f->sizes[G.selected_size].pixel_size);
             session_data_set_int(G.session_data, "point_deci", f->sizes[G.selected_size].point_size_deci);
@@ -1513,47 +3304,109 @@ static void cb_wm_save_yourself(Widget w, XtPointer client, XtPointer call)
 
 static void apply_session_selection(void)
 {
-    int face_idx = -1;
+    int group_idx = -1;
+    int enc_idx = -1;
+    bool bold = false;
+    bool italic = false;
     int prefer_pixel = 0;
     int prefer_point = 0;
 
     if (G.session_data) {
-        const char *key = session_data_get(G.session_data, "font_key");
-        if (key && key[0]) face_idx = face_find_by_key(key);
+        const char *gkey = session_data_get(G.session_data, "group_key");
+        const char *ekey = session_data_get(G.session_data, "encoding_key");
+        if (gkey && gkey[0]) group_idx = group_find_by_key(gkey);
+        if (group_idx >= 0 && ekey && ekey[0]) {
+            enc_idx = encoding_find_by_key(&G.groups[group_idx], ekey);
+        }
+
+        bold = session_data_get_int(G.session_data, "bold", 0) ? true : false;
+        italic = session_data_get_int(G.session_data, "italic", 0) ? true : false;
+
         prefer_pixel = session_data_get_int(G.session_data, "pixel_size", 0);
         prefer_point = session_data_get_int(G.session_data, "point_deci", 0);
+
+        /* Upgrade path: older sessions saved a full face key. */
+        if (group_idx < 0) {
+            const char *face_key = session_data_get(G.session_data, "font_key");
+            int face_idx = (face_key && face_key[0]) ? face_find_by_key(face_key) : -1;
+            if (face_idx >= 0 && face_idx < G.face_count) {
+                FontFace *f = &G.faces[face_idx];
+                char *kg = make_group_key_for_face(f);
+                if (kg) {
+                    group_idx = group_find_by_key(kg);
+                    free(kg);
+                }
+                if (group_idx >= 0) {
+                    char *ke = make_encoding_key_for_face(f);
+                    if (ke) {
+                        enc_idx = encoding_find_by_key(&G.groups[group_idx], ke);
+                        free(ke);
+                    }
+                }
+                bold = weight_is_bold(f->weight);
+                italic = slant_is_italic(f->slant);
+            } else if (face_key && face_key[0] && !strchr(face_key, '|') && face_key[0] != '-') {
+                /* Older builds stored raw alias names like "lucidasans-italic-12". */
+                AliasFontParts ap;
+                if (parse_alias_font_name(face_key, &ap)) {
+                    char gk[512];
+                    snprintf(gk, sizeof(gk), "alias|%s", ap.base ? ap.base : face_key);
+                    group_idx = group_find_by_key(gk);
+                    if (group_idx >= 0) {
+                        enc_idx = encoding_find_by_key(&G.groups[group_idx], "default");
+                        if (enc_idx < 0) enc_idx = 0;
+                    }
+                    bold = weight_is_bold(ap.weight);
+                    italic = slant_is_italic(ap.slant);
+                    if (prefer_point <= 0 && ap.point_size > 0) prefer_point = ap.point_size * 10;
+                    alias_font_parts_free(&ap);
+                }
+            }
+        }
     }
 
-    if (face_idx < 0 && G.face_count > 0) {
+    if (group_idx < 0 && G.group_count > 0) {
         /* Prefer something sensible if available. */
-        for (int i = 0; i < G.face_count; ++i) {
-            const FontFace *f = &G.faces[i];
-            if (f->family && strcmp(f->family, "fixed") == 0) {
-                face_idx = i;
+        for (int i = 0; i < G.group_count; ++i) {
+            const FontGroup *g = &G.groups[i];
+            if (g->family && strcmp(g->family, "fixed") == 0) {
+                group_idx = i;
                 break;
             }
         }
-        if (face_idx < 0) face_idx = 0;
+        if (group_idx < 0) group_idx = 0;
     }
 
-    if (face_idx >= 0 && face_idx < G.face_count) {
-        XtVaSetValues(G.font_combo, XmNselectedPosition, face_idx + 1, NULL);
-        G.selected_face = face_idx;
-        populate_size_combo_for_face(face_idx, prefer_pixel, prefer_point);
+    if (group_idx >= 0 && group_idx < G.group_count) {
+        G.selected_group = group_idx;
+        G.selected_encoding = -1;
+
+        const char *glabel = G.groups[group_idx].display ? G.groups[group_idx].display : "font";
+        combobox_set_selected_position_and_text(G.group_combo, group_idx + 1, glabel);
+
+        const char *prefer_enc_key = NULL;
+        if (enc_idx >= 0 && enc_idx < G.groups[group_idx].enc_count) {
+            prefer_enc_key = G.groups[group_idx].encodings[enc_idx].key;
+        }
+        populate_encoding_combo_for_group(group_idx, prefer_enc_key);
+
+        G.want_bold = bold;
+        G.want_italic = italic;
+        update_variant_from_controls(CHANGE_NONE, prefer_pixel, prefer_point);
     }
 }
 
-static void populate_font_combo(void)
+static void populate_group_combo(void)
 {
-    combobox_clear_counted(G.font_combo, &G.font_combo_items);
+    combobox_clear_counted(G.group_combo, &G.group_combo_items);
 
-    for (int i = 0; i < G.face_count; ++i) {
-        XmString s = XmStringCreateLocalized(G.faces[i].display ? G.faces[i].display : "font");
-        XmComboBoxAddItem(G.font_combo, s, i + 1, False);
-        G.font_combo_items++;
+    for (int i = 0; i < G.group_count; ++i) {
+        XmString s = XmStringCreateLocalized(G.groups[i].display ? G.groups[i].display : "font");
+        XmComboBoxAddItem(G.group_combo, s, i + 1, False);
+        G.group_combo_items++;
         XmStringFree(s);
     }
-    XmComboBoxUpdate(G.font_combo);
+    XmComboBoxUpdate(G.group_combo);
 
     apply_session_selection();
 }
@@ -1565,9 +3418,12 @@ static void populate_font_combo(void)
 int main(int argc, char *argv[])
 {
     memset(&G, 0, sizeof(G));
+    G.selected_group = -1;
+    G.selected_encoding = -1;
     G.selected_face = -1;
     G.selected_size = -1;
     G.selected_glyph_index = -1;
+    G.sample_text = xstrdup(DEFAULT_SAMPLE_TEXT);
 
     char *session_id = session_parse_argument(&argc, argv);
     G.session_data = session_data_create(session_id);
@@ -1600,7 +3456,7 @@ int main(int argc, char *argv[])
     }
 
     load_font_faces();
-    populate_font_combo();
+    populate_group_combo();
 
     XtRealizeWidget(G.toplevel);
     about_set_window_icon_ck_core(G.toplevel);
@@ -1633,6 +3489,9 @@ int main(int argc, char *argv[])
         font_face_free(&G.faces[i]);
     }
     free(G.faces);
+    free_font_groups();
+    sample_lines_clear();
+    free(G.sample_text);
     session_data_free(G.session_data);
 
     return 0;

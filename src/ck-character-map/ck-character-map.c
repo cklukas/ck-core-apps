@@ -108,13 +108,11 @@ typedef struct AppState {
     Widget bold_toggle;
     Widget italic_toggle;
     Widget size_combo;
-    Widget update_btn;
     int group_combo_items;
     int encoding_combo_items;
     int size_combo_items;
     bool updating_controls;
 
-    Widget selected_font_label;
     Widget font_file_label;
     Widget sample_preview;
     XtIntervalId sample_reflow_timer;
@@ -125,6 +123,7 @@ typedef struct AppState {
     int sample_line_cap;
     Widget sample_dialog;
     Widget selected_char_label;
+    XtIntervalId apply_timer;
 
     Widget scrolled;
     Widget drawing;
@@ -194,6 +193,9 @@ static AppState G;
 
 static void update_selected_char_label_none(void);
 static void update_selected_char_label_code(unsigned int code);
+static void sample_preview_update_and_draw(void);
+static void apply_selected_font(void);
+static void schedule_apply_selected_font(void);
 
 /* -------------------------------------------------------------------------------------------------
  * Small utilities
@@ -1160,6 +1162,22 @@ static char *xfont_get_property_string(Display *dpy, const XFontStruct *font, co
     return NULL;
 }
 
+static bool xfont_get_property_card32(Display *dpy, const XFontStruct *font, const char *prop_name, unsigned long *out_val)
+{
+    if (out_val) *out_val = 0;
+    if (!dpy || !font || !prop_name || !prop_name[0] || !out_val) return false;
+
+    Atom a = XInternAtom(dpy, prop_name, False);
+    if (a == None) return false;
+
+    for (int i = 0; i < font->n_properties; ++i) {
+        if (font->properties[i].name != a) continue;
+        *out_val = font->properties[i].card32;
+        return true;
+    }
+    return false;
+}
+
 static char *skip_ws(char *s)
 {
     if (!s) return NULL;
@@ -1450,16 +1468,94 @@ static void update_font_file_label_for_loaded_font(void)
     }
 
     char *path = (name && name[0]) ? x11_find_font_file_path(G.dpy, name) : NULL;
+    if (path && path[0] && access(path, R_OK) != 0) {
+        free(path);
+        path = NULL;
+    }
+
+    char *charset_reg = (G.dpy && G.font) ? xfont_get_property_string(G.dpy, G.font, "CHARSET_REGISTRY") : NULL;
+    char *charset_enc = (G.dpy && G.font) ? xfont_get_property_string(G.dpy, G.font, "CHARSET_ENCODING") : NULL;
+    char *weight = (G.dpy && G.font) ? xfont_get_property_string(G.dpy, G.font, "WEIGHT_NAME") : NULL;
+    char *slant = (G.dpy && G.font) ? xfont_get_property_string(G.dpy, G.font, "SLANT") : NULL;
+    char *spacing = (G.dpy && G.font) ? xfont_get_property_string(G.dpy, G.font, "SPACING") : NULL;
+
+    unsigned long pixel_size = 0, point_deci = 0, avg_width = 0, res_x = 0, res_y = 0;
+    bool have_px = (G.dpy && G.font) ? xfont_get_property_card32(G.dpy, G.font, "PIXEL_SIZE", &pixel_size) : false;
+    bool have_pt = (G.dpy && G.font) ? xfont_get_property_card32(G.dpy, G.font, "POINT_SIZE", &point_deci) : false;
+    bool have_aw = (G.dpy && G.font) ? xfont_get_property_card32(G.dpy, G.font, "AVERAGE_WIDTH", &avg_width) : false;
+    bool have_rx = (G.dpy && G.font) ? xfont_get_property_card32(G.dpy, G.font, "RESOLUTION_X", &res_x) : false;
+    bool have_ry = (G.dpy && G.font) ? xfont_get_property_card32(G.dpy, G.font, "RESOLUTION_Y", &res_y) : false;
 
     char buf[2048];
     const char *n = (name && name[0]) ? name : "(unknown)";
     const char *p = (path && path[0]) ? path : "(unknown)";
     snprintf(buf, sizeof(buf), "Loaded font: %s\nFont file: %s", n, p);
 
+    if (weight || slant) {
+        strncat(buf, "\nStyle: ", sizeof(buf) - strlen(buf) - 1);
+        strncat(buf, weight ? weight : "?", sizeof(buf) - strlen(buf) - 1);
+        strncat(buf, ", ", sizeof(buf) - strlen(buf) - 1);
+        strncat(buf, slant ? slant : "?", sizeof(buf) - strlen(buf) - 1);
+    }
+
+    if (charset_reg || charset_enc) {
+        strncat(buf, "\nCharset: ", sizeof(buf) - strlen(buf) - 1);
+        strncat(buf, charset_reg ? charset_reg : "?", sizeof(buf) - strlen(buf) - 1);
+        strncat(buf, "-", sizeof(buf) - strlen(buf) - 1);
+        strncat(buf, charset_enc ? charset_enc : "?", sizeof(buf) - strlen(buf) - 1);
+    }
+
+    if (have_px || have_pt || (have_rx && have_ry)) {
+        strncat(buf, "\nSize:", sizeof(buf) - strlen(buf) - 1);
+        if (have_px) {
+            char tmp[64];
+            snprintf(tmp, sizeof(tmp), " %lu px", pixel_size);
+            strncat(buf, tmp, sizeof(buf) - strlen(buf) - 1);
+        }
+        if (have_pt) {
+            char tmp[64];
+            snprintf(tmp, sizeof(tmp), " %.1f pt", (double)point_deci / 10.0);
+            strncat(buf, tmp, sizeof(buf) - strlen(buf) - 1);
+        }
+        if (have_rx && have_ry) {
+            char tmp[64];
+            snprintf(tmp, sizeof(tmp), " @ %lux%lu dpi", res_x, res_y);
+            strncat(buf, tmp, sizeof(buf) - strlen(buf) - 1);
+        }
+    }
+
+    if (spacing || have_aw) {
+        strncat(buf, "\nSpacing:", sizeof(buf) - strlen(buf) - 1);
+        if (spacing) {
+            strncat(buf, " ", sizeof(buf) - strlen(buf) - 1);
+            strncat(buf, spacing, sizeof(buf) - strlen(buf) - 1);
+        }
+        if (have_aw) {
+            char tmp[64];
+            snprintf(tmp, sizeof(tmp), "%sAvg width: %lu", spacing ? ", " : " ", avg_width);
+            strncat(buf, tmp, sizeof(buf) - strlen(buf) - 1);
+        }
+    }
+
+    if (G.font) {
+        char tmp[256];
+        snprintf(tmp, sizeof(tmp), "\nGrid glyphs: %d  Range: b1 %d..%d, b2 %d..%d  Ascent/Descent: %d/%d",
+                 G.glyph_count,
+                 G.font->min_byte1, G.font->max_byte1,
+                 G.font->min_char_or_byte2, G.font->max_char_or_byte2,
+                 G.font->ascent, G.font->descent);
+        strncat(buf, tmp, sizeof(buf) - strlen(buf) - 1);
+    }
+
     XmString s = XmStringCreateLocalized(buf);
     XtVaSetValues(G.font_file_label, XmNlabelString, s, NULL);
     XmStringFree(s);
 
+    free(charset_reg);
+    free(charset_enc);
+    free(weight);
+    free(slant);
+    free(spacing);
     free(path);
     free(loaded_name);
 }
@@ -1777,7 +1873,7 @@ static void redraw_expose_region(const XExposeEvent *ev)
     XFillRectangle(G.dpy, win, G.gc_bg, ev->x, ev->y, (unsigned int)ev->width, (unsigned int)ev->height);
 
     if (!G.glyphs || G.glyph_count <= 0 || G.cols <= 0) {
-        const char *msg = "Select a font and size, then press Update.";
+        const char *msg = "Select a font and size to browse glyphs.";
         int x = 8;
         int y = 24;
         XDrawString(G.dpy, win, G.gc_text, x, y, msg, (int)strlen(msg));
@@ -2377,6 +2473,11 @@ static void show_sample_dialog(void)
         G.sample_dialog = XmCreatePromptDialog(G.toplevel, "sampleTextDialog", args, n);
         if (!G.sample_dialog) return;
 
+        Widget shell = XtParent(G.sample_dialog);
+        if (shell) {
+            XtVaSetValues(shell, XmNtitle, "Sample Text", XmNdeleteResponse, XmUNMAP, NULL);
+        }
+
         Widget helpb = XmSelectionBoxGetChild(G.sample_dialog, XmDIALOG_HELP_BUTTON);
         if (helpb) {
             XmString s_def = XmStringCreateLocalized("Default");
@@ -2391,7 +2492,7 @@ static void show_sample_dialog(void)
         Widget cancelb = XmSelectionBoxGetChild(G.sample_dialog, XmDIALOG_CANCEL_BUTTON);
         if (cancelb) XtAddCallback(cancelb, XmNactivateCallback, sample_dialog_cancel_cb, NULL);
 
-        XmString s_label = XmStringCreateLocalized("Sample text:");
+        XmString s_label = XmStringCreateLocalized("Edit sample text:");
         XtVaSetValues(G.sample_dialog, XmNselectionLabelString, s_label, NULL);
         XmStringFree(s_label);
 
@@ -2450,7 +2551,7 @@ static void on_about(Widget w, XtPointer client, XtPointer call)
                              "Character Map",
                              "Character Map",
                              "Browse the glyphs available in X11 fonts.\n"
-                             "Select a font and size, press Update, then click characters to add them to the field below.",
+                             "Select a font and size, then click characters to add them to the field below.",
                              True);
 
     XtVaSetValues(shell, XmNwidth, 700, XmNheight, 450, NULL);
@@ -2500,27 +2601,19 @@ static void combobox_set_selected_position_and_text(Widget combo, int pos, const
     G.updating_controls = prev;
 }
 
-static void update_selected_font_label(void)
+static void apply_timeout_cb(XtPointer client_data, XtIntervalId *id)
 {
-    if (!G.selected_font_label) return;
+    (void)client_data;
+    (void)id;
+    G.apply_timer = 0;
+    apply_selected_font();
+}
 
-    const char *name = NULL;
-    if (G.selected_face >= 0 && G.selected_face < G.face_count) {
-        FontFace *f = &G.faces[G.selected_face];
-        if (f && f->size_count > 0) {
-            int sidx = G.selected_size;
-            if (sidx < 0 || sidx >= f->size_count) sidx = 0;
-            if (f->sizes[sidx].xlfd_name) name = f->sizes[sidx].xlfd_name;
-        }
-    }
-
-    char buf[1024];
-    if (name && name[0]) snprintf(buf, sizeof(buf), "%s:", name);
-    else snprintf(buf, sizeof(buf), "(no font selected):");
-
-    XmString s = XmStringCreateLocalized(buf);
-    XtVaSetValues(G.selected_font_label, XmNlabelString, s, NULL);
-    XmStringFree(s);
+static void schedule_apply_selected_font(void)
+{
+    if (!G.app_context) return;
+    if (G.apply_timer) return;
+    G.apply_timer = XtAppAddTimeOut(G.app_context, 0, apply_timeout_cb, NULL);
 }
 
 static void populate_size_combo_for_face(int face_index, int prefer_pixel, int prefer_point_deci)
@@ -2827,7 +2920,7 @@ static void update_variant_from_controls(ChangeReason reason, int prefer_pixel, 
     if (face >= 0) {
         populate_size_combo_for_face(face, prefer_pixel, prefer_point_deci);
     }
-    update_selected_font_label();
+    schedule_apply_selected_font();
 }
 
 static void on_group_selected(Widget w, XtPointer client, XtPointer call)
@@ -2910,7 +3003,7 @@ static void on_size_selected(Widget w, XtPointer client, XtPointer call)
     if (face < 0 || face >= G.face_count) return;
     if (pos < 1 || pos > G.faces[face].size_count) return;
     G.selected_size = pos - 1;
-    update_selected_font_label();
+    schedule_apply_selected_font();
 }
 
 static void apply_selected_font(void)
@@ -2955,14 +3048,6 @@ static void apply_selected_font(void)
     redraw_all();
 }
 
-static void on_update(Widget w, XtPointer client, XtPointer call)
-{
-    (void)w;
-    (void)client;
-    (void)call;
-    apply_selected_font();
-}
-
 /* -------------------------------------------------------------------------------------------------
  * Menus and UI building
  * ------------------------------------------------------------------------------------------------- */
@@ -2973,7 +3058,13 @@ static void create_menu(Widget parent)
 
     Widget window_pd = XmCreatePulldownMenu(menubar, "windowPD", NULL, 0);
     XtVaCreateManagedWidget("Window", xmCascadeButtonWidgetClass, menubar, XmNsubMenuId, window_pd, NULL);
-    Widget mi_close = XtVaCreateManagedWidget("Close", xmPushButtonWidgetClass, window_pd, NULL);
+    XmString s_acc = XmStringCreateLocalized("Alt+F4");
+    Widget mi_close = XtVaCreateManagedWidget("Close",
+                                              xmPushButtonWidgetClass, window_pd,
+                                              XmNaccelerator, "Alt<Key>F4",
+                                              XmNacceleratorText, s_acc,
+                                              NULL);
+    XmStringFree(s_acc);
     XtAddCallback(mi_close, XmNactivateCallback, on_close, NULL);
 
     Widget help_pd = XmCreatePulldownMenu(menubar, "helpPD", NULL, 0);
@@ -3102,37 +3193,12 @@ static void build_ui(void)
                                            NULL);
     XtAddCallback(G.size_combo, XmNselectionCallback, on_size_selected, NULL);
 
-    XmString s_update = XmStringCreateLocalized("Update");
-    G.update_btn = XtVaCreateManagedWidget("updateBtn",
-                                           xmPushButtonWidgetClass, row2,
-                                           XmNlabelString, s_update,
-                                           XmNmarginWidth, 10,
-                                           XmNmarginHeight, 4,
-                                           NULL);
-    XmStringFree(s_update);
-    XtAddCallback(G.update_btn, XmNactivateCallback, on_update, NULL);
-
-    /* Selected full font name (resolved from the comboboxes). */
-    XmString s_sel_font = XmStringCreateLocalized("(no font selected):");
-    G.selected_font_label = XtVaCreateManagedWidget("selectedFontLabel",
-                                                    xmLabelWidgetClass, G.work_form,
-                                                    XmNlabelString, s_sel_font,
-                                                    XmNalignment, XmALIGNMENT_BEGINNING,
-                                                    XmNtopAttachment, XmATTACH_WIDGET,
-                                                    XmNtopWidget, G.control_form,
-                                                    XmNtopOffset, 6,
-                                                    XmNleftAttachment, XmATTACH_FORM,
-                                                    XmNrightAttachment, XmATTACH_FORM,
-                                                    XmNmarginBottom, 2,
-                                                    NULL);
-    XmStringFree(s_sel_font);
-
     /* Sample text preview (click to edit). */
     G.sample_preview = XtVaCreateManagedWidget("samplePreview",
                                                xmDrawingAreaWidgetClass, G.work_form,
                                                XmNtopAttachment, XmATTACH_WIDGET,
-                                               XmNtopWidget, G.selected_font_label,
-                                               XmNtopOffset, 4,
+                                               XmNtopWidget, G.control_form,
+                                               XmNtopOffset, 6,
                                                XmNleftAttachment, XmATTACH_FORM,
                                                XmNrightAttachment, XmATTACH_FORM,
                                                XmNheight, 50,
@@ -3472,6 +3538,10 @@ int main(int argc, char *argv[])
 
     /* Initial render. */
     ensure_gcs();
+    if (G.apply_timer) {
+        XtRemoveTimeOut(G.apply_timer);
+        G.apply_timer = 0;
+    }
     apply_selected_font();
 
     XtAppMainLoop(G.app_context);

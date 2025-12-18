@@ -120,7 +120,7 @@ static int FACE_H_PX(void)  { return S(BASE_FACE_H); }
 /* ---------------------------------------------------------------------------------------
  * Game state
  * --------------------------------------------------------------------------------------- */
-typedef struct {
+	typedef struct {
     unsigned char mine, revealed, flagged, question, adj, exploded;
 } Cell;
 
@@ -149,9 +149,10 @@ typedef struct {
     Pixmap backbuf;
     int bb_w, bb_h;
 
-    Pixel col_bg, col_fg, col_top, col_bottom, col_select, col_red;
-    Pixel col_yellow;
-    Pixel col_led_on, col_led_off;
+	    Pixel col_bg, col_fg, col_top, col_bottom, col_select, col_red;
+	    Pixel col_yellow;
+	    Pixel col_black;
+	    Pixel col_led_bg, col_led_on, col_led_off;
 
     XFontStruct *font;
 
@@ -1130,21 +1131,22 @@ static void toggle_flag_question(int index){
 /* =======================================================================================
  * Palette/drawing primitives  (PURE CDE/Motif palette, NO hardcoded black)
  * ======================================================================================= */
-static void palette_from_widget(Widget w)
-{
-    Pixel bg;
-    XtVaGetValues(w, XmNbackground, &bg, NULL);
+	static void palette_from_widget(Widget w)
+	{
+	    Pixel bg;
+	    XtVaGetValues(w, XmNbackground, &bg, NULL);
 
-    Pixel fg, top, bottom, select;
-    XmGetColors(XtScreen(w),
-                DefaultColormapOfScreen(XtScreen(w)),
-                bg, &fg, &top, &bottom, &select);
+	    Pixel fg, top, bottom, select;
+	    XmGetColors(XtScreen(w),
+	                DefaultColormapOfScreen(XtScreen(w)),
+	                bg, &fg, &top, &bottom, &select);
 
     G.col_bg     = bg;
     G.col_fg     = fg;
-    G.col_top    = top;
-    G.col_bottom = bottom;
-    G.col_select = select;
+	    G.col_top    = top;
+	    G.col_bottom = bottom;
+	    G.col_select = select;
+	    G.col_black  = BlackPixel(G.dpy, DefaultScreen(G.dpy));
 
     /* Everything below stays within palette logic:
        - red: try allocate a *named* red; if unavailable, fall back to fg (still readable)
@@ -1165,13 +1167,30 @@ static void palette_from_widget(Widget w)
             G.col_red = fg;
         }
 
-        /* LED colors (pure palette):
-           - ON: use red if available, otherwise fg.
-           - OFF: use a shadow-ish palette color (bottom) so segments "ghost" but remain readable.
-           - Background of LED area will be G.col_select (see led_draw_3digits()).
-        */
-        G.col_led_on  = G.col_red ? G.col_red : fg;
-        G.col_led_off = select;
+	        /* LED colors (pure palette):
+	           - ON: use red if available, otherwise fg.
+	           - OFF: use a shadow-ish palette color (bottom) so segments "ghost" but remain readable.
+	           - Background of LED area will be constant dark gray (see led_draw_3digits()).
+	        */
+	        G.col_led_on  = G.col_red ? G.col_red : fg;
+	        /* Keep LED background stable across color schemes for consistent contrast. */
+	        if (XAllocNamedColor(G.dpy, cmap, "#101010", &scr, &exact) ||
+	            XAllocNamedColor(G.dpy, cmap, "gray10", &scr, &exact) ||
+	            XAllocNamedColor(G.dpy, cmap, "grey10", &scr, &exact))
+	        {
+	            G.col_led_bg = scr.pixel;
+	        } else {
+	            G.col_led_bg = G.col_black;
+	        }
+
+	        if (XAllocNamedColor(G.dpy, cmap, "#2a2a2a", &scr, &exact) ||
+	            XAllocNamedColor(G.dpy, cmap, "gray20", &scr, &exact) ||
+	            XAllocNamedColor(G.dpy, cmap, "grey20", &scr, &exact))
+	        {
+	            G.col_led_off = scr.pixel;
+	        } else {
+	            G.col_led_off = G.col_led_bg;
+	        }
 
         /* Yellow for smiley face */
         if (XAllocNamedColor(G.dpy, cmap, "yellow", &scr, &exact) ||
@@ -1182,13 +1201,13 @@ static void palette_from_widget(Widget w)
         }
     }
 
-    DBG2("palette: bg=%lu fg=%lu top=%lu bottom=%lu select=%lu red=%lu yellow=%lu led_on=%lu led_off=%lu",
-         (unsigned long)G.col_bg, (unsigned long)G.col_fg,
-         (unsigned long)G.col_top, (unsigned long)G.col_bottom,
-         (unsigned long)G.col_select, (unsigned long)G.col_red,
-         (unsigned long)G.col_yellow,
-         (unsigned long)G.col_led_on, (unsigned long)G.col_led_off);
-}
+	    DBG2("palette: bg=%lu fg=%lu top=%lu bottom=%lu select=%lu red=%lu yellow=%lu led_on=%lu led_off=%lu",
+	         (unsigned long)G.col_bg, (unsigned long)G.col_fg,
+	         (unsigned long)G.col_top, (unsigned long)G.col_bottom,
+	         (unsigned long)G.col_select, (unsigned long)G.col_red,
+	         (unsigned long)G.col_yellow,
+	         (unsigned long)G.col_led_on, (unsigned long)G.col_led_off);
+	}
 
 
 static void fill_rect(Drawable d,int x,int y,int w,int h,Pixel col){
@@ -1259,11 +1278,11 @@ static void led_draw_one(Drawable dr,int x,int y,unsigned char segs){
     led_draw_segment_rect(dr,x+t,y+(h/2)-1,w-2*t,t,           (segs&(1<<6))!=0);
 }
 
-static void led_draw_3digits(Drawable dr,int value,int total_w,int total_h)
-{
-    /* Pure CDE palette background for the LED area (NO black). */
-    fill_rect(dr, 0, 0, total_w, total_h, G.col_select);
-    draw_3d_rect(dr, 0, 0, total_w, total_h, 1);
+	static void led_draw_3digits(Drawable dr,int value,int total_w,int total_h)
+	{
+	    /* Fixed LED background for consistent contrast across color schemes. */
+	    fill_rect(dr, 0, 0, total_w, total_h, G.col_led_bg);
+	    draw_3d_rect(dr, 0, 0, total_w, total_h, 1);
 
     int x = LED_PAD_PX();
     int y = LED_PAD_PX();
@@ -1355,23 +1374,24 @@ static void draw_cell(Drawable d,int gx,int gy,int index){
         fill_rect(d,px,py,cell,cell,G.col_bg);
         draw_3d_rect(d,px,py,cell,cell,1);
 
-        if(c->mine){
-            int cx=px+cell/2, cy=py+cell/2;
-            int inset=MAX(1,S(1));
-            if(c->exploded) fill_rect(d,px+inset,py+inset,cell-2*inset,cell-2*inset,G.col_red);
+	        if(c->mine){
+	            int cx=px+cell/2, cy=py+cell/2;
+	            int inset=MAX(1,S(1));
+	            if(c->exploded) fill_rect(d,px+inset,py+inset,cell-2*inset,cell-2*inset,G.col_red);
 
-            XSetForeground(G.dpy,G.gc,G.col_fg);
+	            /* Always draw mines in black, independent of theme. */
+	            XSetForeground(G.dpy, G.gc, G.col_black);
 
-            int r=(int)(MAX(3,S(4))*1.5f);
-            XFillArc(G.dpy,d,G.gc,cx-r,cy-r,(unsigned)(2*r),(unsigned)(2*r),0,360*64);
+	            int r=(int)(MAX(3,S(4))*1.5f);
+	            XFillArc(G.dpy,d,G.gc,cx-r,cy-r,(unsigned)(2*r),(unsigned)(2*r),0,360*64);
 
-            int arm=MAX(6,S(7));
-            for (int i=0; i<=1; i++) {
-                XDrawLine(G.dpy,d,G.gc,cx-arm+i,cy,cx+arm+i,cy);
-                XDrawLine(G.dpy,d,G.gc,cx-i,cy-arm,cx,cy+arm-i);
-                XDrawLine(G.dpy,d,G.gc,cx-(arm-1),cy-(arm-1)-i,cx+(arm-1),cy+(arm-1)-i);
-                XDrawLine(G.dpy,d,G.gc,cx-(arm-1)+i,cy+(arm-1),cx+(arm-1)+i,cy-(arm-1));
-            }
+	            int arm=MAX(6,S(7));
+	            for (int i=0; i<=1; i++) {
+	                XDrawLine(G.dpy,d,G.gc,cx-arm+i,cy,cx+arm+i,cy);
+	                XDrawLine(G.dpy,d,G.gc,cx-i,cy-arm,cx,cy+arm-i);
+	                XDrawLine(G.dpy,d,G.gc,cx-(arm-1),cy-(arm-1)-i,cx+(arm-1),cy+(arm-1)-i);
+	                XDrawLine(G.dpy,d,G.gc,cx-(arm-1)+i,cy+(arm-1),cx+(arm-1)+i,cy-(arm-1));
+	            }
             // draw white rectangle in top-left quarter of mine as highlight
             XSetForeground(G.dpy,G.gc,G.col_select);
             XFillRectangle(G.dpy,d,G.gc,cx-r/2+1,cy-r/2+1,(unsigned)g_ui_scale,(unsigned)g_ui_scale);
@@ -1456,7 +1476,7 @@ static void redraw_board(void)
 /* =======================================================================================
  * Face drawing
  * ======================================================================================= */
-static void draw_face_to(Drawable d,int w,int h){
+	static void draw_face_to(Drawable d,int w,int h){
     
     fill_rect(d,0,0,w,h,G.col_bg);
 
@@ -1482,12 +1502,12 @@ static void draw_face_to(Drawable d,int w,int h){
     int mouth_height = (int)(mouth_height_frac * h);
 
     /* Fill the circle with yellow */
-    XSetForeground(G.dpy, G.gc, G.col_yellow);
-    XFillArc(G.dpy, d, G.gc, cx - R, cy - R, (unsigned)(2 * R), (unsigned)(2 * R), 0, 360 * 64);
+	    XSetForeground(G.dpy, G.gc, G.col_yellow);
+	    XFillArc(G.dpy, d, G.gc, cx - R, cy - R, (unsigned)(2 * R), (unsigned)(2 * R), 0, 360 * 64);
 
-    /* Draw black outline */
-    XSetForeground(G.dpy, G.gc, G.col_fg);
-    XDrawArc(G.dpy, d, G.gc, cx - R, cy - R, (unsigned)(2 * R), (unsigned)(2 * R), 0, 360 * 64);
+	    /* Always draw face features in black, independent of theme. */
+	    XSetForeground(G.dpy, G.gc, G.col_black);
+	    XDrawArc(G.dpy, d, G.gc, cx - R, cy - R, (unsigned)(2 * R), (unsigned)(2 * R), 0, 360 * 64);
 
     if (G.face == FACE_DEAD) {
         // Left eye (X)

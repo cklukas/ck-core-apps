@@ -1,11 +1,40 @@
 # ck-core
 
-Small CDE panel utilities:
-- `ck-about` — CDE/version information notebook
-- `ck-character-map` — character map / glyph browser (Motif/CDE)
-- `ck-load` — CPU load meter
-- `ck-mixer` — simple mixer using ALSA
-- `ck-clock` — analog Cairo clock for the front panel
+Motif/CDE utilities and games.
+
+## Apps
+
+### ck-about
+
+CDE About dialog with notebook pages that report CDE version and platform details.
+
+### ck-calc
+
+Basic calculator with a classic desktop layout, session handling, and multiple-window support.
+
+### ck-character-map
+
+Character map and glyph browser with font selection and copy/paste support.
+
+### ck-clock
+
+Analog front-panel clock rendered with cairo and Motif color sets.
+
+### ck-load
+
+System load monitor showing CPU, RAM, swap usage, and 1/5/15-minute load averages.
+
+### ck-mixer
+
+ALSA mixer frontend with per-channel sliders, mute toggles, and device selection.
+
+### ck-mines
+
+Minesweeper clone built for Motif/CDE with configurable grid and classic flags/reveals.
+
+### ck-nibbles
+
+QBasic-style Nibbles (snake) clone with 1- or 2-player support and keyboard controls.
 
 ## Build
 

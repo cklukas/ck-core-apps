@@ -1,6 +1,23 @@
 # CK-Core App Suite
 
-Motif/CDE utilities and games.
+**Motif/CDE utilities and games**
+
+Example desktop screenshot showing running CK-Core apps: 
+
+![desktop screnenshot](screenshots/desktop.png)
+
+**Execution environment:**
+
+* **CDE:** 2.5.3, compiled from adapted source ([link](https://github.com/cklukas/ck-core-cde))
+* **Motif:** 2.3.8, compiled from source
+* **Operating system:** Devuan 6 (arm64) running in VMware Fusion on Mac M1.
+* **Display:** 4k
+
+---
+
+**Info:** High-DPI is still a bit problematic. E.g., icons on desktop and start panel at bottom are too small. I can hopefully fix that one day in the project [ck-core-cde](https://github.com/cklukas/ck-core-cde).
+
+---
 
 ## Apps
 

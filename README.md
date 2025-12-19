@@ -1,40 +1,54 @@
-# ck-core
+# CK-Core App Suite
 
 Motif/CDE utilities and games.
 
 ## Apps
 
-### ck-about
+### About CK-Core (ck-about)
 
 CDE About dialog with notebook pages that report CDE version and platform details.
 
-### ck-calc
+![ck-about screenshot](screenshots/ck-about-1.png)
+
+### Calculator (ck-calc)
 
 Basic calculator with a classic desktop layout, session handling, and multiple-window support.
 
-### ck-character-map
+![ck-calc screenshot](screenshots/ck-calc-1.png)
+
+### Character Map (ck-character-map)
 
 Character map and glyph browser with font selection and copy/paste support.
+
+![ck-character-map screenshot](screenshots/ck-character-map-1.png)
 
 ### ck-clock
 
 Analog front-panel clock rendered with cairo and Motif color sets.
 
-### ck-load
+### System Load (ck-load)
 
 System load monitor showing CPU, RAM, swap usage, and 1/5/15-minute load averages.
 
-### ck-mixer
+![ck-load screenshot](screenshots/ck-load-1.png)
+
+### Volume Control (ck-mixer)
 
 ALSA mixer frontend with per-channel sliders, mute toggles, and device selection.
 
-### ck-mines
+![ck-mixer screenshot](screenshots/ck-mixer-1.png)
+
+### Mines (ck-mines)
 
 Minesweeper clone built for Motif/CDE with configurable grid and classic flags/reveals.
 
-### ck-nibbles
+![ck-mines screnshot](screenshots/ck-mines-1.png)
+
+### Nibles (ck-nibbles)
 
 QBasic-style Nibbles (snake) clone with 1- or 2-player support and keyboard controls.
+
+![ck-nibbles screenshot](screenshots/ck-nibbles-1.png)
 
 ## Build
 

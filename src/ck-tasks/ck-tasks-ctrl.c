@@ -15,6 +15,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <pwd.h>
 
 struct TasksController {
     TasksUi *ui;
@@ -28,11 +29,14 @@ struct TasksController {
     int app_count;
     XtIntervalId refresh_timer;
     int refresh_interval_ms;
+    Boolean filter_by_user;
 };
 
 static void tasks_ctrl_schedule_refresh(TasksController *ctrl);
 static void tasks_ctrl_refresh_applications(TasksController *ctrl);
 static void on_apps_close(Widget widget, XtPointer client, XtPointer call);
+static int tasks_ctrl_filter_processes(TasksController *ctrl, TasksProcessEntry *entries, int count);
+static void tasks_ctrl_apply_filter_state(TasksController *ctrl, Boolean state);
 
 static void destroy_dialog(Widget widget, XtPointer client, XtPointer call)
 {
@@ -94,6 +98,7 @@ static void on_view_refresh(Widget widget, XtPointer client, XtPointer call)
     TasksProcessEntry *entries = NULL;
     int count = 0;
     if (tasks_model_list_processes(&entries, &count, 64) == 0) {
+        count = tasks_ctrl_filter_processes(ctrl, entries, count);
         tasks_model_free_processes(ctrl->process_entries, ctrl->process_count);
         ctrl->process_entries = entries;
         ctrl->process_count = count;
@@ -151,9 +156,19 @@ static void on_options_filter_by_user(Widget widget, XtPointer client, XtPointer
     TasksController *ctrl = client;
     if (!ctrl) return;
     Boolean state = XmToggleButtonGadgetGetState(widget);
-    if (ctrl->ui->process_filter_toggle) {
-        XmToggleButtonGadgetSetState(ctrl->ui->process_filter_toggle, state, False);
-    }
+    tasks_ctrl_apply_filter_state(ctrl, state);
+    on_view_refresh(NULL, ctrl, NULL);
+    tasks_ui_update_status(ctrl->ui, state ? "Filtering to current user." : "Showing all users.");
+}
+
+static void on_process_filter_toggle(Widget widget, XtPointer client, XtPointer call)
+{
+    (void)call;
+    TasksController *ctrl = client;
+    if (!ctrl) return;
+    Boolean state = XmToggleButtonGadgetGetState(widget);
+    tasks_ctrl_apply_filter_state(ctrl, state);
+    on_view_refresh(NULL, ctrl, NULL);
     tasks_ui_update_status(ctrl->ui, state ? "Filtering to current user." : "Showing all users.");
 }
 
@@ -429,6 +444,42 @@ static void tasks_ctrl_schedule_refresh(TasksController *ctrl)
     ctrl->refresh_timer = XtAppAddTimeOut(app, (unsigned long)interval, on_refresh_timer, ctrl);
 }
 
+static int tasks_ctrl_filter_processes(TasksController *ctrl, TasksProcessEntry *entries, int count)
+{
+    if (!ctrl || !entries || count <= 0 || !ctrl->filter_by_user) return count;
+    uid_t uid = getuid();
+    struct passwd *pw = getpwuid(uid);
+    char uid_buffer[16];
+    snprintf(uid_buffer, sizeof(uid_buffer), "%d", (int)uid);
+
+    const char *user_name = (pw && pw->pw_name) ? pw->pw_name : "";
+    int write_index = 0;
+    for (int i = 0; i < count; ++i) {
+        const char *entry_user = entries[i].user;
+        if (!entry_user || entry_user[0] == '\0') continue;
+        if ((user_name[0] && strcmp(entry_user, user_name) == 0) ||
+            strcmp(entry_user, uid_buffer) == 0) {
+            if (write_index != i) {
+                entries[write_index] = entries[i];
+            }
+            write_index++;
+        }
+    }
+    return write_index;
+}
+
+static void tasks_ctrl_apply_filter_state(TasksController *ctrl, Boolean state)
+{
+    if (!ctrl) return;
+    ctrl->filter_by_user = state;
+    if (ctrl->ui->process_filter_toggle) {
+        XmToggleButtonGadgetSetState(ctrl->ui->process_filter_toggle, state, False);
+    }
+    if (ctrl->ui->menu_options_filter_by_user) {
+        XmToggleButtonGadgetSetState(ctrl->ui->menu_options_filter_by_user, state, False);
+    }
+}
+
 TasksController *tasks_ctrl_create(TasksUi *ui, SessionData *session_data)
 {
     if (!ui) return NULL;
@@ -451,6 +502,9 @@ TasksController *tasks_ctrl_create(TasksUi *ui, SessionData *session_data)
     XtAddCallback(ui->menu_options_update_2s, XmNactivateCallback, on_options_update, ctrl);
     XtAddCallback(ui->menu_options_update_5s, XmNactivateCallback, on_options_update, ctrl);
     XtAddCallback(ui->menu_options_filter_by_user, XmNvalueChangedCallback, on_options_filter_by_user, ctrl);
+    if (ui->process_filter_toggle) {
+        XtAddCallback(ui->process_filter_toggle, XmNvalueChangedCallback, on_process_filter_toggle, ctrl);
+    }
 
     XtAddCallback(ui->menu_help_help, XmNactivateCallback, on_help_view, ctrl);
     XtAddCallback(ui->menu_help_about, XmNactivateCallback, on_about, ctrl);

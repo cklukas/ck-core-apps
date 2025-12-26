@@ -171,16 +171,20 @@ int tasks_model_list_processes(TasksProcessEntry **out_entries, int *out_count, 
         if (read_proc_stat(pid, entry.name, sizeof(entry.name), &ut, &st, &entry.threads) != 0) {
             continue;
         }
-        uid_t uid = 0;
-        if (read_proc_status_uid(pid, &uid) == 0) {
+        uid_t uid = (uid_t)-1;
+        int have_uid = (read_proc_status_uid(pid, &uid) == 0);
+        if (have_uid) {
             struct passwd *pw = getpwuid(uid);
             if (pw && pw->pw_name) {
                 strncpy(entry.user, pw->pw_name, sizeof(entry.user) - 1);
                 entry.user[sizeof(entry.user) - 1] = '\0';
             }
         }
-        if (entry.user[0] == '\0') {
+        if (entry.user[0] == '\0' && have_uid) {
             snprintf(entry.user, sizeof(entry.user), "%d", (int)uid);
+        }
+        if (entry.user[0] == '\0') {
+            snprintf(entry.user, sizeof(entry.user), "unknown");
         }
         read_proc_rss_mb(pid, &entry.memory_mb);
         if (uptime > 0.0) {

@@ -79,6 +79,13 @@ static unsigned long now_ms(void) {
 
 /* forward */
 static void redraw_board(void);
+static void init_x_stuff(void);
+static int force_widget_size(Widget w, int req_w, int req_h);
+static void led_area_size(Dimension *out_w, Dimension *out_h);
+static void apply_scaled_layout(void);
+static void rebuild_graphics_for_current_scale(void);
+static void update_size_menu_buttons(void);
+static void apply_ui_scale(void);
 
 typedef struct { const char *name; int cols, rows, mines; } Preset;
 static const Preset PRESET_BEGINNER     = { "Beginner",      9,  9, 10 };
@@ -101,6 +108,7 @@ static const int BASE_FACE_W  = 34;
 static const int BASE_FACE_H  = 34;
 
 static float g_ui_scale = 1.0f;
+static float g_base_ui_scale = 1.0f;
 
 static int S(int v) {
     float f = (float)v * g_ui_scale;
@@ -141,6 +149,8 @@ typedef struct {
 
     Widget status_frame, status_label;
     Widget marks_toggle;
+    Widget size_default_btn;
+    Widget size_large_btn;
 
     Display *dpy;
     GC gc;
@@ -159,6 +169,7 @@ typedef struct {
     int cols, rows, mines;
     DiffId diff;
     int marks_enabled;
+    int large_size_mode;
 
     Cell *cells;
     int first_click_done;
@@ -472,22 +483,93 @@ static int parse_int(const char *s, int defv) {
     return (int)v;
 }
 
+static void apply_ui_scale(void) {
+    float target = g_base_ui_scale;
+    if (G.large_size_mode) target *= 2.0f;
+    if (target < 0.5f) target = 0.5f;
+    if (target > 8.0f) target = 8.0f;
+    g_ui_scale = target;
+    DBG2("apply_ui_scale: base=%.2f large=%d -> %.2f", g_base_ui_scale, G.large_size_mode, g_ui_scale);
+}
+
 static void init_ui_scale_from_env_and_dpi(void) {
     const char *env = getenv("CK_MINES_SCALE");
     if (env && *env) {
         float s = (float)atof(env);
         if (s < 0.5f) s = 0.5f;
         if (s > 4.0f) s = 4.0f;
-        g_ui_scale = s;
-        DBG("ui_scale override CK_MINES_SCALE=%s -> %.2f", env, g_ui_scale);
+        g_base_ui_scale = s;
+        apply_ui_scale();
+        DBG("ui_scale override CK_MINES_SCALE=%s -> base=%.2f final=%.2f", env, g_base_ui_scale, g_ui_scale);
         return;
     }
     float dpi = query_x_dpi(G.dpy);
     float s = dpi / 96.0f;
     if (s < 1.0f) s = 1.0f;
     if (s > 4.0f) s = 4.0f;
-    g_ui_scale = s;
-    DBG("dpi=%.1f -> ui_scale=%.2f", dpi, g_ui_scale);
+    g_base_ui_scale = s;
+    apply_ui_scale();
+    DBG("dpi=%.1f -> base=%.2f final=%.2f", dpi, g_base_ui_scale, g_ui_scale);
+}
+
+static void update_size_menu_buttons(void) {
+    if (G.size_default_btn)
+        XmToggleButtonSetState(G.size_default_btn, (Boolean)(G.large_size_mode == 0), False);
+    if (G.size_large_btn)
+        XmToggleButtonSetState(G.size_large_btn, (Boolean)(G.large_size_mode != 0), False);
+}
+
+static void apply_scaled_layout(void) {
+    update_size_menu_buttons();
+
+    if (G.work_form) {
+        XtVaSetValues(G.work_form,
+                      XmNspacing, (Dimension)GAP_PX(),
+                      XmNmarginWidth, (Dimension)PAD_PX(),
+                      XmNmarginHeight, (Dimension)PAD_PX(),
+                      NULL);
+    }
+    if (G.top_form) {
+        XtVaSetValues(G.top_form,
+                      XmNmarginWidth, (Dimension)PAD_PX(),
+                      XmNmarginHeight, (Dimension)PAD_PX(),
+                      NULL);
+    }
+
+    Dimension ledw = 0, ledh = 0;
+    led_area_size(&ledw, &ledh);
+    if (G.mine_led) {
+        XtVaSetValues(G.mine_led,
+                      XmNwidth, ledw,
+                      XmNheight, ledh,
+                      NULL);
+    }
+    if (G.time_led) {
+        XtVaSetValues(G.time_led,
+                      XmNwidth, ledw,
+                      XmNheight, ledh,
+                      NULL);
+    }
+
+    if (G.face_button) {
+        int face_w = FACE_W_PX();
+        int face_h = FACE_H_PX();
+        XtVaSetValues(G.face_button,
+                      XmNwidth, (Dimension)face_w,
+                      XmNheight, (Dimension)face_h,
+                      XmNleftOffset, -face_w / 2,
+                      NULL);
+        force_widget_size(G.face_button, face_w, face_h);
+    }
+
+    if (G.board_da) {
+        apply_board_geometry();
+        redraw_board();
+    }
+
+    if (G.face_button) {
+        redraw_face();
+    }
 }
 
 /* =======================================================================================
@@ -583,6 +665,7 @@ static void load_config(void) {
     G.rows = PRESET_BEGINNER.rows;
     G.mines= PRESET_BEGINNER.mines;
     G.marks_enabled = 1;
+    G.large_size_mode = 0;
 
     /* Default fastest times */
     for (int i=0;i<3;i++) {
@@ -613,6 +696,7 @@ static void load_config(void) {
         else if(!strcmp(k,"rows")) G.rows=parse_int(v,G.rows);
         else if(!strcmp(k,"mines")) G.mines=parse_int(v,G.mines);
         else if(!strcmp(k,"marks")) G.marks_enabled=parse_int(v,G.marks_enabled);
+        else if(!strcmp(k,"large_scale")) G.large_size_mode = parse_int(v,G.large_size_mode) ? 1 : 0;
         else if(!strcmp(k,"best_beginner_time"))      G.best_time[0]=MAX(0,parse_int(v,G.best_time[0]));
         else if(!strcmp(k,"best_intermediate_time"))  G.best_time[1]=MAX(0,parse_int(v,G.best_time[1]));
         else if(!strcmp(k,"best_expert_time"))        G.best_time[2]=MAX(0,parse_int(v,G.best_time[2]));
@@ -644,6 +728,7 @@ static void save_config(void) {
     fprintf(f,"rows=%d\n",G.rows);
     fprintf(f,"mines=%d\n",G.mines);
     fprintf(f,"marks=%d\n",G.marks_enabled);
+    fprintf(f,"large_scale=%d\n",G.large_size_mode ? 1 : 0);
 
     /* Fastest times */
     fprintf(f,"best_beginner_time=%d\n",     MAX(0,G.best_time[0]));
@@ -1575,25 +1660,9 @@ static void redraw_face(void){
     XFreePixmap(G.dpy,pm);
     XFlush(G.dpy);
 }
-
 /* =======================================================================================
  * Geometry: apply board size + then ask Motif for preferred mainw size
  * ======================================================================================= */
-static int clamp_to_screen_w(int w) {
-    int sw = DisplayWidth(G.dpy, DefaultScreen(G.dpy));
-    int maxw = MAX(200, sw - S(40));
-    if(w < 200) w = 200;
-    if(w > maxw) w = maxw;
-    return w;
-}
-static int clamp_to_screen_h(int h) {
-    int sh = DisplayHeight(G.dpy, DefaultScreen(G.dpy));
-    int maxh = MAX(200, sh - S(80));
-    if(h < 200) h = 200;
-    if(h > maxh) h = maxh;
-    return h;
-}
-
 static void apply_board_geometry(void)
 {
     int bw = 0, bh = 0;
@@ -1880,6 +1949,33 @@ static void cb_marks(Widget w,XtPointer client,XtPointer call){
     save_config();
     set_status(G.marks_enabled ? "Marks (?) enabled." : "Marks (?) disabled.");
 }
+static void set_large_size_mode(int large, const char *status_msg)
+{
+    int want = large ? 1 : 0;
+    if (G.large_size_mode == want) {
+        update_size_menu_buttons();
+        if (status_msg) set_status(status_msg);
+        return;
+    }
+    G.large_size_mode = want;
+    apply_ui_scale();
+    rebuild_graphics_for_current_scale();
+    apply_scaled_layout();
+    save_config();
+    if (status_msg) set_status(status_msg);
+}
+static void cb_default_size(Widget w,XtPointer c,XtPointer call){
+    (void)w;(void)c;
+    XmToggleButtonCallbackStruct *cs = (XmToggleButtonCallbackStruct*)call;
+    if (!cs || !cs->set) return;
+    set_large_size_mode(0, "Default board size selected.");
+}
+static void cb_large_size(Widget w,XtPointer c,XtPointer call){
+    (void)w;(void)c;
+    XmToggleButtonCallbackStruct *cs = (XmToggleButtonCallbackStruct*)call;
+    if (!cs || !cs->set) return;
+    set_large_size_mode(1, "Large board size selected.");
+}
 static void wm_save_yourself_cb(Widget w,XtPointer client,XtPointer call){
     (void)w;(void)client;(void)call;
     save_config();
@@ -1930,6 +2026,22 @@ static void create_menu(Widget parent){
     G.marks_toggle = XtVaCreateManagedWidget("Enable Question Marks", xmToggleButtonWidgetClass, opt_pd,
                                              XmNset, (Boolean)(G.marks_enabled?True:False), NULL);
     XtAddCallback(G.marks_toggle, XmNvalueChangedCallback, cb_marks, NULL);
+
+    XtVaCreateManagedWidget("sep_size_options", xmSeparatorGadgetClass, opt_pd, NULL);
+
+    G.size_default_btn = XtVaCreateManagedWidget("Default Size", xmToggleButtonWidgetClass, opt_pd,
+                                                  XmNset, (Boolean)(G.large_size_mode == 0),
+                                                  XmNindicatorType, XmONE_OF_MANY,
+                                                  NULL);
+    XtAddCallback(G.size_default_btn, XmNvalueChangedCallback, cb_default_size, NULL);
+
+    G.size_large_btn = XtVaCreateManagedWidget("Large Size", xmToggleButtonWidgetClass, opt_pd,
+                                                XmNset, (Boolean)(G.large_size_mode != 0),
+                                                XmNindicatorType, XmONE_OF_MANY,
+                                                NULL);
+    XtAddCallback(G.size_large_btn, XmNvalueChangedCallback, cb_large_size, NULL);
+
+    update_size_menu_buttons();
 
     Widget help_pd = XmCreatePulldownMenu(menubar,"helpPD",NULL,0);
     Widget help_cas = XtVaCreateManagedWidget("Help", xmCascadeButtonWidgetClass, menubar,
@@ -2175,6 +2287,20 @@ static void init_x_stuff(void){
     DBG("init_x_stuff done: dpy=%p gc=%lu", (void*)G.dpy, (unsigned long)G.gc);
 }
 
+static void rebuild_graphics_for_current_scale(void)
+{
+    if (!G.dpy) return;
+    if (G.gc) {
+        XFreeGC(G.dpy, G.gc);
+        G.gc = NULL;
+    }
+    if (G.font) {
+        XFreeFont(G.dpy, G.font);
+        G.font = NULL;
+    }
+    init_x_stuff();
+}
+
 /* =======================================================================================
  * Main
  * ======================================================================================= */
@@ -2242,6 +2368,7 @@ int main(int argc,char **argv){
     about_set_window_icon_from_xpm(G.toplevel, ck_mines_l_pm);
 
     init_x_stuff();
+    apply_scaled_layout();
 
     /* WM_SAVE_YOURSELF */
     {

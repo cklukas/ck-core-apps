@@ -61,7 +61,7 @@ Minesweeper clone built for Motif/CDE with configurable grid and classic flags/r
 
 ![ck-mines screnshot](screenshots/ck-mines-1.png)
 
-### Nibles (ck-nibbles)
+### Nibbles (ck-nibbles)
 
 QBasic-style Nibbles (snake) clone with 1- or 2-player support and keyboard controls.
 

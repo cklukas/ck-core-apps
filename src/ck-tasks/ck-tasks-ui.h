@@ -26,6 +26,7 @@ typedef enum {
     TASKS_TAB_NETWORKING,
     TASKS_TAB_APPLICATIONS,
     TASKS_TAB_SERVICES,
+    TASKS_TAB_USERS,
 } TasksTab;
 
 typedef struct {
@@ -39,7 +40,19 @@ typedef struct {
     Widget tab_networking;
     Widget tab_applications;
     Widget tab_services;
-    Widget status_label;
+    Widget tab_users;
+    Widget status_frame_processes;
+    Widget status_frame_cpu;
+    Widget status_frame_memory;
+    Widget status_frame_message;
+    Widget status_processes_label;
+    Widget status_cpu_label;
+    Widget status_memory_label;
+    Widget status_message_label;
+    char status_processes_text[128];
+    char status_cpu_text[128];
+    char status_memory_text[128];
+    char status_message_text[256];
     Widget process_filter_toggle;
     Widget process_search_field;
     Widget process_scrollbar;
@@ -87,6 +100,7 @@ void tasks_ui_set_processes(TasksUi *ui, const TasksProcessEntry *entries, int c
 void tasks_ui_set_process_row_window(int start);
 int tasks_ui_get_process_row_page_size(void);
 void tasks_ui_set_applications_table(TasksUi *ui, const TasksApplicationEntry *entries, int count);
+void tasks_ui_update_process_count(TasksUi *ui, int total_processes);
 void tasks_ui_update_system_stats(TasksUi *ui, const TasksSystemStats *stats);
 
 #endif /* CK_TASKS_UI_H */

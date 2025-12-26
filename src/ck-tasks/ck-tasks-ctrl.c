@@ -32,6 +32,7 @@ struct TasksController {
     TasksApplicationEntry *applications;
     int applications_count;
     int selected_application;
+    int process_total_count;
     XtIntervalId refresh_timer;
     int refresh_interval_ms;
     Boolean filter_by_user;
@@ -130,12 +131,14 @@ static void on_view_refresh(Widget widget, XtPointer client, XtPointer call)
     TasksProcessEntry *entries = NULL;
     int count = 0;
     if (tasks_model_list_processes(&entries, &count) == 0) {
+        ctrl->process_total_count = count;
         count = tasks_ctrl_filter_processes(ctrl, entries, count);
         tasks_model_free_processes(ctrl->process_entries, ctrl->process_count);
         ctrl->process_entries = entries;
         ctrl->process_count = count;
         tasks_ui_set_processes(ctrl->ui, entries, count);
         tasks_ctrl_set_virtual_window(ctrl, ctrl->virtual_row_start);
+        tasks_ui_update_process_count(ctrl->ui, ctrl->process_total_count);
         TasksSystemStats stats;
         if (tasks_model_get_system_stats(&stats) == 0) {
             tasks_ui_update_system_stats(ctrl->ui, &stats);
@@ -853,6 +856,7 @@ TasksController *tasks_ctrl_create(TasksUi *ui, SessionData *session_data)
     ctrl->refresh_interval_ms = 2000;
     ctrl->virtual_row_start = 0;
     ctrl->selected_application = -1;
+    ctrl->process_total_count = 0;
 
     XtAddCallback(ui->menu_file_exit, XmNactivateCallback, on_file_exit, ctrl);
     XtAddCallback(ui->menu_file_connect, XmNactivateCallback, on_file_connect, ctrl);

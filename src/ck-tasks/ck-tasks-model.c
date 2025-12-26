@@ -267,10 +267,11 @@ int tasks_model_get_system_stats(TasksSystemStats *out_stats)
         }
         fclose(fp);
     }
+    unsigned long mem_used = 0;
     int mem_percent = 0;
     if (mem_total > 0) {
-        unsigned long used = mem_total > mem_available ? (mem_total - mem_available) : 0;
-        mem_percent = (int)((double)used / (double)mem_total * 100.0);
+        mem_used = mem_total > mem_available ? (mem_total - mem_available) : 0;
+        mem_percent = (int)((double)mem_used / (double)mem_total * 100.0);
     }
 
     double load1 = 0.0, load5 = 0.0, load15 = 0.0;
@@ -289,5 +290,7 @@ int tasks_model_get_system_stats(TasksSystemStats *out_stats)
     out_stats->load1_percent = load1p;
     out_stats->load5_percent = load5p;
     out_stats->load15_percent = load15p;
+    out_stats->mem_total_kb = mem_total;
+    out_stats->mem_used_kb = mem_used;
     return 0;
 }

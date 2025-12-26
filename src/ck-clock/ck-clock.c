@@ -308,6 +308,21 @@ static void tick_cb(XtPointer client_data, XtIntervalId *id);
 static void wm_delete_cb(Widget w, XtPointer client_data, XtPointer call_data);
 static void handle_configure(XConfigureEvent *cev);
 
+static int guess_initial_year(void)
+{
+    if (have_local_time) {
+        return current_local_tm.tm_year + 1900;
+    }
+
+    time_t now = time(NULL);
+    if (now == (time_t)-1) return 2000;
+
+    struct tm lt;
+    if (!localtime_r(&now, &lt)) return 2000;
+
+    return lt.tm_year + 1900;
+}
+
 typedef struct {
     int split_mode;
     double left_w;
@@ -1133,6 +1148,10 @@ static void ensure_month_menu(void)
                   XmNrightAttachment, XmATTACH_NONE,
                   NULL);
 
+    int initial_year = guess_initial_year();
+    if (initial_year < 1900) initial_year = 1900;
+    else if (initial_year > 2200) initial_year = 2200;
+
     year_text = XmCreateTextField(year_spin, (char *)"yearText", NULL, 0);
     XtVaSetValues(year_text,
                   XmNcolumns, 5,
@@ -1140,7 +1159,7 @@ static void ensure_month_menu(void)
                   XmNminimumValue, 1900,
                   XmNmaximumValue, 2200,
                   XmNincrementValue, 1,
-                  XmNposition, 2000,
+                  XmNposition, initial_year,
                   NULL);
     XtAddCallback(year_text, XmNvalueChangedCallback, year_text_changed_cb, NULL);
     XtAddCallback(year_text, XmNactivateCallback, year_text_changed_cb, NULL);
@@ -1176,9 +1195,6 @@ static void update_controls_layout(void)
     if (have_local_time) {
         if (view_year < 0) view_year = current_local_tm.tm_year;
         if (view_mon < 0) view_mon = current_local_tm.tm_mon;
-    } else {
-        if (view_year < 0) view_year = 0;
-        if (view_mon < 0) view_mon = 0;
     }
 
     int pad = (int)fmax(4.0, lay.right_w * 0.05);
@@ -1216,14 +1232,15 @@ static void update_controls_layout(void)
         XtVaSetValues(month_option, XmNmenuHistory, month_items[view_mon], NULL);
     }
 
+    int month_h = 0;
+    XtVaGetValues(month_option, XmNheight, &month_h, NULL);
+    int row_h = month_h > 0 ? (int)month_h : 28;
     int year_x = opt_x + base_month_w + spin_gap;
     int year_y = header_y;
     int year_w = spin_w;
+    int year_h = row_h;
     bool inline_year = inline_space >= year_min_w;
     if (!inline_year || year_w < 60) {
-        int month_h = 0;
-        XtVaGetValues(month_option, XmNheight, &month_h, NULL);
-        int row_h = month_h > 0 ? (int)month_h : 28;
         year_x = opt_x;
         year_y = header_y + row_h + spin_gap;
         year_w = right_edge - opt_x;
@@ -1236,15 +1253,18 @@ static void update_controls_layout(void)
                   XmNleftOffset, year_x,
                   XmNtopOffset, year_y,
                   XmNwidth, (Dimension)year_w,
+                  XmNheight, (Dimension)year_h,
                   NULL);
 
     if (XtIsRealized(month_option)) XRaiseWindow(dpy, XtWindow(month_option));
     if (XtIsRealized(year_spin)) XRaiseWindow(dpy, XtWindow(year_spin));
 
     /* Keep spinbox value in sync with current view_year without causing callback loops. */
-    updating_year_spin = 1;
-    XtVaSetValues(year_text, XmNposition, view_year + 1900, NULL);
-    updating_year_spin = 0;
+    if (view_year >= 0) {
+        updating_year_spin = 1;
+        XtVaSetValues(year_text, XmNposition, view_year + 1900, NULL);
+        updating_year_spin = 0;
+    }
 
     if (top_widget && XtIsRealized(top_widget) && last_split_mode != lay.split_mode) {
         const char *title = lay.split_mode ? "Time and Calendar" : "Time";
@@ -1311,6 +1331,8 @@ static void update_time_if_needed(void)
         last_display_year = lt.tm_year;
         current_local_tm = lt;
         have_local_time = true;
+        if (view_year < 0) view_year = lt.tm_year;
+        if (view_mon < 0) view_mon = lt.tm_mon;
         update_controls_layout();
         force_full_redraw = false;
         draw_clock();

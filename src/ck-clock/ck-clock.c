@@ -142,8 +142,14 @@ static void init_motif_colors(void)
     Window root_return, parent = None;
     Window *children;
     unsigned int nchildren;
-    
-    if (XQueryTree(dpy, win, &root_return, &parent, &children, &nchildren)) {
+
+    Window query_win = win;
+    if (top_widget && XtIsRealized(top_widget)) {
+        Window shell_win = XtWindow(top_widget);
+        if (shell_win != None) query_win = shell_win;
+    }
+
+    if (XQueryTree(dpy, query_win, &root_return, &parent, &children, &nchildren)) {
         if (children) XFree(children);
     }
     
@@ -179,6 +185,37 @@ static void init_motif_colors(void)
        foreground, top_shadow, bottom_shadow, select. */
     XmGetColors(ScreenOfDisplay(dpy, screen), panel_cmap, bg_pixel,
                 &fg_pixel, &ts_pixel, &bs_pixel, &sel_pixel);
+
+    if (form_widget) {
+        XtVaSetValues(form_widget,
+                      XmNbackground, bg_pixel,
+                      XmNforeground, fg_pixel,
+                      NULL);
+    }
+    if (draw_widget) {
+        XtVaSetValues(draw_widget,
+                      XmNbackground, bg_pixel,
+                      XmNforeground, fg_pixel,
+                      NULL);
+    }
+    if (month_option) {
+        XtVaSetValues(month_option,
+                      XmNbackground, bg_pixel,
+                      XmNforeground, fg_pixel,
+                      NULL);
+    }
+    if (year_spin) {
+        XtVaSetValues(year_spin,
+                      XmNbackground, bg_pixel,
+                      XmNforeground, fg_pixel,
+                      NULL);
+    }
+    if (year_text) {
+        XtVaSetValues(year_text,
+                      XmNbackground, bg_pixel,
+                      XmNforeground, fg_pixel,
+                      NULL);
+    }
 
     colors_inited = 1;
 }
@@ -1164,8 +1201,10 @@ static void update_controls_layout(void)
     if (spin_w < 50) spin_w = 50;
 
     XtVaSetValues(month_option,
-                  XmNx, opt_x,
-                  XmNy, header_y,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNleftOffset, opt_x,
+                  XmNtopOffset, header_y,
                   XmNwidth, (Dimension)base_month_w,
                   NULL);
 
@@ -1192,8 +1231,10 @@ static void update_controls_layout(void)
     }
 
     XtVaSetValues(year_spin,
-                  XmNx, year_x,
-                  XmNy, year_y,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNleftOffset, year_x,
+                  XmNtopOffset, year_y,
                   XmNwidth, (Dimension)year_w,
                   NULL);
 

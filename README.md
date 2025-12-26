@@ -33,7 +33,7 @@ CDE About dialog with notebook pages that report CDE version and platform detail
 
 ### Calculator (ck-calc)
 
-Basic calculator with a classic desktop layout, session handling, and multiple-window support.
+Basic calculator with a classic desktop layout, session handling, and multiple-window support. Basic keyboard input works (e.g., number and operation input on numpad of keybard, Enter to see result).
 
 ![ck-calc screenshot](screenshots/ck-calc-1.png)
 

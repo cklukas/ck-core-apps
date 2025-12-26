@@ -2,8 +2,10 @@
 
 #include "../shared/about_dialog.h"
 #include <X11/Intrinsic.h>
+#include <X11/Xatom.h>
 #include <Xm/Xm.h>
 #include <Xm/MessageB.h>
+#include <Xm/List.h>
 #include <Xm/ToggleBG.h>
 
 #include <stdlib.h>
@@ -12,12 +14,25 @@
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 struct TasksController {
     TasksUi *ui;
     SessionData *session;
     Widget about_shell;
+    TasksProcessEntry *process_entries;
+    int process_count;
+    Window *app_windows;
+    pid_t *app_pids;
+    int *app_window_counts;
+    int app_count;
+    XtIntervalId refresh_timer;
+    int refresh_interval_ms;
 };
+
+static void tasks_ctrl_schedule_refresh(TasksController *ctrl);
+static void tasks_ctrl_refresh_applications(TasksController *ctrl);
+static void on_apps_close(Widget widget, XtPointer client, XtPointer call);
 
 static void destroy_dialog(Widget widget, XtPointer client, XtPointer call)
 {
@@ -76,7 +91,22 @@ static void on_view_refresh(Widget widget, XtPointer client, XtPointer call)
     (void)call;
     TasksController *ctrl = client;
     if (!ctrl) return;
-    tasks_ui_update_status(ctrl->ui, "Manual refresh requested.");
+    TasksProcessEntry *entries = NULL;
+    int count = 0;
+    if (tasks_model_list_processes(&entries, &count, 64) == 0) {
+        tasks_model_free_processes(ctrl->process_entries, ctrl->process_count);
+        ctrl->process_entries = entries;
+        ctrl->process_count = count;
+        tasks_ui_set_processes(ctrl->ui, entries, count);
+        TasksSystemStats stats;
+        if (tasks_model_get_system_stats(&stats) == 0) {
+            tasks_ui_update_system_stats(ctrl->ui, &stats);
+        }
+        tasks_ctrl_refresh_applications(ctrl);
+        tasks_ui_update_status(ctrl->ui, "Process list refreshed.");
+    } else {
+        tasks_ui_update_status(ctrl->ui, "Unable to refresh process list.");
+    }
 }
 
 static void on_view_show_tab(Widget widget, XtPointer client, XtPointer call)
@@ -105,17 +135,14 @@ static void on_options_update(Widget widget, XtPointer client, XtPointer call)
     (void)call;
     TasksController *ctrl = client;
     if (!ctrl) return;
-    char label[32] = {0};
-    XmString xs = NULL;
-    XtVaGetValues(widget, XmNlabelString, &xs, NULL);
-    char *text = XmStringUnparse(xs, NULL, XmCHARSET_TEXT, XmCHARSET_TEXT, NULL, 0, XmOUTPUT_ALL);
-    if (text) {
-        snprintf(label, sizeof(label), "Update interval %s selected.", text);
-        XtFree(text);
-    } else {
-        snprintf(label, sizeof(label), "Update interval set.");
-    }
-    tasks_ui_update_status(ctrl->ui, label);
+    int interval_ms = 0;
+    XtPointer data = NULL;
+    XtVaGetValues(widget, XmNuserData, &data, NULL);
+    interval_ms = (int)(intptr_t)data;
+    if (interval_ms <= 0) interval_ms = 2000;
+    ctrl->refresh_interval_ms = interval_ms;
+    tasks_ui_update_status(ctrl->ui, "Update interval changed.");
+    tasks_ctrl_schedule_refresh(ctrl);
 }
 
 static void on_options_filter_by_user(Widget widget, XtPointer client, XtPointer call)
@@ -180,6 +207,228 @@ static void on_about(Widget widget, XtPointer client, XtPointer call)
     XtPopup(shell, XtGrabNone);
 }
 
+static int get_window_pid(Display *dpy, Window window, pid_t *out_pid)
+{
+    if (!dpy || !out_pid) return -1;
+    Atom pid_atom = XInternAtom(dpy, "_NET_WM_PID", True);
+    if (pid_atom == None) return -1;
+    Atom type = None;
+    int format = 0;
+    unsigned long nitems = 0;
+    unsigned long bytes_after = 0;
+    unsigned char *data = NULL;
+    int status = XGetWindowProperty(dpy, window, pid_atom, 0, 1, False, XA_CARDINAL,
+                                    &type, &format, &nitems, &bytes_after, &data);
+    if (status != Success || !data) return -1;
+    pid_t pid = (pid_t)(*(unsigned long *)data);
+    XFree(data);
+    *out_pid = pid;
+    return 0;
+}
+
+static void get_window_title(Display *dpy, Window window, char *buffer, size_t len)
+{
+    if (!buffer || len == 0) return;
+    buffer[0] = '\0';
+    Atom net_name = XInternAtom(dpy, "_NET_WM_NAME", True);
+    Atom utf8 = XInternAtom(dpy, "UTF8_STRING", True);
+    if (net_name != None && utf8 != None) {
+        Atom type = None;
+        int format = 0;
+        unsigned long nitems = 0;
+        unsigned long bytes_after = 0;
+        unsigned char *data = NULL;
+        int status = XGetWindowProperty(dpy, window, net_name, 0, 128, False, utf8,
+                                        &type, &format, &nitems, &bytes_after, &data);
+        if (status == Success && data) {
+            snprintf(buffer, len, "%s", (char *)data);
+            XFree(data);
+            return;
+        }
+    }
+    char *name = NULL;
+    if (XFetchName(dpy, window, &name) > 0 && name) {
+        snprintf(buffer, len, "%s", name);
+        XFree(name);
+    }
+}
+
+static int query_client_list(Display *dpy, Window root, Window **out_list, unsigned long *out_count)
+{
+    if (!dpy || !out_list || !out_count) return -1;
+    Atom client_list = XInternAtom(dpy, "_NET_CLIENT_LIST", True);
+    if (client_list != None) {
+        Atom type = None;
+        int format = 0;
+        unsigned long nitems = 0;
+        unsigned long bytes_after = 0;
+        unsigned char *data = NULL;
+        int status = XGetWindowProperty(dpy, root, client_list, 0, 4096, False, XA_WINDOW,
+                                        &type, &format, &nitems, &bytes_after, &data);
+        if (status == Success && data) {
+            *out_list = (Window *)data;
+            *out_count = nitems;
+            return 0;
+        }
+    }
+
+    Window root_ret = 0;
+    Window parent = 0;
+    Window *children = NULL;
+    unsigned int count = 0;
+    if (!XQueryTree(dpy, root, &root_ret, &parent, &children, &count)) {
+        return -1;
+    }
+    *out_list = children;
+    *out_count = count;
+    return 0;
+}
+
+static void tasks_ctrl_refresh_applications(TasksController *ctrl)
+{
+    if (!ctrl || !ctrl->ui || !ctrl->ui->apps_list) return;
+    Display *dpy = XtDisplay(tasks_ui_get_toplevel(ctrl->ui));
+    Window root = DefaultRootWindow(dpy);
+    Window *windows = NULL;
+    unsigned long count = 0;
+    if (query_client_list(dpy, root, &windows, &count) != 0) return;
+
+    if (ctrl->app_windows) {
+        free(ctrl->app_windows);
+        ctrl->app_windows = NULL;
+    }
+    if (ctrl->app_pids) {
+        free(ctrl->app_pids);
+        ctrl->app_pids = NULL;
+    }
+    if (ctrl->app_window_counts) {
+        free(ctrl->app_window_counts);
+        ctrl->app_window_counts = NULL;
+    }
+    ctrl->app_count = 0;
+
+    XmString *items = NULL;
+    int item_count = 0;
+
+    for (unsigned long i = 0; i < count; ++i) {
+        pid_t pid = 0;
+        if (get_window_pid(dpy, windows[i], &pid) != 0) continue;
+
+        int idx = -1;
+        for (int j = 0; j < ctrl->app_count; ++j) {
+            if (ctrl->app_pids[j] == pid) {
+                idx = j;
+                break;
+            }
+        }
+        if (idx < 0) {
+            Window *new_windows = (Window *)realloc(ctrl->app_windows, sizeof(Window) * (ctrl->app_count + 1));
+            pid_t *new_pids = (pid_t *)realloc(ctrl->app_pids, sizeof(pid_t) * (ctrl->app_count + 1));
+            int *new_counts = (int *)realloc(ctrl->app_window_counts, sizeof(int) * (ctrl->app_count + 1));
+            XmString *new_items = (XmString *)realloc(items, sizeof(XmString) * (item_count + 1));
+            if (!new_windows || !new_pids || !new_counts || !new_items) {
+                free(new_windows);
+                free(new_pids);
+                free(new_counts);
+                break;
+            }
+            ctrl->app_windows = new_windows;
+            ctrl->app_pids = new_pids;
+            ctrl->app_window_counts = new_counts;
+            items = new_items;
+            char title[128];
+            get_window_title(dpy, windows[i], title, sizeof(title));
+            if (title[0] == '\0') snprintf(title, sizeof(title), "PID %d", (int)pid);
+            char label[160];
+            snprintf(label, sizeof(label), "%s (PID %d)", title, (int)pid);
+            items[item_count] = XmStringCreateLocalized(label);
+            ctrl->app_windows[item_count] = windows[i];
+            ctrl->app_pids[item_count] = pid;
+            ctrl->app_window_counts[item_count] = 1;
+            ctrl->app_count = item_count + 1;
+            item_count++;
+        } else {
+            ctrl->app_window_counts[idx] += 1;
+        }
+    }
+
+    if (windows) XFree(windows);
+    for (int i = 0; i < item_count; ++i) {
+        if (ctrl->app_window_counts[i] > 1) {
+            char label[180];
+            snprintf(label, sizeof(label), " (%d windows)", ctrl->app_window_counts[i]);
+            XmString suffix = XmStringCreateLocalized(label);
+            XmString combined = XmStringConcat(items[i], suffix);
+            XmStringFree(items[i]);
+            XmStringFree(suffix);
+            items[i] = combined;
+        }
+    }
+    tasks_ui_set_applications(ctrl->ui, items, item_count);
+    for (int i = 0; i < item_count; ++i) {
+        XmStringFree(items[i]);
+    }
+    free(items);
+}
+
+static void on_apps_close(Widget widget, XtPointer client, XtPointer call)
+{
+    (void)widget;
+    (void)call;
+    TasksController *ctrl = client;
+    if (!ctrl || !ctrl->ui || !ctrl->ui->apps_list) return;
+    int *positions = NULL;
+    int count = 0;
+    if (!XmListGetSelectedPos(ctrl->ui->apps_list, &positions, &count) || count <= 0) {
+        tasks_ui_update_status(ctrl->ui, "Select an application to close.");
+        return;
+    }
+    int index = positions[0] - 1;
+    XtFree((char *)positions);
+    if (index < 0 || index >= ctrl->app_count) return;
+    Window window = ctrl->app_windows[index];
+    Display *dpy = XtDisplay(tasks_ui_get_toplevel(ctrl->ui));
+    Atom wm_delete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
+    Atom wm_protocols = XInternAtom(dpy, "WM_PROTOCOLS", False);
+    if (wm_delete != None) {
+        XEvent event;
+        memset(&event, 0, sizeof(event));
+        event.xclient.type = ClientMessage;
+        event.xclient.window = window;
+        event.xclient.message_type = wm_protocols;
+        event.xclient.format = 32;
+        event.xclient.data.l[0] = (long)wm_delete;
+        event.xclient.data.l[1] = CurrentTime;
+        XSendEvent(dpy, window, False, NoEventMask, &event);
+        XFlush(dpy);
+        tasks_ui_update_status(ctrl->ui, "Sent close request to window.");
+    }
+}
+
+static void on_refresh_timer(XtPointer client_data, XtIntervalId *id)
+{
+    (void)id;
+    TasksController *ctrl = client_data;
+    if (!ctrl) return;
+    ctrl->refresh_timer = 0;
+    on_view_refresh(NULL, ctrl, NULL);
+    tasks_ctrl_schedule_refresh(ctrl);
+}
+
+static void tasks_ctrl_schedule_refresh(TasksController *ctrl)
+{
+    if (!ctrl) return;
+    XtAppContext app = tasks_ui_get_app_context(ctrl->ui);
+    if (!app) return;
+    if (ctrl->refresh_timer) {
+        XtRemoveTimeOut(ctrl->refresh_timer);
+        ctrl->refresh_timer = 0;
+    }
+    int interval = ctrl->refresh_interval_ms;
+    if (interval <= 0) interval = 2000;
+    ctrl->refresh_timer = XtAppAddTimeOut(app, (unsigned long)interval, on_refresh_timer, ctrl);
+}
+
 TasksController *tasks_ctrl_create(TasksUi *ui, SessionData *session_data)
 {
     if (!ui) return NULL;
@@ -187,6 +436,7 @@ TasksController *tasks_ctrl_create(TasksUi *ui, SessionData *session_data)
     if (!ctrl) return NULL;
     ctrl->ui = ui;
     ctrl->session = session_data;
+    ctrl->refresh_interval_ms = 2000;
 
     XtAddCallback(ui->menu_file_exit, XmNactivateCallback, on_file_exit, ctrl);
     XtAddCallback(ui->menu_file_connect, XmNactivateCallback, on_file_connect, ctrl);
@@ -204,10 +454,19 @@ TasksController *tasks_ctrl_create(TasksUi *ui, SessionData *session_data)
 
     XtAddCallback(ui->menu_help_help, XmNactivateCallback, on_help_view, ctrl);
     XtAddCallback(ui->menu_help_about, XmNactivateCallback, on_about, ctrl);
+    if (ui->apps_close_button) {
+        XtAddCallback(ui->apps_close_button, XmNactivateCallback, on_apps_close, ctrl);
+    }
 
     XtVaSetValues(ui->menu_view_processes, XmNuserData, (XtPointer)(intptr_t)TASKS_TAB_PROCESSES, NULL);
     XtVaSetValues(ui->menu_view_performance, XmNuserData, (XtPointer)(intptr_t)TASKS_TAB_PERFORMANCE, NULL);
     XtVaSetValues(ui->menu_view_networking, XmNuserData, (XtPointer)(intptr_t)TASKS_TAB_NETWORKING, NULL);
+    XtVaSetValues(ui->menu_options_update_1s, XmNuserData, (XtPointer)(intptr_t)1000, NULL);
+    XtVaSetValues(ui->menu_options_update_2s, XmNuserData, (XtPointer)(intptr_t)2000, NULL);
+    XtVaSetValues(ui->menu_options_update_5s, XmNuserData, (XtPointer)(intptr_t)5000, NULL);
+
+    on_view_refresh(NULL, ctrl, NULL);
+    tasks_ctrl_schedule_refresh(ctrl);
 
     return ctrl;
 }
@@ -215,8 +474,16 @@ TasksController *tasks_ctrl_create(TasksUi *ui, SessionData *session_data)
 void tasks_ctrl_destroy(TasksController *ctrl)
 {
     if (!ctrl) return;
+    if (ctrl->refresh_timer) {
+        XtRemoveTimeOut(ctrl->refresh_timer);
+        ctrl->refresh_timer = 0;
+    }
     if (ctrl->about_shell && XtIsWidget(ctrl->about_shell)) {
         XtDestroyWidget(ctrl->about_shell);
     }
+    tasks_model_free_processes(ctrl->process_entries, ctrl->process_count);
+    free(ctrl->app_windows);
+    free(ctrl->app_pids);
+    free(ctrl->app_window_counts);
     free(ctrl);
 }

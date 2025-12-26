@@ -67,6 +67,7 @@ static Widget year_spin = NULL;
 static Widget year_text = NULL;
 static int controls_visible = 0;
 static int updating_year_spin = 0;
+static double right_controls_bottom = 0.0;
 
 
 /* cairo state */
@@ -277,6 +278,19 @@ static void choose_contrast_color(double bg_r, double bg_g, double bg_b,
         return;
     }
     *out_r = in_r; *out_g = in_g; *out_b = in_b;
+}
+
+static double fit_font_size(cairo_t *cr, const char *text, double max_w, double max_h)
+{
+    cairo_text_extents_t ext = {0};
+    cairo_set_font_size(cr, 1.0);
+    cairo_text_extents(cr, text, &ext);
+    if (ext.width <= 0.0 || ext.height <= 0.0) {
+        return fmax(6.0, fmin(max_w, max_h));
+    }
+    double size = fmin(max_w / ext.width, max_h / ext.height);
+    if (size < 6.0) size = 6.0;
+    return size;
 }
 
 static void draw_centered_text(cairo_t *cr,
@@ -944,6 +958,10 @@ static void draw_month_view(cairo_t *cr,
     double padding = w * 0.05;
     if (padding < 4.0) padding = 4.0;
     double header_h = h * 0.12;
+    if (right_controls_bottom > y) {
+        double controls_h = right_controls_bottom - y;
+        if (controls_h > header_h) header_h = controls_h;
+    }
     double grid_y = y + header_h + padding;
     double grid_h = h - header_h - padding * 1.5;
     if (grid_h < 10.0) grid_h = 10.0;
@@ -958,7 +976,11 @@ static void draw_month_view(cairo_t *cr,
     int rows = 7; /* header + up to 6 weeks */
     double cell_w = (w - 2.0 * padding) / cols;
     double cell_h = grid_h / rows;
-    cairo_set_font_size(cr, cell_h * 0.4);
+    cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+    double weekday_font = fit_font_size(cr, "THU", cell_w * 0.85, cell_h * 0.6);
+    double day_font = fit_font_size(cr, "88", cell_w * 0.85, cell_h * 0.7);
+    double week_font = fit_font_size(cr, "52", cell_w * 0.75, cell_h * 0.6);
+    cairo_set_font_size(cr, weekday_font);
     cairo_set_source_rgb(cr, text_r, text_g, text_b);
     for (int c = 0; c < 7; ++c) {
         int widx = (c + first_weekday) % 7;
@@ -978,7 +1000,7 @@ static void draw_month_view(cairo_t *cr,
 
     int row = 1;
     int col = 1;
-    cairo_set_font_size(cr, cell_h * 0.5);
+    cairo_set_font_size(cr, day_font);
 
     /* previous month filler */
     int leading_slots = first_wday;
@@ -1055,7 +1077,7 @@ static void draw_month_view(cairo_t *cr,
     }
 
     /* week numbers */
-    cairo_set_font_size(cr, cell_h * 0.4);
+    cairo_set_font_size(cr, week_font);
     cairo_set_source_rgb(cr, text_r, text_g, text_b);
     int week_row = 1;
     int day_for_week = 1;
@@ -1181,6 +1203,7 @@ static void update_controls_layout(void)
             if (year_spin && XtIsManaged(year_spin)) XtUnmanageChild(year_spin);
             controls_visible = 0;
         }
+        right_controls_bottom = 0.0;
         if (top_widget && XtIsRealized(top_widget) && last_split_mode != lay.split_mode) {
             const char *title = lay.split_mode ? "Time and Calendar" : "Time";
             XtVaSetValues(top_widget, XmNtitle, title, XmNiconName, title, NULL);
@@ -1255,6 +1278,11 @@ static void update_controls_layout(void)
                   XmNwidth, (Dimension)year_w,
                   XmNheight, (Dimension)year_h,
                   NULL);
+
+    int month_bottom = header_y + row_h;
+    int year_bottom = year_y + year_h;
+    int header_bottom = month_bottom > year_bottom ? month_bottom : year_bottom;
+    right_controls_bottom = (double)header_bottom + pad * 0.5;
 
     if (XtIsRealized(month_option)) XRaiseWindow(dpy, XtWindow(month_option));
     if (XtIsRealized(year_spin)) XRaiseWindow(dpy, XtWindow(year_spin));

@@ -15,6 +15,7 @@ Widget gridlayout_add_cell(GridLayout *layout, int row, int column,
 
 void gridlayout_set_row_spacing(GridLayout *layout, int pixels);
 void gridlayout_clear_rows(GridLayout *layout, int keep_rows);
+int gridlayout_get_row_spacing(GridLayout *layout);
 
 Widget gridlayout_get_row_form(GridLayout *layout, int row);
 

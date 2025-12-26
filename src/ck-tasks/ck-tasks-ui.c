@@ -1,4 +1,5 @@
 #include "ck-tasks-ui.h"
+#include "ck-tasks-ctrl.h"
 
 #include <Xm/RowColumn.h>
 #include <Xm/Form.h>
@@ -9,6 +10,8 @@
 #include <Xm/CascadeBG.h>
 #include <Xm/Label.h>
 #include <Xm/ArrowBG.h>
+#include <Xm/ScrollBar.h>
+#include <Xm/TextF.h>
 #include <Xm/TabStack.h>
 #include <X11/Xlib.h>
 #include <X11/Intrinsic.h>
@@ -36,6 +39,10 @@ static const char *process_headers[] = {
 };
 
 #define PROCESS_COLUMN_COUNT (sizeof(process_headers) / sizeof(process_headers[0]))
+#define PROCESS_VIRTUAL_ROW_COUNT 32
+#define PROCESS_VIRTUAL_ROW_HEIGHT_DEFAULT 24
+#define PROCESS_VIRTUAL_ROW_COUNT 32
+
 
 static XmString make_string(const char *text)
 {
@@ -70,6 +77,11 @@ static Widget g_process_header_indicators[PROCESS_COLUMN_COUNT];
 static GridLayout *g_process_grid = NULL;
 static int *g_process_row_order = NULL;
 static int g_process_row_count = 0;
+static Widget g_process_scroll_window = NULL;
+static Widget g_process_header_form = NULL;
+static int g_process_row_height = PROCESS_VIRTUAL_ROW_HEIGHT_DEFAULT;
+static int g_process_row_start = 0;
+static int g_process_row_page_size = PROCESS_VIRTUAL_ROW_COUNT;
 
 typedef struct {
     Widget row_form;
@@ -93,21 +105,49 @@ static Boolean process_suspend_updates(void);
 static void process_resume_updates(Boolean suspended);
 static void on_process_header_activate(Widget widget, XtPointer client, XtPointer call);
 static Widget tasks_ui_get_tab_widget(TasksUi *ui, TasksTab tab);
+static void process_update_viewport_metrics(void);
+static void on_process_scroll_window_resize(Widget widget, XtPointer client, XEvent *event, Boolean *continue_to_dispatch);
 static const TasksProcessEntry *g_process_entries = NULL;
+
+static void on_apps_row_press(Widget widget, XtPointer client, XEvent *event, Boolean *continue_to_dispatch);
+
+static const TableColumnDef apps_columns[] = {
+    {"appTitle", "Application", TABLE_ALIGN_LEFT, False, True, 0},
+    {"appPid", "PID", TABLE_ALIGN_RIGHT, True, True, 0},
+    {"appWindows", "Windows", TABLE_ALIGN_RIGHT, True, True, 0},
+    {"appCommand", "Command", TABLE_ALIGN_LEFT, False, True, 0},
+    {"appClass", "Class", TABLE_ALIGN_LEFT, False, True, 0},
+};
+
+#define APPS_COLUMN_COUNT (sizeof(apps_columns) / sizeof(apps_columns[0]))
 
 static void process_refresh_rows(void)
 {
     if (!g_process_grid) return;
+    process_update_viewport_metrics();
     Boolean suspended = process_suspend_updates();
-    int visible_rows = g_process_row_count;
-    ensure_process_rows(g_process_grid, g_process_row_count);
+    int total_rows = g_process_row_count;
+    int page_size = g_process_row_page_size;
+    if (page_size <= 0) page_size = PROCESS_VIRTUAL_ROW_COUNT;
+    int max_start = total_rows > page_size ? total_rows - page_size : 0;
+    if (g_process_row_start < 0) g_process_row_start = 0;
+    if (g_process_row_start > max_start) g_process_row_start = max_start;
+    int visible_rows = page_size;
+    ensure_process_rows(g_process_grid, visible_rows);
     if (g_process_rows_alloc < visible_rows) {
         visible_rows = g_process_rows_alloc;
+    }
+    int available_rows = total_rows - g_process_row_start;
+    if (available_rows < 0) available_rows = 0;
+    if (visible_rows > available_rows) {
+        visible_rows = available_rows;
     }
     for (int i = 0; i < visible_rows; ++i) {
         ProcessRow *row = &g_process_rows[i];
         if (!row || !row->row_form) continue;
-        int entry_index = g_process_row_order ? g_process_row_order[i] : i;
+        int dataset_index = g_process_row_start + i;
+        if (dataset_index >= total_rows) break;
+        int entry_index = g_process_row_order ? g_process_row_order[dataset_index] : dataset_index;
         const TasksProcessEntry *entry = &g_process_entries[entry_index];
         process_update_row(row, entry);
         if (!XtIsManaged(row->row_form)) {
@@ -215,6 +255,54 @@ static void process_resume_updates(Boolean suspended)
     if (!grid_widget) return;
     XtManageChild(grid_widget);
     XmUpdateDisplay(grid_widget);
+}
+
+static void process_update_viewport_metrics(void)
+{
+    if (!g_process_scroll_window) return;
+    Dimension scroll_height = 0;
+    XtVaGetValues(g_process_scroll_window, XmNheight, &scroll_height, NULL);
+    int header_height = 0;
+    if (g_process_header_form) {
+        Dimension header_value = 0;
+        XtVaGetValues(g_process_header_form, XmNheight, &header_value, NULL);
+        header_height = (int)header_value;
+    }
+    if (g_process_rows_alloc > 0 && g_process_rows[0].row_form) {
+        Dimension row_height = 0;
+        XtVaGetValues(g_process_rows[0].row_form, XmNheight, &row_height, NULL);
+        if (row_height > 0) {
+            g_process_row_height = (int)row_height;
+        }
+    }
+    int available_height = (int)scroll_height - header_height;
+    if (available_height <= 0) {
+        available_height = g_process_row_height;
+    }
+    int row_height = g_process_row_height > 0 ? g_process_row_height : PROCESS_VIRTUAL_ROW_HEIGHT_DEFAULT;
+    int row_spacing = 0;
+    if (g_process_grid) {
+        row_spacing = gridlayout_get_row_spacing(g_process_grid);
+    }
+    int effective_row_height = row_height + row_spacing;
+    if (effective_row_height <= 0) {
+        effective_row_height = row_height;
+    }
+    int rows = available_height / effective_row_height;
+    if (rows <= 0) rows = 1;
+    g_process_row_page_size = rows;
+}
+
+static void on_process_scroll_window_resize(Widget widget, XtPointer client, XEvent *event, Boolean *continue_to_dispatch)
+{
+    (void)widget;
+    (void)continue_to_dispatch;
+    if (!event || event->type != ConfigureNotify) return;
+    process_update_viewport_metrics();
+    TasksUi *ui = (TasksUi *)client;
+    if (ui && ui->controller) {
+        tasks_ctrl_handle_viewport_change(ui->controller);
+    }
 }
 
 static void process_refresh_header_labels(void)
@@ -464,16 +552,12 @@ static Widget create_meter_column(Widget parent, const char *label_text,
 
 static void add_performance_tab_content(TasksUi *ui, Widget page)
 {
-    Widget heading = XtNameToWidget(page, "tabHeading");
-    Widget anchor = heading ? heading : page;
-
     Widget mode_box = XmCreateRowColumn(page, "cpuModeBox", NULL, 0);
     XtVaSetValues(mode_box,
                   XmNorientation, XmHORIZONTAL,
                   XmNpacking, XmPACK_COLUMN,
                   XmNspacing, 12,
-                  XmNtopAttachment, XmATTACH_WIDGET,
-                  XmNtopWidget, anchor,
+                  XmNtopAttachment, XmATTACH_FORM,
                   XmNtopOffset, 12,
                   XmNleftAttachment, XmATTACH_FORM,
                   XmNleftOffset, 12,
@@ -569,15 +653,11 @@ static const char *network_samples[] = {
 
 static void add_networking_tab_content(TasksUi *ui, Widget page)
 {
-    Widget heading = XtNameToWidget(page, "tabHeading");
-    Widget anchor = heading ? heading : page;
-
     Widget summary_box = XmCreateRowColumn(page, "networkSummary", NULL, 0);
     XtVaSetValues(summary_box,
                   XmNorientation, XmHORIZONTAL,
                   XmNspacing, 14,
-                  XmNtopAttachment, XmATTACH_WIDGET,
-                  XmNtopWidget, anchor,
+                  XmNtopAttachment, XmATTACH_FORM,
                   XmNtopOffset, 12,
                   XmNleftAttachment, XmATTACH_FORM,
                   XmNleftOffset, 12,
@@ -686,39 +766,6 @@ static Widget create_page(TasksUi *ui, const char *name, TasksTab tab_number,
                   NULL);
     XmStringFree(tab_label);
 
-    XmString heading = make_string(title);
-    Widget heading_label = XtVaCreateManagedWidget(
-        "tabHeading",
-        xmLabelGadgetClass, page,
-        XmNlabelString, heading,
-        XmNalignment, XmALIGNMENT_BEGINNING,
-        XmNleftAttachment, XmATTACH_FORM,
-        XmNrightAttachment, XmATTACH_FORM,
-        XmNtopAttachment, XmATTACH_FORM,
-        XmNtopOffset, 8,
-        XmNleftOffset, 8,
-        XmNrightOffset, 8,
-        NULL);
-    XmStringFree(heading);
-
-    if (subtitle && subtitle[0]) {
-        XmString sub = make_string(subtitle);
-        XtVaCreateManagedWidget(
-            "tabSubtext",
-            xmLabelGadgetClass, page,
-            XmNlabelString, sub,
-            XmNalignment, XmALIGNMENT_BEGINNING,
-            XmNleftAttachment, XmATTACH_FORM,
-            XmNrightAttachment, XmATTACH_FORM,
-            XmNtopAttachment, XmATTACH_WIDGET,
-            XmNtopWidget, heading_label,
-            XmNtopOffset, 4,
-            XmNleftOffset, 8,
-            XmNrightOffset, 8,
-            NULL);
-        XmStringFree(sub);
-    }
-
     XtManageChild(page);
     return page;
 }
@@ -733,8 +780,7 @@ static Widget create_process_tab(TasksUi *ui)
         xmToggleButtonGadgetClass, page,
         XmNlabelString, toggle_label,
         XmNalignment, XmALIGNMENT_BEGINNING,
-        XmNtopAttachment, XmATTACH_WIDGET,
-        XmNtopWidget, XtNameToWidget(page, "tabHeading"),
+        XmNtopAttachment, XmATTACH_FORM,
         XmNtopOffset, 8,
         XmNleftAttachment, XmATTACH_FORM,
         XmNrightAttachment, XmATTACH_FORM,
@@ -744,23 +790,89 @@ static Widget create_process_tab(TasksUi *ui)
     XmStringFree(toggle_label);
     ui->process_filter_toggle = toggle;
 
-    Widget scroll = XmCreateScrolledWindow(page, "processListScroll", NULL, 0);
-    XtVaSetValues(scroll,
+    Widget filter_form = XmCreateForm(page, "processFilterForm", NULL, 0);
+    XtVaSetValues(filter_form,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNleftOffset, 8,
+                  XmNrightOffset, 8,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  XmNbottomOffset, 8,
+                  XmNheight, 48,
+                  NULL);
+    XtManageChild(filter_form);
+
+    XmString filter_label_text = make_string("Filter:");
+    Widget filter_label = XtVaCreateManagedWidget(
+        "processFilterLabel",
+        xmLabelGadgetClass, filter_form,
+        XmNlabelString, filter_label_text,
+        XmNalignment, XmALIGNMENT_BEGINNING,
+        XmNtopAttachment, XmATTACH_FORM,
+        XmNleftAttachment, XmATTACH_FORM,
+        XmNbottomAttachment, XmATTACH_FORM,
+        XmNbottomOffset, 4,
+        NULL);
+    XmStringFree(filter_label_text);
+
+    Widget filter_field = XmCreateTextField(filter_form, "processFilterField", NULL, 0);
+    XtVaSetValues(filter_field,
+                  XmNcolumns, 32,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  XmNleftAttachment, XmATTACH_WIDGET,
+                  XmNleftWidget, filter_label,
+                  XmNleftOffset, 10,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNrightOffset, 2,
+                  XmNbottomOffset, 4,
+                  XmNmarginHeight, 2,
+                  NULL);
+    XtManageChild(filter_field);
+    ui->process_search_field = filter_field;
+
+    Widget process_area = XmCreateForm(page, "processListArea", NULL, 0);
+    XtVaSetValues(process_area,
                   XmNtopAttachment, XmATTACH_WIDGET,
                   XmNtopWidget, toggle,
-                  XmNtopOffset, 12,
+                  XmNtopOffset, 8,
+                  XmNbottomAttachment, XmATTACH_WIDGET,
+                  XmNbottomWidget, filter_form,
+                  XmNbottomOffset, 8,
                   XmNleftAttachment, XmATTACH_FORM,
                   XmNleftOffset, 8,
                   XmNrightAttachment, XmATTACH_FORM,
                   XmNrightOffset, 8,
-                  XmNbottomAttachment, XmATTACH_FORM,
-                  XmNbottomOffset, 8,
-                  XmNscrollingPolicy, XmAUTOMATIC,
-                  XmNresizePolicy, XmRESIZE_ANY,
-                  XmNvisualPolicy, XmVARIABLE,
-                  XmNscrollBarDisplayPolicy, XmAS_NEEDED,
                   NULL);
+    XtManageChild(process_area);
+
+    Widget scrollbar = XmCreateScrollBar(process_area, "processScrollBar", NULL, 0);
+    XtVaSetValues(scrollbar,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  XmNwidth, 20,
+                  NULL);
+    XtManageChild(scrollbar);
+    ui->process_scrollbar = scrollbar;
+
+    Arg scroll_args[16];
+    int sn = 0;
+    XtSetArg(scroll_args[sn], XmNtopAttachment, XmATTACH_FORM); sn++;
+    XtSetArg(scroll_args[sn], XmNtopOffset, 0); sn++;
+    XtSetArg(scroll_args[sn], XmNleftAttachment, XmATTACH_FORM); sn++;
+    XtSetArg(scroll_args[sn], XmNleftOffset, 0); sn++;
+    XtSetArg(scroll_args[sn], XmNrightAttachment, XmATTACH_WIDGET); sn++;
+    XtSetArg(scroll_args[sn], XmNrightWidget, scrollbar); sn++;
+    XtSetArg(scroll_args[sn], XmNrightOffset, 4); sn++;
+    XtSetArg(scroll_args[sn], XmNbottomAttachment, XmATTACH_FORM); sn++;
+    XtSetArg(scroll_args[sn], XmNscrollingPolicy, XmAPPLICATION_DEFINED); sn++;
+    XtSetArg(scroll_args[sn], XmNvisualPolicy, XmVARIABLE); sn++;
+    XtSetArg(scroll_args[sn], XmNshadowThickness, 0); sn++;
+    Widget scroll = XmCreateScrolledWindow(process_area, "processListScroll", scroll_args, sn);
     XtManageChild(scroll);
+    g_process_scroll_window = scroll;
+    XtAddEventHandler(scroll, StructureNotifyMask, False, on_process_scroll_window_resize, (XtPointer)ui);
 
     GridLayout *grid = gridlayout_create(scroll, "processGrid", PROCESS_COLUMN_COUNT);
     if (grid) {
@@ -770,6 +882,7 @@ static Widget create_process_tab(TasksUi *ui)
 
         int header_row = gridlayout_add_row(grid);
         Widget header_form = gridlayout_get_row_form(grid, header_row);
+        g_process_header_form = header_form;
         for (int col = 0; col < PROCESS_COLUMN_COUNT; ++col) {
             Widget header_frame = XmCreateFrame(header_form, "headerFrame", NULL, 0);
             XtVaSetValues(header_frame,
@@ -866,16 +979,12 @@ static Widget create_simple_tab(TasksUi *ui, TasksTab tab, const char *name,
 {
     Widget page = create_page(ui, name, tab, title, description);
     XmString placeholder = make_string("Content placeholder for this tab.");
-    Widget anchor = XtNameToWidget(page, "tabSubtext");
-    if (!anchor) anchor = XtNameToWidget(page, "tabHeading");
-    if (!anchor) anchor = page;
     XtVaCreateManagedWidget(
         "tabPlaceholder",
         xmLabelGadgetClass, page,
         XmNlabelString, placeholder,
         XmNalignment, XmALIGNMENT_CENTER,
-        XmNtopAttachment, XmATTACH_WIDGET,
-        XmNtopWidget, anchor,
+        XmNtopAttachment, XmATTACH_FORM,
         XmNtopOffset, 14,
         XmNleftAttachment, XmATTACH_FORM,
         XmNrightAttachment, XmATTACH_FORM,
@@ -908,51 +1017,103 @@ static Widget create_applications_tab(TasksUi *ui)
 {
     Widget page = create_page(ui, "applicationsPage", TASKS_TAB_APPLICATIONS,
                               "Applications", "Windows grouped by process.");
-    Widget heading = XtNameToWidget(page, "tabSubtext");
-    Widget anchor = heading ? heading : XtNameToWidget(page, "tabHeading");
-    if (!anchor) anchor = page;
 
-    Arg scroll_args[10];
-    int sn = 0;
-    XtSetArg(scroll_args[sn], XmNtopAttachment, XmATTACH_WIDGET); sn++;
-    XtSetArg(scroll_args[sn], XmNtopWidget, anchor); sn++;
-    XtSetArg(scroll_args[sn], XmNtopOffset, 10); sn++;
-    XtSetArg(scroll_args[sn], XmNbottomAttachment, XmATTACH_FORM); sn++;
-    XtSetArg(scroll_args[sn], XmNbottomOffset, 48); sn++;
-    XtSetArg(scroll_args[sn], XmNleftAttachment, XmATTACH_FORM); sn++;
-    XtSetArg(scroll_args[sn], XmNrightAttachment, XmATTACH_FORM); sn++;
-    XtSetArg(scroll_args[sn], XmNleftOffset, 8); sn++;
-    XtSetArg(scroll_args[sn], XmNrightOffset, 8); sn++;
-    XtSetArg(scroll_args[sn], XmNscrollingPolicy, XmAUTOMATIC); sn++;
-    Widget scroll = XmCreateScrolledWindow(page, "appsListScroll", scroll_args, sn);
-    XtManageChild(scroll);
-
-    Widget list = XmCreateScrolledList(scroll, "appsList", NULL, 0);
-    XtVaSetValues(list,
-                  XmNvisibleItemCount, 8,
-                  XmNselectionPolicy, XmSINGLE_SELECT,
-                  XmNscrollBarDisplayPolicy, XmAS_NEEDED,
+    Widget controls = XmCreateForm(page, "appsControlsForm", NULL, 0);
+    XtVaSetValues(controls,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  XmNleftOffset, 8,
+                  XmNrightOffset, 8,
+                  XmNbottomOffset, 8,
+                  XmNheight, 48,
                   NULL);
-    XtManageChild(list);
-    ui->apps_list = list;
+    XtManageChild(controls);
+
+    XmString filter_label_text = make_string("Filter:");
+    Widget filter_label = XtVaCreateManagedWidget(
+        "appsFilterLabel",
+        xmLabelGadgetClass, controls,
+        XmNlabelString, filter_label_text,
+        XmNalignment, XmALIGNMENT_BEGINNING,
+        XmNtopAttachment, XmATTACH_FORM,
+        XmNleftAttachment, XmATTACH_FORM,
+        XmNbottomAttachment, XmATTACH_FORM,
+        XmNbottomOffset, 4,
+        NULL);
+    XmStringFree(filter_label_text);
+
+    Widget filter_field = XmCreateTextField(controls, "appsFilterField", NULL, 0);
+    XtVaSetValues(filter_field,
+                  XmNcolumns, 28,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  XmNleftAttachment, XmATTACH_WIDGET,
+                  XmNleftWidget, filter_label,
+                  XmNleftOffset, 10,
+                  XmNrightAttachment, XmATTACH_POSITION,
+                  XmNrightPosition, 70,
+                  XmNbottomOffset, 4,
+                  XmNmarginHeight, 2,
+                  NULL);
+    XtManageChild(filter_field);
+    ui->apps_search_field = filter_field;
 
     XmString close_label = make_string("Close Window");
     Widget close_button = XtVaCreateManagedWidget(
         "appsCloseButton",
-        xmPushButtonGadgetClass, page,
+        xmPushButtonGadgetClass, controls,
         XmNlabelString, close_label,
-        XmNtopAttachment, XmATTACH_WIDGET,
-        XmNtopWidget, scroll,
-        XmNtopOffset, 8,
-        XmNrightAttachment, XmATTACH_FORM,
-        XmNrightOffset, 8,
+        XmNtopAttachment, XmATTACH_FORM,
         XmNbottomAttachment, XmATTACH_FORM,
-        XmNbottomOffset, 8,
+        XmNrightAttachment, XmATTACH_FORM,
+        XmNrightOffset, 0,
+        XmNleftAttachment, XmATTACH_WIDGET,
+        XmNleftWidget, filter_field,
+        XmNleftOffset, 10,
+        XmNbottomOffset, 4,
         NULL);
     XmStringFree(close_label);
     ui->apps_close_button = close_button;
 
+    TableWidget *table = table_widget_create(page, "appsTable", apps_columns, (int)APPS_COLUMN_COUNT);
+    if (table) {
+        Widget table_widget = table_widget_get_widget(table);
+        XtVaSetValues(table_widget,
+                      XmNtopAttachment, XmATTACH_FORM,
+                      XmNtopOffset, 10,
+                      XmNleftAttachment, XmATTACH_FORM,
+                      XmNrightAttachment, XmATTACH_FORM,
+                      XmNleftOffset, 8,
+                      XmNrightOffset, 8,
+                      XmNbottomAttachment, XmATTACH_WIDGET,
+                      XmNbottomWidget, controls,
+                      XmNbottomOffset, 8,
+                      NULL);
+        table_widget_set_grid(table, True);
+        table_widget_set_alternate_row_colors(table, True);
+        ui->apps_table = table;
+    }
+
     return page;
+}
+
+static void on_apps_row_press(Widget widget, XtPointer client, XEvent *event, Boolean *continue_to_dispatch)
+{
+    (void)continue_to_dispatch;
+    if (!event || event->type != ButtonPress) return;
+    TasksUi *ui = (TasksUi *)client;
+    if (!ui || !ui->controller || !widget) return;
+    XtPointer data = NULL;
+    XtVaGetValues(widget, XmNuserData, &data, NULL);
+    int index = data ? (int)(intptr_t)data : -1;
+    if (index < 0) return;
+    tasks_ctrl_set_selected_application(ui->controller, index);
+    if (ui->apps_selected_row && ui->apps_selected_row != widget) {
+        XtVaSetValues(ui->apps_selected_row, XmNshadowThickness, 1, XmNshadowType, XmSHADOW_OUT, NULL);
+    }
+    ui->apps_selected_row = widget;
+    XtVaSetValues(widget, XmNshadowThickness, 2, XmNshadowType, XmSHADOW_ETCHED_IN, NULL);
 }
 
 TasksUi *tasks_ui_create(XtAppContext app, Widget toplevel)
@@ -1047,6 +1208,10 @@ void tasks_ui_destroy(TasksUi *ui)
 {
     if (ui && ui->process_grid) {
         gridlayout_destroy(ui->process_grid);
+    }
+    if (ui && ui->apps_table) {
+        table_widget_destroy(ui->apps_table);
+        ui->apps_table = NULL;
     }
     release_process_rows();
     if (g_process_row_order) {
@@ -1155,12 +1320,55 @@ void tasks_ui_set_processes(TasksUi *ui, const TasksProcessEntry *entries, int c
     process_apply_sort();
 }
 
-void tasks_ui_set_applications(TasksUi *ui, const XmString *items, int count)
+void tasks_ui_set_process_row_window(int start)
 {
-    if (!ui || !ui->apps_list) return;
-    XmListDeleteAllItems(ui->apps_list);
-    if (!items || count <= 0) return;
-    XmListAddItems(ui->apps_list, (XmString *)items, (Cardinal)count, 0);
+    int total = g_process_row_count;
+    int page_size = g_process_row_page_size;
+    if (page_size <= 0) page_size = PROCESS_VIRTUAL_ROW_COUNT;
+    int max_start = total > page_size ? total - page_size : 0;
+    if (max_start < 0) max_start = 0;
+    if (start < 0) start = 0;
+    if (start > max_start) start = max_start;
+    g_process_row_start = start;
+    process_refresh_rows();
+}
+
+int tasks_ui_get_process_row_page_size(void)
+{
+    return g_process_row_page_size;
+}
+
+void tasks_ui_set_applications_table(TasksUi *ui, const TasksApplicationEntry *entries, int count)
+{
+    if (!ui || !ui->apps_table) return;
+    table_widget_clear(ui->apps_table);
+    ui->apps_selected_row = NULL;
+    if (!entries || count <= 0) return;
+
+    for (int i = 0; i < count; ++i) {
+        const TasksApplicationEntry *entry = &entries[i];
+        char pid_buffer[16] = {0};
+        char windows_buffer[16] = {0};
+        if (entry->pid_known) {
+            snprintf(pid_buffer, sizeof(pid_buffer), "%d", (int)entry->pid);
+        } else {
+            pid_buffer[0] = '\0';
+        }
+        snprintf(windows_buffer, sizeof(windows_buffer), "%d", entry->window_count);
+        const char *values[] = {
+            entry->title,
+            pid_buffer,
+            windows_buffer,
+            entry->command,
+            entry->wm_class,
+        };
+        TableRow *row = table_widget_add_row(ui->apps_table, values);
+        Widget row_widget = table_row_get_widget(row);
+        if (row_widget) {
+            XtVaSetValues(row_widget, XmNuserData, (XtPointer)(intptr_t)i, NULL);
+            XtAddEventHandler(row_widget, ButtonPressMask, False, on_apps_row_press, (XtPointer)ui);
+        }
+    }
 }
 
 void tasks_ui_update_system_stats(TasksUi *ui, const TasksSystemStats *stats)

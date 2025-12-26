@@ -2,6 +2,7 @@
 #define CK_TASKS_MODEL_H
 
 #include <sys/types.h>
+#include <limits.h>
 
 typedef struct {
     char name[64];
@@ -10,6 +11,7 @@ typedef struct {
     double memory_mb;
     int threads;
     char user[32];
+    char command[PATH_MAX];
 } TasksProcessEntry;
 
 typedef struct {
@@ -23,7 +25,7 @@ typedef struct {
 void tasks_model_initialize(void);
 void tasks_model_shutdown(void);
 
-int tasks_model_list_processes(TasksProcessEntry **out_entries, int *out_count, int max_entries);
+int tasks_model_list_processes(TasksProcessEntry **out_entries, int *out_count);
 void tasks_model_free_processes(TasksProcessEntry *entries, int count);
 int tasks_model_get_system_stats(TasksSystemStats *out_stats);
 

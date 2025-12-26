@@ -36,6 +36,7 @@ TableRow *table_widget_add_row(TableWidget *table, const char *const values[]);
 void table_widget_update_row(TableRow *row, const char *const values[]);
 void table_widget_remove_row(TableWidget *table, TableRow *row);
 void table_widget_clear(TableWidget *table);
+Widget table_row_get_widget(TableRow *row);
 
 void table_widget_set_grid(TableWidget *table, Boolean enabled);
 void table_widget_set_header_font(TableWidget *table, XmFontList font);

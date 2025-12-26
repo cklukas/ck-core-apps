@@ -509,6 +509,11 @@ void table_widget_clear(TableWidget *table)
     sort_rows(table);
 }
 
+Widget table_row_get_widget(TableRow *row)
+{
+    return row ? row->row_form : NULL;
+}
+
 void table_widget_set_grid(TableWidget *table, Boolean enabled)
 {
     if (!table) return;

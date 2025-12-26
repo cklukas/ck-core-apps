@@ -2,9 +2,23 @@
 #define CK_TASKS_UI_H
 
 #include <Xm/Xm.h>
+#include <X11/Xlib.h>
 
 #include "../shared/gridlayout/gridlayout.h"
+#include "../shared/table/table_widget.h"
 #include "ck-tasks-model.h"
+
+typedef struct TasksController TasksController;
+
+typedef struct TasksApplicationEntry {
+    Window window;
+    pid_t pid;
+    int pid_known;
+    int window_count;
+    char title[128];
+    char command[256];
+    char wm_class[128];
+} TasksApplicationEntry;
 
 typedef enum {
     TASKS_TAB_PROCESSES = 1,
@@ -27,8 +41,12 @@ typedef struct {
     Widget tab_services;
     Widget status_label;
     Widget process_filter_toggle;
+    Widget process_search_field;
+    Widget process_scrollbar;
     GridLayout *process_grid;
-    Widget apps_list;
+    TableWidget *apps_table;
+    Widget apps_search_field;
+    Widget apps_selected_row;
     Widget apps_close_button;
     Widget perf_cpu_meter;
     Widget perf_mem_meter;
@@ -54,6 +72,7 @@ typedef struct {
     Widget menu_options_filter_by_user;
     Widget menu_help_help;
     Widget menu_help_about;
+    TasksController *controller;
 } TasksUi;
 
 TasksUi *tasks_ui_create(XtAppContext app, Widget toplevel);
@@ -65,7 +84,9 @@ void tasks_ui_set_current_tab(TasksUi *ui, TasksTab tab);
 void tasks_ui_update_status(TasksUi *ui, const char *text);
 void tasks_ui_center_on_screen(TasksUi *ui);
 void tasks_ui_set_processes(TasksUi *ui, const TasksProcessEntry *entries, int count);
-void tasks_ui_set_applications(TasksUi *ui, const XmString *items, int count);
+void tasks_ui_set_process_row_window(int start);
+int tasks_ui_get_process_row_page_size(void);
+void tasks_ui_set_applications_table(TasksUi *ui, const TasksApplicationEntry *entries, int count);
 void tasks_ui_update_system_stats(TasksUi *ui, const TasksSystemStats *stats);
 
 #endif /* CK_TASKS_UI_H */

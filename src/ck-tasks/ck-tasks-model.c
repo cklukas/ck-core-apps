@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <limits.h>
 #include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -81,6 +82,28 @@ static int read_proc_status_uid(pid_t pid, uid_t *out_uid)
     return 0;
 }
 
+static void read_proc_cmdline(pid_t pid, char *buffer, size_t len)
+{
+    if (!buffer || len == 0) return;
+    buffer[0] = '\0';
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+    FILE *fp = fopen(path, "r");
+    if (!fp) return;
+    size_t read = fread(buffer, 1, len - 1, fp);
+    fclose(fp);
+    if (read == 0) {
+        buffer[0] = '\0';
+        return;
+    }
+    for (size_t i = 0; i < read; ++i) {
+        if (buffer[i] == '\0') {
+            buffer[i] = ' ';
+        }
+    }
+    buffer[read] = '\0';
+}
+
 static int read_proc_rss_mb(pid_t pid, double *out_mb)
 {
     char path[64];
@@ -146,22 +169,18 @@ void tasks_model_shutdown(void)
 {
 }
 
-int tasks_model_list_processes(TasksProcessEntry **out_entries, int *out_count, int max_entries)
+int tasks_model_list_processes(TasksProcessEntry **out_entries, int *out_count)
 {
-    if (!out_entries || !out_count || max_entries <= 0) return -1;
+    if (!out_entries || !out_count) return -1;
     DIR *dir = opendir("/proc");
     if (!dir) return -1;
 
-    TasksProcessEntry *entries = (TasksProcessEntry *)calloc(max_entries, sizeof(TasksProcessEntry));
-    if (!entries) {
-        closedir(dir);
-        return -1;
-    }
-
-    double uptime = read_uptime_seconds();
+    TasksProcessEntry *entries = NULL;
+    int capacity = 0;
     int count = 0;
+    double uptime = read_uptime_seconds();
     struct dirent *ent = NULL;
-    while ((ent = readdir(dir)) != NULL && count < max_entries) {
+    while ((ent = readdir(dir)) != NULL) {
         if (!is_pid_dir(ent->d_name)) continue;
         pid_t pid = (pid_t)atoi(ent->d_name);
         TasksProcessEntry entry;
@@ -186,10 +205,25 @@ int tasks_model_list_processes(TasksProcessEntry **out_entries, int *out_count, 
         if (entry.user[0] == '\0') {
             snprintf(entry.user, sizeof(entry.user), "unknown");
         }
+        read_proc_cmdline(pid, entry.command, sizeof(entry.command));
+        if (entry.command[0] == '\0') {
+            snprintf(entry.command, sizeof(entry.command), "%s", entry.name);
+        }
         read_proc_rss_mb(pid, &entry.memory_mb);
         if (uptime > 0.0) {
             double total_time = (double)(ut + st) / (double)g_clock_ticks;
             entry.cpu_percent = (total_time / uptime) * 100.0;
+        }
+        if (count >= capacity) {
+            int new_capacity = capacity ? capacity * 2 : 256;
+            TasksProcessEntry *resized = (TasksProcessEntry *)realloc(entries, sizeof(TasksProcessEntry) * new_capacity);
+            if (!resized) {
+                free(entries);
+                closedir(dir);
+                return -1;
+            }
+            entries = resized;
+            capacity = new_capacity;
         }
         entries[count++] = entry;
     }

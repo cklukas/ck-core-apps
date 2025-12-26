@@ -133,6 +133,11 @@ void gridlayout_set_row_spacing(GridLayout *layout, int pixels)
     layout->row_spacing = pixels;
 }
 
+int gridlayout_get_row_spacing(GridLayout *layout)
+{
+    return layout ? layout->row_spacing : 0;
+}
+
 Widget gridlayout_get_row_form(GridLayout *layout, int row)
 {
     if (!layout || row < 0 || row >= layout->row_count) return NULL;

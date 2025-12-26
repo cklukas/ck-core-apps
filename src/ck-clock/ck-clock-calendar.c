@@ -109,6 +109,81 @@ static void ensure_calendar_cairo(CkClockApp *app)
     cairo_set_line_join(app->cal_cr, CAIRO_LINE_JOIN_ROUND);
 }
 
+static bool cairo_text_fits_box(cairo_t *cr,
+                                const char *text,
+                                double font_size,
+                                double max_w,
+                                double max_h)
+{
+    if (!cr || !text || max_w <= 0.0 || max_h <= 0.0) return false;
+    cairo_text_extents_t ext = {0};
+    cairo_set_font_size(cr, font_size);
+    cairo_text_extents(cr, text, &ext);
+    if (ext.width <= 0.0 || ext.height <= 0.0) return false;
+    return ext.width <= max_w && ext.height <= max_h;
+}
+
+static double cairo_max_font_size_for_box(cairo_t *cr,
+                                         const char *sample,
+                                         double max_w,
+                                         double max_h)
+{
+    if (!cr || !sample || max_w <= 0.0 || max_h <= 0.0) return 1.0;
+
+    double lo = 0.5;
+    double hi = 1.0;
+    if (!cairo_text_fits_box(cr, sample, hi, max_w, max_h)) {
+        while (hi > 0.01 && !cairo_text_fits_box(cr, sample, hi, max_w, max_h)) {
+            hi *= 0.5;
+        }
+        return hi;
+    }
+
+    while (hi < 512.0 && cairo_text_fits_box(cr, sample, hi, max_w, max_h)) {
+        lo = hi;
+        hi *= 2.0;
+    }
+
+    for (int i = 0; i < 24; ++i) {
+        double mid = (lo + hi) * 0.5;
+        if (cairo_text_fits_box(cr, sample, mid, max_w, max_h)) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+static double cairo_scale_down_to_fit_labels(cairo_t *cr,
+                                             double font_size,
+                                             const char *const *labels,
+                                             int label_count,
+                                             double max_w,
+                                             double max_h)
+{
+    if (!cr || !labels || label_count <= 0) return font_size;
+    if (font_size <= 0.0) return font_size;
+    if (max_w <= 0.0 || max_h <= 0.0) return font_size;
+
+    double scale = 1.0;
+    for (int i = 0; i < label_count; ++i) {
+        const char *s = labels[i];
+        if (!s || !s[0]) continue;
+        cairo_text_extents_t ext = {0};
+        cairo_set_font_size(cr, font_size);
+        cairo_text_extents(cr, s, &ext);
+        if (ext.width <= 0.0 || ext.height <= 0.0) continue;
+        double w_scale = max_w / ext.width;
+        double h_scale = max_h / ext.height;
+        double local = w_scale < h_scale ? w_scale : h_scale;
+        if (local < scale) scale = local;
+    }
+    if (scale > 1.0) scale = 1.0;
+    if (scale < 0.01) scale = 0.01;
+    return font_size * scale;
+}
+
 static void draw_month_view(cairo_t *cr,
                             CkClockApp *app,
                             double x,
@@ -157,9 +232,23 @@ static void draw_month_view(cairo_t *cr,
     double cell_w = (w - 2.0 * padding) / cols;
     double cell_h = grid_h / rows;
     cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
-    double weekday_font = ck_clock_fit_font_size(cr, "THU", cell_w * 0.85, cell_h * 0.6);
-    double day_font = ck_clock_fit_font_size(cr, "88", cell_w * 0.85, cell_h * 0.7);
-    double week_font = ck_clock_fit_font_size(cr, "52", cell_w * 0.75, cell_h * 0.6);
+    double day_font = cairo_max_font_size_for_box(cr, ".88.", cell_w * 0.88, cell_h * 0.72);
+    if (day_font < 6.0) day_font = 6.0;
+    double weekday_font = day_font * 0.68;
+    double week_font = day_font * 0.62;
+    weekday_font = cairo_scale_down_to_fit_labels(cr,
+                                                  weekday_font,
+                                                  (const char *const *)ck_clock_weekday_labels,
+                                                  7,
+                                                  cell_w * 0.85,
+                                                  cell_h * 0.55);
+    static const char *const WEEK_SAMPLES[] = {"88", "00", "53"};
+    week_font = cairo_scale_down_to_fit_labels(cr,
+                                               week_font,
+                                               WEEK_SAMPLES,
+                                               3,
+                                               cell_w * 0.75,
+                                               cell_h * 0.55);
     cairo_set_font_size(cr, weekday_font);
     cairo_set_source_rgb(cr, text_r, text_g, text_b);
     for (int c = 0; c < 7; ++c) {
@@ -179,7 +268,7 @@ static void draw_month_view(cairo_t *cr,
 
     int row = 1;
     int col = 1;
-    cairo_set_font_size(cr, day_font);
+    cairo_set_font_size(cr, weekday_font);
 
     int leading_slots = first_wday;
     int prev_mon = (mon + 11) % 12;
@@ -203,6 +292,7 @@ static void draw_month_view(cairo_t *cr,
     }
     col = leading_slots + 1;
 
+    cairo_set_font_size(cr, day_font);
     for (int d = 1; d <= days; ++d) {
         if (col >= cols) {
             col = 1;
@@ -233,6 +323,7 @@ static void draw_month_view(cairo_t *cr,
     }
 
     int next_day = 1;
+    cairo_set_font_size(cr, weekday_font);
     while (row <= 6) {
         if (col >= cols) {
             col = 1;
@@ -338,6 +429,8 @@ static void month_menu_select_cb(Widget w, XtPointer client_data, XtPointer call
         XtVaSetValues(app->month_option, XmNmenuHistory, app->month_items[mon], NULL);
     }
     app->force_full_redraw = true;
+    app->calendar_force_redraw = true;
+    app->time_calendar_force_redraw = true;
     ck_clock_request_redraw(app);
 }
 
@@ -359,6 +452,8 @@ static void year_text_changed_cb(Widget w, XtPointer client_data, XtPointer call
 
     app->view_year = y - 1900;
     app->force_full_redraw = true;
+    app->calendar_force_redraw = true;
+    app->time_calendar_force_redraw = true;
     ck_clock_request_redraw(app);
 }
 
@@ -372,8 +467,8 @@ static void ensure_month_menu(CkClockApp *app)
     app->month_pulldown = XmCreatePulldownMenu(app->form_widget, (char *)"monthPulldown", args, n);
     app->month_menu = app->month_pulldown;
     for (int i = 0; i < 12; ++i) {
-        XmString label = XmStringCreateLocalized((char *)ck_clock_month_labels[i]);
-        Widget item = XmCreatePushButtonGadget(app->month_pulldown, (char *)ck_clock_month_labels[i], NULL, 0);
+        XmString label = XmStringCreateLocalized((char *)ck_clock_month_full_labels[i]);
+        Widget item = XmCreatePushButtonGadget(app->month_pulldown, (char *)ck_clock_month_full_labels[i], NULL, 0);
         XtVaSetValues(item, XmNlabelString, label, NULL);
         XmStringFree(label);
         XtVaSetValues(item, XmNuserData, (XtPointer)(uintptr_t)i, NULL);
@@ -445,55 +540,35 @@ static void update_controls_layout(CkClockApp *app, const CkLayout *layout)
         if (app->view_mon < 0) app->view_mon = app->current_local_tm.tm_mon;
     }
 
-    int pad = (int)fmax(4.0, layout->right_w * 0.05);
-    int header_y = (int)fmax(2.0, pad * 0.25);
+    int pad = (int)fmax(4.0, layout->right_w * 0.04);
+    int header_y = (int)fmax(2.0, pad * 0.5);
     int opt_x = (int)(layout->right_x + pad);
     int right_edge = (int)(layout->right_x + layout->right_w - pad);
-    int available_width = right_edge - opt_x;
-    if (available_width < 0) available_width = 0;
-    int base_month_w = (int)fmax(80.0, layout->right_w * 0.35);
-    int spin_gap = (int)fmax(4.0, pad * 0.5);
-    int year_min_w = 70;
-    int max_month_w = available_width - year_min_w - spin_gap;
-    if (max_month_w < 60) max_month_w = available_width;
-    if (base_month_w > max_month_w) base_month_w = max_month_w;
-    if (base_month_w < 60) base_month_w = 60;
-    int inline_space = available_width - base_month_w - spin_gap;
-    if (inline_space < 0) inline_space = 0;
-    int spin_w = (int)fmax(80.0, layout->right_w * 0.2);
-    if (spin_w > inline_space) spin_w = inline_space;
-    if (spin_w < 50) spin_w = 50;
+
+    int year_w = (int)fmax(70.0, layout->right_w * 0.25);
+    if (year_w > layout->right_w * 0.35) year_w = (int)(layout->right_w * 0.35);
+    if (year_w < 65) year_w = 65;
+
+    int max_month_w = right_edge - opt_x - year_w - pad;
+    if (max_month_w < 60) max_month_w = 60;
+    int month_w = (int)fmax(100.0, layout->right_w * 0.25);
+    if (month_w > 160) month_w = 160;
+    if (month_w > max_month_w) month_w = max_month_w;
+
+    int year_x = opt_x + month_w + pad;
+    int year_y = header_y;
+    int month_h = 0;
+    XtVaGetValues(app->month_option, XmNheight, &month_h, NULL);
+    int row_h = month_h > 0 ? month_h : 28;
+    int year_h = row_h;
 
     XtVaSetValues(app->month_option,
                   XmNleftAttachment, XmATTACH_FORM,
                   XmNtopAttachment, XmATTACH_FORM,
                   XmNleftOffset, opt_x,
                   XmNtopOffset, header_y,
-                  XmNwidth, (Dimension)base_month_w,
+                  XmNwidth, (Dimension)month_w,
                   NULL);
-
-    if (!XtIsManaged(app->month_option)) XtManageChild(app->month_option);
-    if (!XtIsManaged(app->year_spin)) XtManageChild(app->year_spin);
-    app->controls_visible = 1;
-
-    if (app->view_mon >= 0 && app->view_mon < 12 && app->month_items[app->view_mon]) {
-        XtVaSetValues(app->month_option, XmNmenuHistory, app->month_items[app->view_mon], NULL);
-    }
-
-    int month_h = 0;
-    XtVaGetValues(app->month_option, XmNheight, &month_h, NULL);
-    int row_h = month_h > 0 ? (int)month_h : 28;
-    int year_x = opt_x + base_month_w + spin_gap;
-    int year_y = header_y;
-    int year_w = spin_w;
-    int year_h = row_h;
-    bool inline_year = inline_space >= year_min_w;
-    if (!inline_year || year_w < 60) {
-        year_x = opt_x;
-        year_y = header_y + row_h + spin_gap;
-        year_w = right_edge - opt_x;
-        if (year_w < 60) year_w = 60;
-    }
 
     XtVaSetValues(app->year_spin,
                   XmNleftAttachment, XmATTACH_FORM,
@@ -503,6 +578,14 @@ static void update_controls_layout(CkClockApp *app, const CkLayout *layout)
                   XmNwidth, (Dimension)year_w,
                   XmNheight, (Dimension)year_h,
                   NULL);
+
+    if (!XtIsManaged(app->month_option)) XtManageChild(app->month_option);
+    if (!XtIsManaged(app->year_spin)) XtManageChild(app->year_spin);
+    app->controls_visible = 1;
+
+    if (app->view_mon >= 0 && app->view_mon < 12 && app->month_items[app->view_mon]) {
+        XtVaSetValues(app->month_option, XmNmenuHistory, app->month_items[app->view_mon], NULL);
+    }
 
     int month_bottom = header_y + row_h;
     int year_bottom = year_y + year_h;
@@ -599,4 +682,12 @@ void ck_calendar_view_draw(CkClockApp *app)
                             app->right_controls_bottom,
                             first_wday);
     cairo_surface_flush(app->cal_cs);
+    if (app->have_local_time) {
+        app->calendar_last_drawn_year = app->current_local_tm.tm_year;
+        app->calendar_last_drawn_mon = app->current_local_tm.tm_mon;
+        app->calendar_last_drawn_mday = app->current_local_tm.tm_mday;
+    }
+    app->calendar_last_drawn_view_year = app->view_year;
+    app->calendar_last_drawn_view_mon = app->view_mon;
+    app->calendar_force_redraw = false;
 }

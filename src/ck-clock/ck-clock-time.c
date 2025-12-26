@@ -322,16 +322,23 @@ static void draw_led_time(cairo_t *cr,
     double colon_height = digit_height * 0.1;
     if (colon_height < 2.0) colon_height = 2.0;
     double colon_spacing = colon_height * 1.5;
-    double colon_top_y = start_y + digit_height * 0.25;
+    double colon_block_height = colon_height * 2.0 + colon_spacing;
+    double colon_center = start_y + digit_height / 2.0;
+    double colon_top_y = colon_center - colon_block_height / 2.0;
+    double colon_max_top = zone_y + zone_h - colon_block_height;
+    if (colon_max_top < zone_y) colon_max_top = zone_y;
+    if (colon_top_y < zone_y) colon_top_y = zone_y;
+    if (colon_top_y > colon_max_top) colon_top_y = colon_max_top;
     double colon_bottom_y = colon_top_y + colon_height + colon_spacing;
 
-    if (show_colon) {
-        cairo_set_source_rgb(cr, on_r, on_g, on_b);
-        cairo_rectangle(cr, colon_x, colon_top_y, colon_width, colon_height);
-        cairo_fill(cr);
-        cairo_rectangle(cr, colon_x, colon_bottom_y, colon_width, colon_height);
-        cairo_fill(cr);
-    }
+    cairo_set_source_rgb(cr,
+                         show_colon ? on_r : off_r,
+                         show_colon ? on_g : off_g,
+                         show_colon ? on_b : off_b);
+    cairo_rectangle(cr, colon_x, colon_top_y, colon_width, colon_height);
+    cairo_fill(cr);
+    cairo_rectangle(cr, colon_x, colon_bottom_y, colon_width, colon_height);
+    cairo_fill(cr);
 
     if (indicator_len > 0) {
         double digits_width = digits_total;
@@ -420,6 +427,21 @@ static void draw_calendar_paper(cairo_t *cr,
                                 NULL, NULL);
 }
 
+static bool time_calendar_redraw_needed(const CkClockApp *app)
+{
+    if (!app || !app->have_local_time) return true;
+    if (app->time_calendar_force_redraw) return true;
+    if (app->force_full_redraw) return true;
+    if (app->calendar_force_redraw) return true;
+    if (app->time_calendar_last_drawn_year != app->current_local_tm.tm_year ||
+        app->time_calendar_last_drawn_mon != app->current_local_tm.tm_mon ||
+        app->time_calendar_last_drawn_mday != app->current_local_tm.tm_mday ||
+        app->time_calendar_last_drawn_wday != app->current_local_tm.tm_wday) {
+        return true;
+    }
+    return false;
+}
+
 static void ensure_time_cairo(CkClockApp *app)
 {
     if (!app->time_widget || !XtIsRealized(app->time_widget)) return;
@@ -454,7 +476,11 @@ static void ensure_time_cairo(CkClockApp *app)
     cairo_set_line_join(app->time_cr, CAIRO_LINE_JOIN_ROUND);
 }
 
-void ck_time_view_render(cairo_t *cr, CkClockApp *app, double width, double height)
+void ck_time_view_render(cairo_t *cr,
+                         CkClockApp *app,
+                         double width,
+                         double height,
+                         bool force_calendar_draw)
 {
     if (!cr || !app || !app->have_local_time) return;
 
@@ -467,11 +493,20 @@ void ck_time_view_render(cairo_t *cr, CkClockApp *app, double width, double heig
     ck_clock_pixel_to_rgb(app, app->ts_pixel,  &ts_r,  &ts_g,  &ts_b);
     ck_clock_pixel_to_rgb(app, app->bs_pixel,  &bs_r,  &bs_g,  &bs_b);
 
-    cairo_set_source_rgb(cr, bg_r, bg_g, bg_b);
-    cairo_rectangle(cr, 0, 0, width, height);
-    cairo_fill(cr);
-
     double time_area_h = height / 3.0;
+    double cal_margin = width * 0.05;
+    if (cal_margin < 6.0) cal_margin = 6.0;
+    double cal_top = time_area_h + cal_margin * 0.4;
+    bool calendar_needs_draw = force_calendar_draw ||
+                               time_calendar_redraw_needed(app);
+
+    cairo_set_source_rgb(cr, bg_r, bg_g, bg_b);
+    if (calendar_needs_draw) {
+        cairo_rectangle(cr, 0, 0, width, height);
+    } else {
+        cairo_rectangle(cr, 0, 0, width, cal_top);
+    }
+    cairo_fill(cr);
 
     double led_on_r = 0.4;
     double led_on_g = 0.95;
@@ -525,81 +560,99 @@ void ck_time_view_render(cairo_t *cr, CkClockApp *app, double width, double heig
     cairo_line_to(cr, inner_x + inner_w, inner_y + inner_h);
     cairo_stroke(cr);
 
+    double horizontal_pad = fmax(3.0, time_area_h * 0.04);
+    double digit_x = inner_x + horizontal_pad;
+    double digit_w = inner_w - 2.0 * horizontal_pad;
+    if (digit_w < 20.0) {
+        digit_w = 20.0;
+        if (digit_w > inner_w) digit_w = inner_w;
+        digit_x = inner_x + (inner_w - digit_w) / 2.0;
+    }
+
     draw_led_time(cr,
                   display_hour,
                   app->current_local_tm.tm_min,
                   app->show_colon,
-                  inner_x,
+                  digit_x,
                   inner_y,
-                  inner_w,
+                  digit_w,
                   inner_h,
                   led_on_r, led_on_g, led_on_b,
                   led_off_r, led_off_g, led_off_b,
                   ampm_indicator);
 
-    double cal_margin = width * 0.05;
-    if (cal_margin < 6.0) cal_margin = 6.0;
-    double cal_top = time_area_h + cal_margin * 0.4;
-    double cal_height = height - cal_top - cal_margin;
-    if (cal_height <= 12.0) return;
-    double cal_max_width = width - 2.0 * cal_margin;
-    if (cal_max_width <= 12.0) return;
+    if (calendar_needs_draw) {
+        double cal_height = height - cal_top - cal_margin;
+        if (cal_height <= 12.0) return;
+        double cal_max_width = width - 2.0 * cal_margin;
+        if (cal_max_width <= 12.0) return;
 
-    double weekday_font = cal_height * 0.1725;
-    if (weekday_font < 10.0) weekday_font = 10.0;
-    double day_font = cal_height * 0.55;
-    if (day_font < weekday_font * 1.5) day_font = weekday_font * 1.5;
-    if (day_font > cal_height * 0.7) day_font = cal_height * 0.7;
-    double desired_width = day_font * 2.0;
-    if (desired_width < 48.0) desired_width = 48.0;
-    double cal_width = fmin(cal_max_width, desired_width);
-    if (cal_width <= 12.0) return;
-    double cal_left = (width - cal_width) / 2.0;
+        double weekday_font = cal_height * 0.1725;
+        if (weekday_font < 10.0) weekday_font = 10.0;
+        double day_font = cal_height * 0.55;
+        if (day_font < weekday_font * 1.5) day_font = weekday_font * 1.5;
+        if (day_font > cal_height * 0.7) day_font = cal_height * 0.7;
+        double desired_width = day_font * 2.0;
+        if (desired_width < 48.0) desired_width = 48.0;
+        double cal_width = fmin(cal_max_width, desired_width);
+        if (cal_width <= 12.0) return;
+        double cal_left = (width - cal_width) / 2.0;
 
-    double shadow_offset = width * 0.015;
-    if (shadow_offset < 2.0) shadow_offset = 2.0;
-    double shadow_offset_x = shadow_offset * 2.0;
-    double shadow_offset_y = shadow_offset * 2.0;
-    cairo_set_source_rgb(cr,
-                         ck_clock_clamp01(bs_r * 0.85 + bg_r * 0.15),
-                         ck_clock_clamp01(bs_g * 0.85 + bg_g * 0.15),
-                         ck_clock_clamp01(bs_b * 0.85 + bg_b * 0.15));
-    cairo_rectangle(cr, cal_left + shadow_offset_x,
-                    cal_top + shadow_offset_y,
-                    cal_width, cal_height);
-    cairo_fill(cr);
+        double shadow_offset = width * 0.015;
+        if (shadow_offset < 2.0) shadow_offset = 2.0;
+        double shadow_offset_x = shadow_offset * 2.0;
+        double shadow_offset_y = shadow_offset * 2.0;
+        cairo_set_source_rgb(cr,
+                             ck_clock_clamp01(bs_r * 0.85 + bg_r * 0.15),
+                             ck_clock_clamp01(bs_g * 0.85 + bg_g * 0.15),
+                             ck_clock_clamp01(bs_b * 0.85 + bg_b * 0.15));
+        cairo_rectangle(cr, cal_left + shadow_offset_x,
+                        cal_top + shadow_offset_y,
+                        cal_width, cal_height);
+        cairo_fill(cr);
 
-    double paper_r = 1.0;
-    double paper_g = 1.0;
-    double paper_b = 1.0;
-    cairo_set_source_rgb(cr, paper_r, paper_g, paper_b);
-    cairo_rectangle(cr, cal_left, cal_top, cal_width, cal_height);
-    cairo_fill(cr);
+        double paper_r = 1.0;
+        double paper_g = 1.0;
+        double paper_b = 1.0;
+        cairo_set_source_rgb(cr, paper_r, paper_g, paper_b);
+        cairo_rectangle(cr, cal_left, cal_top, cal_width, cal_height);
+        cairo_fill(cr);
 
-    cairo_set_line_width(cr, 1.5);
-    double paper_fg_r, paper_fg_g, paper_fg_b;
-    ck_clock_choose_contrast_color(paper_r, paper_g, paper_b, fg_r, fg_g, fg_b,
-                                   &paper_fg_r, &paper_fg_g, &paper_fg_b);
-    cairo_set_source_rgb(cr, paper_fg_r, paper_fg_g, paper_fg_b);
-    cairo_rectangle(cr, cal_left, cal_top, cal_width, cal_height);
-    cairo_stroke(cr);
+        cairo_set_line_width(cr, 1.5);
+        double paper_fg_r, paper_fg_g, paper_fg_b;
+        ck_clock_choose_contrast_color(paper_r, paper_g, paper_b, fg_r, fg_g, fg_b,
+                                       &paper_fg_r, &paper_fg_g, &paper_fg_b);
+        cairo_set_source_rgb(cr, paper_fg_r, paper_fg_g, paper_fg_b);
+        cairo_rectangle(cr, cal_left, cal_top, cal_width, cal_height);
+        cairo_stroke(cr);
 
-    double month_font = weekday_font;
-    draw_calendar_paper(cr,
-                        app,
-                        cal_left,
-                        cal_top,
-                        cal_width,
-                        cal_height,
-                        paper_r,
-                        paper_g,
-                        paper_b,
-                        paper_fg_r,
-                        paper_fg_g,
-                        paper_fg_b,
-                        day_font,
-                        weekday_font,
-                        month_font);
+        double month_font = weekday_font;
+        draw_calendar_paper(cr,
+                            app,
+                            cal_left,
+                            cal_top,
+                            cal_width,
+                            cal_height,
+                            paper_r,
+                            paper_g,
+                            paper_b,
+                            paper_fg_r,
+                            paper_fg_g,
+                            paper_fg_b,
+                            day_font,
+                            weekday_font,
+                            month_font);
+
+        if (app->have_local_time) {
+            app->time_calendar_last_drawn_mday = app->current_local_tm.tm_mday;
+            app->time_calendar_last_drawn_mon = app->current_local_tm.tm_mon;
+            app->time_calendar_last_drawn_year = app->current_local_tm.tm_year;
+            app->time_calendar_last_drawn_wday = app->current_local_tm.tm_wday;
+        }
+        if (!force_calendar_draw) {
+            app->time_calendar_force_redraw = false;
+        }
+    }
 }
 
 static void time_view_event_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont)
@@ -611,10 +664,12 @@ static void time_view_event_handler(Widget w, XtPointer client_data, XEvent *eve
     switch (event->type) {
     case Expose:
         if (event->xexpose.count == 0) {
+            app->time_calendar_force_redraw = true;
             ck_time_view_draw(app);
         }
         break;
     case ConfigureNotify:
+        app->time_calendar_force_redraw = true;
         ck_time_view_draw(app);
         break;
     default:
@@ -665,6 +720,6 @@ void ck_time_view_draw(CkClockApp *app)
     ensure_time_cairo(app);
     if (!app->time_cr) return;
 
-    ck_time_view_render(app->time_cr, app, app->time_w, app->time_h);
+    ck_time_view_render(app->time_cr, app, app->time_w, app->time_h, false);
     cairo_surface_flush(app->time_cs);
 }

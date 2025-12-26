@@ -27,6 +27,8 @@
 #include <Xm/Protocols.h>
 
 #include <ctype.h>
+#include <locale.h>
+#include <langinfo.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -35,16 +37,204 @@
 #include <time.h>
 
 static CkClockApp app = {0};
+static const char *forced_locale = NULL;
+static int locale_debug = 0;
 
-#define FORCE_USE_AM_PM 1
+#define FORCE_USE_AM_PM 0
+#define CK_CLOCK_LABEL_MAX 64
 
-const char *ck_clock_weekday_labels[] = {
-    "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"
+static char g_weekday_label_storage[7][CK_CLOCK_LABEL_MAX];
+static char g_month_label_storage[12][CK_CLOCK_LABEL_MAX];
+static char g_month_full_label_storage[12][CK_CLOCK_LABEL_MAX];
+const char *ck_clock_weekday_labels[7] = {
+    g_weekday_label_storage[0],
+    g_weekday_label_storage[1],
+    g_weekday_label_storage[2],
+    g_weekday_label_storage[3],
+    g_weekday_label_storage[4],
+    g_weekday_label_storage[5],
+    g_weekday_label_storage[6]
 };
-const char *ck_clock_month_labels[] = {
-    "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
-    "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"
+const char *ck_clock_month_labels[12] = {
+    g_month_label_storage[0],
+    g_month_label_storage[1],
+    g_month_label_storage[2],
+    g_month_label_storage[3],
+    g_month_label_storage[4],
+    g_month_label_storage[5],
+    g_month_label_storage[6],
+    g_month_label_storage[7],
+    g_month_label_storage[8],
+    g_month_label_storage[9],
+    g_month_label_storage[10],
+    g_month_label_storage[11]
 };
+const char *ck_clock_month_full_labels[12] = {
+    g_month_full_label_storage[0],
+    g_month_full_label_storage[1],
+    g_month_full_label_storage[2],
+    g_month_full_label_storage[3],
+    g_month_full_label_storage[4],
+    g_month_full_label_storage[5],
+    g_month_full_label_storage[6],
+    g_month_full_label_storage[7],
+    g_month_full_label_storage[8],
+    g_month_full_label_storage[9],
+    g_month_full_label_storage[10],
+    g_month_full_label_storage[11]
+};
+
+static void copy_label(char *dst, const char *src)
+{
+    if (!dst || !src) return;
+    size_t len = strlen(src);
+    if (len >= CK_CLOCK_LABEL_MAX) len = CK_CLOCK_LABEL_MAX - 1;
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+}
+
+static void set_unknown_label(char *dst)
+{
+    copy_label(dst, "?");
+}
+
+static void init_locale_labels(void)
+{
+    for (int i = 0; i < 7; ++i) {
+        const char *langinfo_label = nl_langinfo(ABDAY_1 + i);
+        if (langinfo_label && langinfo_label[0]) {
+            copy_label(g_weekday_label_storage[i], langinfo_label);
+        } else {
+            struct tm day_tm = {0};
+            day_tm.tm_year = 123;
+            day_tm.tm_mon = 0;
+            day_tm.tm_mday = 1 + i;
+            day_tm.tm_isdst = -1;
+            if (mktime(&day_tm) == (time_t)-1 ||
+                strftime(g_weekday_label_storage[i], CK_CLOCK_LABEL_MAX, "%a", &day_tm) == 0) {
+                set_unknown_label(g_weekday_label_storage[i]);
+            }
+        }
+    }
+
+    for (int i = 0; i < 12; ++i) {
+        const char *langinfo_abbr = nl_langinfo(ABMON_1 + i);
+        if (langinfo_abbr && langinfo_abbr[0]) {
+            copy_label(g_month_label_storage[i], langinfo_abbr);
+        } else {
+            struct tm month_tm = {0};
+            month_tm.tm_year = 123;
+            month_tm.tm_mon = i;
+            month_tm.tm_mday = 1;
+            month_tm.tm_isdst = -1;
+            if (mktime(&month_tm) == (time_t)-1 ||
+                strftime(g_month_label_storage[i], CK_CLOCK_LABEL_MAX, "%b", &month_tm) == 0) {
+                set_unknown_label(g_month_label_storage[i]);
+            }
+        }
+
+        const char *langinfo_full = nl_langinfo(MON_1 + i);
+        if (langinfo_full && langinfo_full[0]) {
+            copy_label(g_month_full_label_storage[i], langinfo_full);
+        } else {
+            struct tm month_tm = {0};
+            month_tm.tm_year = 123;
+            month_tm.tm_mon = i;
+            month_tm.tm_mday = 1;
+            month_tm.tm_isdst = -1;
+            if (mktime(&month_tm) == (time_t)-1 ||
+                strftime(g_month_full_label_storage[i], CK_CLOCK_LABEL_MAX, "%B", &month_tm) == 0) {
+                set_unknown_label(g_month_full_label_storage[i]);
+            }
+        }
+    }
+}
+
+static bool replace_first(char *dst, size_t dstsz, const char *src, const char *from, const char *to)
+{
+    if (!dst || dstsz == 0 || !src || !from || !to) return false;
+    const char *pos = strstr(src, from);
+    if (!pos) return false;
+    size_t before_len = (size_t)(pos - src);
+    size_t from_len = strlen(from);
+    size_t to_len = strlen(to);
+    size_t after_len = strlen(pos + from_len);
+    if (before_len + to_len + after_len + 1 > dstsz) return false;
+    memcpy(dst, src, before_len);
+    memcpy(dst + before_len, to, to_len);
+    memcpy(dst + before_len + to_len, pos + from_len, after_len);
+    dst[before_len + to_len + after_len] = '\0';
+    return true;
+}
+
+static bool try_setlocale_variants(int category, const char *locale_name)
+{
+    if (!locale_name || !locale_name[0]) return false;
+    if (setlocale(category, locale_name)) return true;
+
+    char buf[256];
+    if (replace_first(buf, sizeof(buf), locale_name, "UTF-8", "utf8") &&
+        setlocale(category, buf)) {
+        return true;
+    }
+    if (replace_first(buf, sizeof(buf), locale_name, "utf8", "UTF-8") &&
+        setlocale(category, buf)) {
+        return true;
+    }
+    if (replace_first(buf, sizeof(buf), locale_name, "utf-8", "utf8") &&
+        setlocale(category, buf)) {
+        return true;
+    }
+    if (replace_first(buf, sizeof(buf), locale_name, "UTF8", "UTF-8") &&
+        setlocale(category, buf)) {
+        return true;
+    }
+    if (replace_first(buf, sizeof(buf), locale_name, "UTF-8", "UTF8") &&
+        setlocale(category, buf)) {
+        return true;
+    }
+    return false;
+}
+
+static void init_time_locale(void)
+{
+    /*
+     * Let Xt install its language procedure early, but do not let it
+     * override our LC_TIME normalization below.
+     */
+    XtSetLanguageProc(NULL, NULL, NULL);
+
+    const char *lc_all_env = getenv("LC_ALL");
+    const char *lc_time_env = getenv("LC_TIME");
+    const char *lang_env = getenv("LANG");
+
+    (void)setlocale(LC_ALL, "");
+
+    const char *desired_time_locale = NULL;
+    if (forced_locale && forced_locale[0]) {
+        desired_time_locale = forced_locale;
+    } else if (lc_time_env && lc_time_env[0]) {
+        desired_time_locale = lc_time_env;
+    }
+
+    if (desired_time_locale && !try_setlocale_variants(LC_TIME, desired_time_locale)) {
+        fprintf(stderr,
+                "ck-clock: warning: could not set LC_TIME locale '%s'\n",
+                desired_time_locale);
+    }
+
+    if (locale_debug) {
+        fprintf(stderr,
+                "ck-clock: env: LC_ALL='%s' LC_TIME='%s' LANG='%s'\n",
+                lc_all_env ? lc_all_env : "",
+                lc_time_env ? lc_time_env : "",
+                lang_env ? lang_env : "");
+        fprintf(stderr,
+                "ck-clock: locales: LC_ALL='%s' LC_TIME='%s'\n",
+                setlocale(LC_ALL, NULL) ? setlocale(LC_ALL, NULL) : "(null)",
+                setlocale(LC_TIME, NULL) ? setlocale(LC_TIME, NULL) : "(null)");
+    }
+}
 
 /* ----- Timezone helpers -------------------------------------------------- */
 
@@ -231,6 +421,9 @@ void ck_clock_draw_centered_text(cairo_t *cr,
                                  cairo_text_extents_t *out_ext,
                                  double *out_y);
 static void update_time_if_needed(CkClockApp *app);
+static void apply_layout_for_current_size(void);
+static void schedule_layout_retry(void);
+static void handle_deferred_configure(XtPointer client_data, XtIntervalId *id);
 static void handle_configure(XConfigureEvent *cev);
 static void form_event_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont);
 static void tick_cb(XtPointer client_data, XtIntervalId *id);
@@ -354,7 +547,7 @@ static void refresh_icon_pixmap(CkClockApp *app)
     cairo_t *icr = cairo_create(isurf);
 
     CkLayout layout = ck_clock_compute_layout(icon_w, icon_h);
-    ck_time_view_render(icr, app, layout.left_w, icon_h);
+    ck_time_view_render(icr, app, layout.left_w, icon_h, true);
     if (layout.split_mode && layout.right_w > 20.0) {
         cairo_save(icr);
         cairo_translate(icr, layout.right_x, 0.0);
@@ -396,10 +589,28 @@ void ck_clock_draw_centered_text(cairo_t *cr,
     if (out_y) *out_y = y;
 }
 
+static bool calendar_redraw_needed(const CkClockApp *app)
+{
+    if (!app) return false;
+    if (!app->have_local_time) return true;
+    if (app->calendar_force_redraw) return true;
+    if (app->calendar_last_drawn_year != app->current_local_tm.tm_year ||
+        app->calendar_last_drawn_mon != app->current_local_tm.tm_mon ||
+        app->calendar_last_drawn_mday != app->current_local_tm.tm_mday) {
+        return true;
+    }
+    if (app->calendar_last_drawn_view_year != app->view_year ||
+        app->calendar_last_drawn_view_mon != app->view_mon) {
+        return true;
+    }
+    return false;
+}
+
 void ck_clock_request_redraw(CkClockApp *app)
 {
     if (!app) return;
     ck_time_view_draw(app);
+    if (!calendar_redraw_needed(app)) return;
     ck_calendar_view_draw(app);
 }
 
@@ -496,20 +707,58 @@ static void update_time_if_needed(CkClockApp *app)
     }
 }
 
-static void handle_configure(XConfigureEvent *cev)
+static void apply_layout_for_current_size(void)
 {
-    if (cev->width > 0)  app.win_w = cev->width;
-    if (cev->height > 0) app.win_h = cev->height;
-    app.force_full_redraw = true;
+    Dimension new_w = 0;
+    Dimension new_h = 0;
+    if (app.form_widget) {
+        XtVaGetValues(app.form_widget,
+                      XmNwidth,  &new_w,
+                      XmNheight, &new_h,
+                      NULL);
+    }
+    if (new_w > 0)  app.win_w = (int)new_w;
+    if (new_h > 0)  app.win_h = (int)new_h;
+
     CkLayout layout = ck_clock_compute_layout(app.win_w, app.win_h);
     ck_time_view_update_layout(&app, &layout);
     ck_calendar_view_update_layout(&app, &layout);
+
     if (app.top_widget && XtIsRealized(app.top_widget) &&
         app.last_split_mode != layout.split_mode) {
         const char *title = layout.split_mode ? "Time and Calendar" : "Time";
         XtVaSetValues(app.top_widget, XmNtitle, title, XmNiconName, title, NULL);
         app.last_split_mode = layout.split_mode;
     }
+}
+
+static void handle_deferred_configure(XtPointer client_data, XtIntervalId *id)
+{
+    (void)client_data;
+    (void)id;
+    app.layout_retry_pending = false;
+    app.force_full_redraw = true;
+    app.calendar_force_redraw = true;
+    app.time_calendar_force_redraw = true;
+    apply_layout_for_current_size();
+    update_time_if_needed(&app);
+}
+
+static void schedule_layout_retry(void)
+{
+    if (app.layout_retry_pending || !app.app_ctx) return;
+    app.layout_retry_pending = true;
+    XtAppAddTimeOut(app.app_ctx, 0, handle_deferred_configure, &app);
+}
+
+static void handle_configure(XConfigureEvent *cev)
+{
+    (void)cev;
+    app.force_full_redraw = true;
+    app.calendar_force_redraw = true;
+    app.time_calendar_force_redraw = true;
+    apply_layout_for_current_size();
+    schedule_layout_retry();
     update_time_if_needed(&app);
 }
 
@@ -537,7 +786,35 @@ int main(int argc, char **argv)
             argc--;
             continue;
         }
+        if (strcmp(argv[i], "--locale-debug") == 0) {
+            locale_debug = 1;
+            for (int j = i; j < argc - 1; ++j) argv[j] = argv[j + 1];
+            argc--;
+            continue;
+        }
+        if (strcmp(argv[i], "--locale") == 0 && i + 1 < argc) {
+            forced_locale = argv[i + 1];
+            for (int j = i; j < argc - 2; ++j) argv[j] = argv[j + 2];
+            argc -= 2;
+            continue;
+        }
+        if (strncmp(argv[i], "--locale=", 9) == 0) {
+            forced_locale = argv[i] + 9;
+            for (int j = i; j < argc - 1; ++j) argv[j] = argv[j + 1];
+            argc--;
+            continue;
+        }
         i++;
+    }
+
+    init_time_locale();
+    init_locale_labels();
+    if (locale_debug) {
+        fprintf(stderr,
+                "ck-clock: labels: weekday[FRI]='%s' month[DEC]='%s' month_full[DEC]='%s'\n",
+                ck_clock_weekday_labels[5],
+                ck_clock_month_labels[11],
+                ck_clock_month_full_labels[11]);
     }
 
     Widget toplevel;
@@ -552,6 +829,16 @@ int main(int argc, char **argv)
     app.last_display_mon = -1;
     app.last_display_year = -1;
     app.last_icon_minute = -1;
+    app.calendar_last_drawn_mday = -1;
+    app.calendar_last_drawn_mon = -1;
+    app.calendar_last_drawn_year = -1;
+    app.calendar_last_drawn_view_mon = -1;
+    app.calendar_last_drawn_view_year = -1;
+    app.time_calendar_last_drawn_mday = -1;
+    app.time_calendar_last_drawn_mon = -1;
+    app.time_calendar_last_drawn_year = -1;
+    app.time_calendar_last_drawn_wday = -1;
+    app.calendar_force_redraw = true;
     app.force_full_redraw = true;
 
     /* Initialize Xt/Motif – this sets up per-display info for XmGetColors */

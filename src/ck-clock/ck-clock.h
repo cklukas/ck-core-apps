@@ -4,6 +4,7 @@
 #include <X11/Intrinsic.h>
 #include <Xm/Xm.h>
 #include <cairo/cairo.h>
+#include <cairo/cairo-xlib.h>
 
 #include <stdbool.h>
 #include <time.h>
@@ -77,6 +78,18 @@ typedef struct {
     bool show_ampm_indicator;
     bool show_colon;
     char current_ampm[8];
+    int calendar_last_drawn_mday;
+    int calendar_last_drawn_mon;
+    int calendar_last_drawn_year;
+    int calendar_last_drawn_view_mon;
+    int calendar_last_drawn_view_year;
+    int time_calendar_last_drawn_mday;
+    int time_calendar_last_drawn_mon;
+    int time_calendar_last_drawn_year;
+    int time_calendar_last_drawn_wday;
+    bool calendar_force_redraw;
+    bool time_calendar_force_redraw;
+    bool layout_retry_pending;
 
     Pixmap icon_pixmap;
     int last_split_mode;
@@ -85,6 +98,7 @@ typedef struct {
 
 extern const char *ck_clock_weekday_labels[];
 extern const char *ck_clock_month_labels[];
+extern const char *ck_clock_month_full_labels[];
 
 double ck_clock_clamp01(double v);
 void ck_clock_choose_contrast_color(double bg_r, double bg_g, double bg_b,
@@ -106,7 +120,11 @@ void ck_clock_request_redraw(CkClockApp *app);
 Widget ck_time_view_create(CkClockApp *app, Widget parent);
 void ck_time_view_update_layout(CkClockApp *app, const CkLayout *layout);
 void ck_time_view_draw(CkClockApp *app);
-void ck_time_view_render(cairo_t *cr, CkClockApp *app, double width, double height);
+void ck_time_view_render(cairo_t *cr,
+                         CkClockApp *app,
+                         double width,
+                         double height,
+                         bool force_calendar_draw);
 
 Widget ck_calendar_view_create(CkClockApp *app, Widget parent);
 void ck_calendar_view_update_layout(CkClockApp *app, const CkLayout *layout);

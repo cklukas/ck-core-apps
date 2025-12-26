@@ -35,6 +35,11 @@ typedef struct {
     Widget perf_load1_meter;
     Widget perf_load5_meter;
     Widget perf_load15_meter;
+    Widget perf_cpu_value_label;
+    Widget perf_mem_value_label;
+    Widget perf_load1_value_label;
+    Widget perf_load5_value_label;
+    Widget perf_load15_value_label;
     Widget menu_file_connect;
     Widget menu_file_new_window;
     Widget menu_file_exit;

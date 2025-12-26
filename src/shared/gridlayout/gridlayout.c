@@ -41,6 +41,7 @@ GridLayout *gridlayout_create(Widget parent, const char *name, int columns)
     XtVaSetValues(layout->container,
                   XmNfractionBase, columns * 10,
                   XmNautoUnmanage, False,
+                  XmNresizePolicy, XmRESIZE_ANY,
                   XmNshadowThickness, 0,
                   NULL);
     XtManageChild(layout->container);

@@ -1,17 +1,13 @@
 /*
- * ck-clock.c - Simple analog clock for CDE front panel (TYPE client)
+ * ck-clock.c - Digital LED clock with a NeXTStep-style calendar view
+ * for the CDE front panel (TYPE client).
  *
- * Uses cairo on Xlib (backed by XRender) for anti-aliased drawing.
- * Colors are taken from a Motif color set derived via XmGetColors():
- *
- *   - background  : clock face fill
- *   - top shadow  : outer circle outline
- *   - bottom shad.: inner circle outline
- *   - select      : hour + minute hands
- *   - foreground  : tick marks, label, second hand
+ * Uses cairo on Xlib (backed by XRender) for drawing scalable LEDs and
+ * the paper-like calendar block. Colors are derived from the parent
+ * window background via XmGetColors so the clock follows the panel theme.
  *
  * Build on Devuan/Debian (you may need libcairo2-dev, libmotif-dev):
- *   gcc -O2 -Wall -o ck-clock ck-clock.c -lX11 -lcairo -lXm -lXt -lm
+ *   gcc -O2 -Wall -o ck-clock ck-clock.c -lX11 -lcairo -lXm -lXt
  *
  * Place the binary somewhere in PATH and use CLIENT_NAME ck-clock
  * in your ~/.dt/types/ckclock.fp.
@@ -26,34 +22,23 @@
 #include <Xm/Xm.h>          /* XmGetColors */
 #include <Xm/AtomMgr.h>     /* XmInternAtom */
 
+#include <errno.h>
+#include <ctype.h>
+#include <locale.h>
+#include <math.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <time.h>
+#include <sys/select.h>
 #include <sys/time.h>
-#include <math.h>
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
-
-/* Timezones to cycle through on click.
- * "" means: use system default (unset TZ).
- */
-static const char *tz_list[] = {
-    "",                 // local
-    "UTC",
-    "Europe/Berlin",
-    "Asia/Shanghai",
-    "America/New_York"
-};
-static const int tz_count = sizeof(tz_list) / sizeof(tz_list[0]);
-static int tz_index = 0;
+#include <time.h>
+#include <unistd.h>
 
 static Display *dpy = NULL;
 static int screen;
 static Window win;
+static Widget top_widget = NULL;
 
 static int win_w = 48, win_h = 48;
 
@@ -71,60 +56,33 @@ static Pixel sel_pixel = 0;
 static Colormap panel_cmap = None;
 static int colors_inited = 0;
 
+/* Digital display state */
+static struct tm current_local_tm;
+static bool have_local_time = false;
+static time_t last_time_check = 0;
+static int last_display_hour = -1;
+static int last_display_min = -1;
+static int last_display_mday = -1;
+static int last_display_mon = -1;
+static int last_display_year = -1;
+static bool force_full_redraw = true;
+
+#define FORCE_USE_AM_PM 1
+static bool show_ampm_indicator = FORCE_USE_AM_PM;
+static char current_ampm[8] = "";
+
+static const char *weekday_labels[] = {
+    "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"
+};
+static const char *month_labels[] = {
+    "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+    "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"
+};
+
 /* if set by --no-embedd, we use a different WM_CLASS so dtwm won't embed */
 static int no_embed = 0;
 
-/* second hand mode */
-enum {
-    SEC_NONE   = 0,  /* no second hand */
-    SEC_TICK   = 1,  /* jumps once per second */
-    SEC_SMOOTH = 2   /* smooth, uses fractional seconds */
-};
-static int sec_mode = SEC_SMOOTH;
-
 /* ----- Timezone helpers -------------------------------------------------- */
-
-static void apply_timezone(void)
-{
-    if (tz_index < 0 || tz_index >= tz_count) {
-        tz_index = 0;
-    }
-    const char *tz = tz_list[tz_index];
-    if (tz[0] == '\0') {
-        unsetenv("TZ");   /* system default */
-    } else {
-        setenv("TZ", tz, 1);
-    }
-    tzset();
-}
-
-static const char *current_tz_label(void)
-{
-    const char *tz = tz_list[tz_index];
-
-    if (tz[0] == '\0') {
-        return "LOCAL";
-    }
-
-    /* take only substring after last '/' */
-    const char *part = tz;
-    const char *slash = strrchr(tz, '/');
-    if (slash && slash[1] != '\0') {
-        part = slash + 1;
-    }
-
-    /* copy into a static buffer and replace '_' -> ' ' */
-    static char buf[64];
-    size_t n = strlen(part);
-    if (n >= sizeof(buf)) n = sizeof(buf) - 1;
-
-    for (size_t i = 0; i < n; i++) {
-        buf[i] = (part[i] == '_') ? ' ' : part[i];
-    }
-    buf[n] = '\0';
-
-    return buf;
-}
 
 /* ----- Color helpers (Pixel -> RGB double) ------------------------------- */
 
@@ -170,11 +128,18 @@ static void init_motif_colors(void)
                        ? attrs.colormap
                        : DefaultColormap(dpy, screen);
 
-        /* use background_pixel from parent window */
-        bg_pixel = attrs.backing_pixel;
-        if (bg_pixel == 0) {
-            bg_pixel = WhitePixel(dpy, screen);
+        Pixel chosen_bg = attrs.backing_pixel;
+        if (top_widget) {
+            Pixel widget_bg = 0;
+            XtVaGetValues(top_widget, XmNbackground, &widget_bg, NULL);
+            if (widget_bg != 0) {
+                chosen_bg = widget_bg;
+            }
         }
+        if (chosen_bg == 0 || chosen_bg == None) {
+            chosen_bg = WhitePixel(dpy, screen);
+        }
+        bg_pixel = chosen_bg;
     }
 
     /* XmGetColors: given a background pixel, derive
@@ -214,52 +179,293 @@ static void ensure_cairo(void)
     cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
 }
 
-/* Draw a filled “hand” as a small kite/triangle shape */
-static void draw_hand_shape(double angle,
-                            double length,
-                            double width,
-                            double back_len)
+static double clamp01(double v)
 {
-    int cx = win_w / 2;
-    int cy = win_h / 2;
+    if (v < 0.0) return 0.0;
+    if (v > 1.0) return 1.0;
+    return v;
+}
 
-    /* direction from center to tip */
-    double dx = sin(angle);
-    double dy = -cos(angle);  /* minus: X coords grow downward */
+static unsigned char led_segmap_for_digit(int d)
+{
+    static const unsigned char map[10] = {
+        0x3F, 0x06, 0x5B, 0x4F, 0x66,
+        0x6D, 0x7D, 0x07, 0x7F, 0x6F
+    };
+    if (d < 0 || d > 9) return 0;
+    return map[d];
+}
 
-    /* perpendicular for width */
-    double px = -dy;
-    double py = dx;
+static unsigned char led_segmap_for_char(char c)
+{
+    switch (toupper((unsigned char)c)) {
+    case 'A': return 0x77;
+    case 'P': return 0x73;
+    case 'M': return 0x37;
+    default: return 0;
+    }
+}
 
-    double half_w = width / 2.0;
-
-    /* tail behind center */
-    double bx = cx - dx * back_len;
-    double by = cy - dy * back_len;
-
-    /* base left/right near center */
-    double lx = cx + px * half_w;
-    double ly = cy + py * half_w;
-    double rx = cx - px * half_w;
-    double ry = cy - py * half_w;
-
-    /* tip */
-    double tx = cx + dx * length;
-    double ty = cy + dy * length;
-
-    cairo_move_to(cr, bx, by);
-    cairo_line_to(cr, lx, ly);
-    cairo_line_to(cr, tx, ty);
-    cairo_line_to(cr, rx, ry);
-    cairo_close_path(cr);
+static void draw_led_segment(cairo_t *cr,
+                             double x,
+                             double y,
+                             double w,
+                             double h,
+                             int enabled,
+                             double on_r,
+                             double on_g,
+                             double on_b,
+                             double off_r,
+                             double off_g,
+                             double off_b)
+{
+    cairo_set_source_rgb(cr,
+                         enabled ? on_r : off_r,
+                         enabled ? on_g : off_g,
+                         enabled ? on_b : off_b);
+    cairo_rectangle(cr, x, y, w, h);
     cairo_fill(cr);
+}
+
+static void draw_led_digit(cairo_t *cr,
+                           double x,
+                           double y,
+                           double w,
+                           double h,
+                           unsigned char segs,
+                           double on_r,
+                           double on_g,
+                           double on_b,
+                           double off_r,
+                           double off_g,
+                           double off_b)
+{
+    double thickness = h * 0.12;
+    if (thickness < 2.0) thickness = 2.0;
+    double half_h = h / 2.0;
+
+    draw_led_segment(cr, x + thickness, y, w - 2.0 * thickness, thickness,
+                     (segs & 0x01) != 0, on_r, on_g, on_b, off_r, off_g, off_b);
+    draw_led_segment(cr, x + w - thickness, y + thickness, thickness,
+                     half_h - thickness, (segs & 0x02) != 0,
+                     on_r, on_g, on_b, off_r, off_g, off_b);
+    draw_led_segment(cr, x + w - thickness, y + half_h + 1.0, thickness,
+                     half_h - thickness - 1.0, (segs & 0x04) != 0,
+                     on_r, on_g, on_b, off_r, off_g, off_b);
+    draw_led_segment(cr, x + thickness, y + h - thickness, w - 2.0 * thickness, thickness,
+                     (segs & 0x08) != 0, on_r, on_g, on_b, off_r, off_g, off_b);
+    draw_led_segment(cr, x, y + half_h + 1.0, thickness,
+                     half_h - thickness - 1.0, (segs & 0x10) != 0,
+                     on_r, on_g, on_b, off_r, off_g, off_b);
+    draw_led_segment(cr, x, y + thickness, thickness,
+                     half_h - thickness, (segs & 0x20) != 0,
+                     on_r, on_g, on_b, off_r, off_g, off_b);
+    draw_led_segment(cr, x + thickness, y + half_h - thickness / 2.0,
+                     w - 2.0 * thickness, thickness,
+                     (segs & 0x40) != 0, on_r, on_g, on_b, off_r, off_g, off_b);
+}
+
+static void draw_led_time(cairo_t *cr,
+                          int hour,
+                          int minute,
+                          double zone_x,
+                          double zone_y,
+                          double zone_w,
+                          double zone_h,
+                          double on_r,
+                          double on_g,
+                          double on_b,
+                          double off_r,
+                          double off_g,
+                          double off_b,
+                          const char *indicator)
+{
+    if (zone_w <= 0.0 || zone_h <= 0.0) return;
+    double margin = zone_w * 0.05;
+    double max_height = zone_h - 2.0 * margin;
+    if (max_height <= 0.0) return;
+
+    double digit_height = max_height * 0.9;
+    double digit_width = digit_height * 0.5;
+    double gap = digit_width * 0.25;
+    double colon_width = digit_width * 0.22;
+    if (colon_width < 2.0) colon_width = 2.0;
+
+    double available_width = zone_w - 2.0 * margin;
+    int indicator_len = (indicator && indicator[0]) ? (int)strlen(indicator) : 0;
+    double indicator_gap = digit_width * 0.35;
+    double indicator_digit_width = digit_width * 0.45;
+    double indicator_digit_height = digit_height * 0.45;
+    double digits_total = 4.0 * digit_width + 3.0 * gap + colon_width;
+    double indicator_section = 0.0;
+    if (indicator_len > 0) {
+        indicator_section = indicator_len * indicator_digit_width +
+                            (indicator_len - 1) * indicator_gap;
+    }
+    double total_width = digits_total +
+                         ((indicator_len > 0) ? (indicator_gap + indicator_section) : 0.0);
+
+    if (total_width > available_width && total_width > 0.0) {
+        double scale = available_width / total_width;
+        digit_width *= scale;
+        digit_height *= scale;
+        gap *= scale;
+        colon_width *= scale;
+        indicator_gap = digit_width * 0.35;
+        indicator_digit_width = digit_width * 0.45;
+        indicator_digit_height = digit_height * 0.45;
+        digits_total = 4.0 * digit_width + 3.0 * gap + colon_width;
+        indicator_section = indicator_len > 0
+                            ? indicator_len * indicator_digit_width +
+                              (indicator_len - 1) * indicator_gap
+                            : 0.0;
+        total_width = digits_total +
+                      ((indicator_len > 0) ? (indicator_gap + indicator_section) : 0.0);
+    }
+
+    double start_x = zone_x + margin + (available_width - total_width) / 2.0;
+    if (start_x < zone_x + margin) start_x = zone_x + margin;
+    double start_y = zone_y + (zone_h - digit_height) / 2.0;
+    if (start_y < zone_y) start_y = zone_y;
+
+    double gap_mid = gap + colon_width;
+    double positions[4];
+    positions[0] = start_x;
+    positions[1] = positions[0] + digit_width + gap;
+    positions[2] = positions[1] + digit_width + gap_mid;
+    positions[3] = positions[2] + digit_width + gap;
+
+    unsigned char digits[4];
+    digits[0] = (hour / 10) % 10;
+    digits[1] = hour % 10;
+    digits[2] = (minute / 10) % 10;
+    digits[3] = minute % 10;
+
+    for (int i = 0; i < 4; ++i) {
+        draw_led_digit(cr, positions[i], start_y, digit_width, digit_height,
+                       led_segmap_for_digit(digits[i]), on_r, on_g, on_b,
+                       off_r, off_g, off_b);
+    }
+
+    double gap_start = positions[1] + digit_width;
+    double gap_end = positions[2];
+    double colon_space = gap_end - gap_start;
+    if (colon_space < colon_width) colon_space = colon_width;
+    double colon_x = gap_start + (colon_space - colon_width) / 2.0;
+    double colon_height = digit_height * 0.1;
+    if (colon_height < 2.0) colon_height = 2.0;
+    double colon_spacing = colon_height * 1.5;
+    double colon_top_y = start_y + digit_height * 0.25;
+    double colon_bottom_y = colon_top_y + colon_height + colon_spacing;
+
+    cairo_set_source_rgb(cr, on_r, on_g, on_b);
+    cairo_rectangle(cr, colon_x, colon_top_y, colon_width, colon_height);
+    cairo_fill(cr);
+    cairo_rectangle(cr, colon_x, colon_bottom_y, colon_width, colon_height);
+    cairo_fill(cr);
+
+    if (indicator_len > 0) {
+        double digits_width = digits_total;
+        double indicator_x = start_x + digits_width + indicator_gap;
+        double indicator_y = zone_y + (zone_h - indicator_digit_height) / 2.0;
+        if (indicator_y < zone_y) indicator_y = zone_y;
+        for (int i = 0; i < indicator_len; ++i) {
+            unsigned char segs = led_segmap_for_char(indicator[i]);
+            draw_led_digit(cr, indicator_x, indicator_y,
+                           indicator_digit_width, indicator_digit_height,
+                           segs, on_r, on_g, on_b, off_r, off_g, off_b);
+            indicator_x += indicator_digit_width + indicator_gap;
+        }
+    }
+}
+
+static void draw_centered_text(cairo_t *cr,
+                               const char *text,
+                               double cx,
+                               double cy,
+                               cairo_text_extents_t *out_ext,
+                               double *out_y)
+{
+    if (!text || !*text) return;
+    cairo_text_extents_t ext;
+    cairo_text_extents(cr, text, &ext);
+    double x = cx - (ext.width / 2.0 + ext.x_bearing);
+    double y = cy - (ext.height / 2.0) - ext.y_bearing;
+    cairo_move_to(cr, x, y);
+    cairo_show_text(cr, text);
+    if (out_ext) *out_ext = ext;
+    if (out_y) *out_y = y;
+}
+
+static void draw_clock(void);
+
+static void update_time_if_needed(void)
+{
+    time_t now = time(NULL);
+    if (now == (time_t)-1) return;
+    if (!force_full_redraw && have_local_time && now == last_time_check) {
+        return;
+    }
+
+    struct tm lt;
+    if (!localtime_r(&now, &lt)) return;
+
+    char ampm_buf[16] = "";
+    char trimmed_ampm[16];
+    size_t trimmed_len = 0;
+    if (strftime(ampm_buf, sizeof(ampm_buf), "%p", &lt) > 0) {
+        for (size_t i = 0; i < sizeof(ampm_buf) && ampm_buf[i]; ++i) {
+            unsigned char ch = (unsigned char)ampm_buf[i];
+            if (!isspace(ch)) {
+                if (trimmed_len < sizeof(trimmed_ampm) - 1) {
+                    trimmed_ampm[trimmed_len++] = (char)toupper(ch);
+                }
+            }
+        }
+    }
+    trimmed_ampm[trimmed_len] = '\0';
+    bool has_ampm = trimmed_ampm[0] != '\0';
+    if (has_ampm) {
+        strncpy(current_ampm, trimmed_ampm, sizeof(current_ampm));
+        current_ampm[sizeof(current_ampm) - 1] = '\0';
+    } else if (FORCE_USE_AM_PM) {
+        const char *fallback = (lt.tm_hour >= 12) ? "PM" : "AM";
+        strncpy(current_ampm, fallback, sizeof(current_ampm));
+        current_ampm[sizeof(current_ampm) - 1] = '\0';
+        has_ampm = true;
+    } else {
+        current_ampm[0] = '\0';
+    }
+    show_ampm_indicator = has_ampm;
+
+    int changed = force_full_redraw ||
+                  !have_local_time ||
+                  lt.tm_min != last_display_min ||
+                  lt.tm_hour != last_display_hour ||
+                  lt.tm_mday != last_display_mday ||
+                  lt.tm_mon != last_display_mon ||
+                  lt.tm_year != last_display_year;
+
+    last_time_check = now;
+
+    if (changed) {
+        last_display_hour = lt.tm_hour;
+        last_display_min  = lt.tm_min;
+        last_display_mday = lt.tm_mday;
+        last_display_mon  = lt.tm_mon;
+        last_display_year = lt.tm_year;
+        current_local_tm = lt;
+        have_local_time = true;
+        force_full_redraw = false;
+        draw_clock();
+    }
 }
 
 /* ----- Drawing ----------------------------------------------------------- */
 
 static void draw_clock(void)
 {
-    if (!dpy || !win) return;
+    if (!dpy || !win || !have_local_time) return;
 
     ensure_cairo();
     init_motif_colors();
@@ -274,144 +480,171 @@ static void draw_clock(void)
     }
 
     double bg_r, bg_g, bg_b;
+    double fg_r, fg_g, fg_b;
     double ts_r, ts_g, ts_b;
     double bs_r, bs_g, bs_b;
-    double fg_r, fg_g, fg_b;
     double sel_r, sel_g, sel_b;
 
     pixel_to_rgb(bg_pixel,  &bg_r,  &bg_g,  &bg_b);
+    pixel_to_rgb(fg_pixel,  &fg_r,  &fg_g,  &fg_b);
     pixel_to_rgb(ts_pixel,  &ts_r,  &ts_g,  &ts_b);
     pixel_to_rgb(bs_pixel,  &bs_r,  &bs_g,  &bs_b);
-    pixel_to_rgb(fg_pixel,  &fg_r,  &fg_g,  &fg_b);
     pixel_to_rgb(sel_pixel, &sel_r, &sel_g, &sel_b);
 
-    int size   = (win_w < win_h ? win_w : win_h);
-    int radius = size / 2 - 1;
-    if (radius <= 4) {
-        cairo_surface_flush(cs);
-        return;
-    }
-
-    int cx = win_w / 2;
-    int cy = win_h / 2;
-
-    /* Clear our drawing area by filling with panel background color */
     cairo_set_source_rgb(cr, bg_r, bg_g, bg_b);
     cairo_rectangle(cr, 0, 0, win_w, win_h);
     cairo_fill(cr);
 
-    /* Face */
-    cairo_set_source_rgb(cr, bg_r * 0.95, bg_g * 0.95, bg_b * 0.95);
-    cairo_new_path(cr);
-    cairo_arc(cr, cx, cy, radius - 0.5, 0, 2 * M_PI);
+    double time_area_h = win_h / 3.0;
+
+    double led_on_r = 0.4;
+    double led_on_g = 0.95;
+    double led_on_b = 0.55;
+    double led_off_r = clamp01(fg_r * 0.45 + 0.05);
+    double led_off_g = clamp01(fg_g * 0.45 + 0.05);
+    double led_off_b = clamp01(fg_b * 0.45 + 0.05);
+
+    int display_hour = current_local_tm.tm_hour;
+    if (show_ampm_indicator) {
+        if (display_hour == 0) {
+            display_hour = 12;
+        } else if (display_hour > 12) {
+            display_hour -= 12;
+        }
+    }
+    const char *ampm_indicator = show_ampm_indicator ? current_ampm : NULL;
+
+    double time_pad = fmax(3.0, time_area_h * 0.08);
+    double indent_offset = time_pad * 0.25;
+    double inner_x = time_pad;
+    double inner_y = time_pad + indent_offset;
+    double inner_w = win_w - 2.0 * time_pad;
+    double inner_h = time_area_h - time_pad - indent_offset;
+    if (inner_h < 12.0) inner_h = 12.0;
+    if (inner_w < 20.0) inner_w = 20.0;
+
+    const double BAR_BG_FACTOR = 0.4;
+    double bar_r = clamp01(bs_r * BAR_BG_FACTOR);
+    double bar_g = clamp01(bs_g * BAR_BG_FACTOR);
+    double bar_b = clamp01(bs_b * BAR_BG_FACTOR);
+    cairo_set_source_rgb(cr, bar_r, bar_g, bar_b);
+    cairo_rectangle(cr, inner_x, inner_y, inner_w, inner_h);
     cairo_fill(cr);
 
-    /* Outer ring: top shadow */
-    cairo_set_source_rgb(cr, ts_r, ts_g, ts_b);
-    cairo_set_line_width(cr, 0.8);
-    cairo_new_path(cr);
-    cairo_arc(cr, cx, cy, radius - 0.5, 0, 2 * M_PI);
-    cairo_stroke(cr);
-
-    /* Inner ring: bottom shadow */
+    double frame_width = 2.0;
+    cairo_set_line_width(cr, frame_width);
     cairo_set_source_rgb(cr, bs_r, bs_g, bs_b);
-    cairo_set_line_width(cr, 0.8);
-    cairo_new_path(cr);
-    cairo_arc(cr, cx, cy, radius - 2.0, 0, 2 * M_PI);
+    cairo_move_to(cr, inner_x, inner_y);
+    cairo_line_to(cr, inner_x + inner_w, inner_y);
+    cairo_move_to(cr, inner_x, inner_y);
+    cairo_line_to(cr, inner_x, inner_y + inner_h);
     cairo_stroke(cr);
 
-    /* Tick marks in fg */
-    cairo_set_source_rgb(cr, fg_r, fg_g, fg_b);
-    cairo_set_line_width(cr, 1.0);
-    for (int i = 0; i < 12; ++i) {
-        double angle = 2.0 * M_PI * (double)i / 12.0;
-        double s = sin(angle);
-        double c = cos(angle);
-
-        double r1 = radius * 0.80;
-        double r2 = radius * 0.95;
-
-        double x1 = cx + s * r1;
-        double y1 = cy - c * r1;
-        double x2 = cx + s * r2;
-        double y2 = cy - c * r2;
-
-        cairo_move_to(cr, x1, y1);
-        cairo_line_to(cr, x2, y2);
-    }
+    cairo_set_source_rgb(cr, ts_r, ts_g, ts_b);
+    cairo_move_to(cr, inner_x, inner_y + inner_h);
+    cairo_line_to(cr, inner_x + inner_w, inner_y + inner_h);
+    cairo_move_to(cr, inner_x + inner_w, inner_y);
+    cairo_line_to(cr, inner_x + inner_w, inner_y + inner_h);
     cairo_stroke(cr);
 
-    /* Time with fractional seconds (for smooth mode) */
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    time_t tsec = tv.tv_sec;
-    double frac = (sec_mode == SEC_SMOOTH) ? (tv.tv_usec / 1000000.0) : 0.0;
+    draw_led_time(cr,
+                  display_hour,
+                  current_local_tm.tm_min,
+                  inner_x,
+                  inner_y,
+                  inner_w,
+                  inner_h,
+                  led_on_r, led_on_g, led_on_b,
+                  led_off_r, led_off_g, led_off_b,
+                  ampm_indicator);
 
-    struct tm lt;
-    localtime_r(&tsec, &lt);
-
-    int hour = lt.tm_hour;
-    int min  = lt.tm_min;
-    int sec  = lt.tm_sec;
-
-    double sec_base = (double)sec + frac;
-
-    double sec_angle  = 2.0 * M_PI * (sec_base / 60.0);
-    double min_angle  = 2.0 * M_PI * ( (min + sec_base / 60.0) / 60.0 );
-    double hour_angle = 2.0 * M_PI * ( ((hour % 12) + (min + sec_base / 60.0) / 60.0) / 12.0 );
-
-    /* Timezone label in fg, if extra height */
-    const char *label = current_tz_label();
-    if (label && *label && win_h > size) {
-        cairo_set_source_rgb(cr, fg_r, fg_g, fg_b);
-        cairo_select_font_face(cr, "sans",
-                               CAIRO_FONT_SLANT_NORMAL,
-                               CAIRO_FONT_WEIGHT_NORMAL);
-        cairo_set_font_size(cr, 6.0);
-
-        cairo_text_extents_t ext;
-        cairo_text_extents(cr, label, &ext);
-
-        double text_x = cx - ext.width / 2.0 - ext.x_bearing;
-        double text_y = win_h - 15;
-
-        cairo_move_to(cr, text_x, text_y);
-        cairo_show_text(cr, label);
+    double cal_margin = win_w * 0.05;
+    if (cal_margin < 6.0) cal_margin = 6.0;
+    double cal_top = time_area_h + cal_margin * 0.4;
+    double cal_height = win_h - cal_top - cal_margin;
+    if (cal_height <= 12.0) {
+        cairo_surface_flush(cs);
+        return;
+    }
+    double cal_max_width = win_w - 2.0 * cal_margin;
+    if (cal_max_width <= 12.0) {
+        cairo_surface_flush(cs);
+        return;
     }
 
-    /* Hour + minute hands in select color */
-    cairo_set_source_rgb(cr, sel_r, sel_g, sel_b);
-    cairo_set_source_rgb(cr, fg_r, fg_g, fg_b);
-    cairo_set_line_width(cr, 1.0);
-
-    double hour_len   = radius * 0.55;
-    double hour_width = radius * 0.18;
-    double hour_back  = radius * 0.12;
-    draw_hand_shape(hour_angle, hour_len, hour_width, hour_back);
-
-    double min_len   = radius * 0.85;
-    double min_width = radius * 0.13;
-    double min_back  = radius * 0.12;
-    draw_hand_shape(min_angle, min_len, min_width, min_back);
-
-    /* Second hand in fg (unless disabled) */
-    if (sec_mode != SEC_NONE) {
-        cairo_set_source_rgb(cr, fg_r, fg_g, fg_b);
-        double sec_len = radius * 0.90;
-        double sx = cx + sin(sec_angle) * sec_len;
-        double sy = cy - cos(sec_angle) * sec_len;
-        cairo_set_line_width(cr, 0.8);
-        cairo_move_to(cr, cx, cy);
-        cairo_line_to(cr, sx, sy);
-        cairo_stroke(cr);
+    double weekday_font_coef = cal_height * 0.15;
+    double weekday_font = weekday_font_coef < 10.0 ? 10.0 : weekday_font_coef;
+    double day_font = cal_height * 0.55;
+    if (day_font < weekday_font * 1.5) day_font = weekday_font * 1.5;
+    if (day_font > cal_height * 0.7) day_font = cal_height * 0.7;
+    double desired_width = day_font * 2.0;
+    if (desired_width < 48.0) desired_width = 48.0;
+    double cal_width = fmin(cal_max_width, desired_width);
+    if (cal_width <= 12.0) {
+        cairo_surface_flush(cs);
+        return;
     }
+    double cal_left = (win_w - cal_width) / 2.0;
 
-    /* Center dot in select color */
-    cairo_set_source_rgb(cr, sel_r, sel_g, sel_b);
-    double center_r = (radius > 4) ? radius * 0.10 : 2.0;
-    cairo_new_path(cr);
-    cairo_arc(cr, cx, cy, center_r, 0, 2 * M_PI);
+    double shadow_offset = win_w * 0.015;
+    if (shadow_offset < 2.0) shadow_offset = 2.0;
+    cairo_set_source_rgb(cr,
+                         clamp01(bs_r * 0.85 + bg_r * 0.15),
+                         clamp01(bs_g * 0.85 + bg_g * 0.15),
+                         clamp01(bs_b * 0.85 + bg_b * 0.15));
+    cairo_rectangle(cr, cal_left + shadow_offset,
+                    cal_top + shadow_offset / 2.0,
+                    cal_width, cal_height);
     cairo_fill(cr);
+
+    double paper_r = clamp01(ts_r * 0.6 + bg_r * 0.4 + 0.05);
+    double paper_g = clamp01(ts_g * 0.6 + bg_g * 0.4 + 0.05);
+    double paper_b = clamp01(ts_b * 0.6 + bg_b * 0.4 + 0.05);
+    cairo_set_source_rgb(cr, paper_r, paper_g, paper_b);
+    cairo_rectangle(cr, cal_left, cal_top, cal_width, cal_height);
+    cairo_fill(cr);
+
+    cairo_set_line_width(cr, 1.5);
+    cairo_set_source_rgb(cr, fg_r, fg_g, fg_b);
+    cairo_rectangle(cr, cal_left, cal_top, cal_width, cal_height);
+    cairo_stroke(cr);
+
+    double center_x = cal_left + cal_width / 2.0;
+
+    cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+
+    char day_buf[8];
+    snprintf(day_buf, sizeof(day_buf), "%d", current_local_tm.tm_mday);
+    cairo_set_font_size(cr, day_font);
+    double day_y = cal_top + cal_height * 0.5;
+    cairo_text_extents_t day_ext = {0};
+    draw_centered_text(cr, day_buf, center_x, day_y,
+                       &day_ext, NULL);
+
+    double spacing = cal_height * 0.05;
+    double weekday_y = day_y - (day_ext.height / 2.0) - (weekday_font / 2.0) - spacing;
+    if (weekday_y < cal_top + weekday_font) {
+        weekday_y = cal_top + weekday_font;
+    }
+    cairo_set_font_size(cr, weekday_font);
+    draw_centered_text(cr,
+                       weekday_labels[(current_local_tm.tm_wday + 7) % 7],
+                       center_x, weekday_y,
+                       NULL, NULL);
+
+    double month_font = weekday_font;
+    double month_y = day_y + (day_ext.height / 2.0) + (month_font / 2.0) + spacing;
+    double month_limit = cal_top + cal_height - month_font;
+    if (month_y > month_limit) {
+        month_y = month_limit;
+    }
+    cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_ITALIC, CAIRO_FONT_WEIGHT_BOLD);
+    cairo_set_font_size(cr, month_font);
+    draw_centered_text(cr,
+                       month_labels[current_local_tm.tm_mon % 12],
+                       center_x, month_y,
+                       NULL, NULL);
+
 
     cairo_surface_flush(cs);
 }
@@ -421,16 +654,8 @@ static void handle_configure(XConfigureEvent *cev)
 {
     if (cev->width > 0)  win_w = cev->width;
     if (cev->height > 0) win_h = cev->height;
-}
-
-/* Left-click = cycle timezone */
-static void handle_button(XButtonEvent *bev)
-{
-    if (bev->button == Button1) {
-        tz_index = (tz_index + 1) % tz_count;
-        apply_timezone();
-        draw_clock();
-    }
+    force_full_redraw = true;
+    update_time_if_needed();
 }
 
 /* ----- main -------------------------------------------------------------- */
@@ -442,18 +667,6 @@ int main(int argc, char **argv)
     while (i < argc) {
         if (strcmp(argv[i], "--no-embedd") == 0) {
             no_embed = 1;
-            for (int j = i; j < argc - 1; ++j) argv[j] = argv[j + 1];
-            argc--;
-            continue;
-        } else if (strncmp(argv[i], "--seconds=", 10) == 0) {
-            const char *val = argv[i] + 10;
-            if (strcmp(val, "none") == 0 || strcmp(val, "off") == 0) {
-                sec_mode = SEC_NONE;
-            } else if (strcmp(val, "smooth") == 0) {
-                sec_mode = SEC_SMOOTH;
-            } else {
-                sec_mode = SEC_TICK;
-            }
             for (int j = i; j < argc - 1; ++j) argv[j] = argv[j + 1];
             argc--;
             continue;
@@ -478,6 +691,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    top_widget = toplevel;
     dpy = XtDisplay(toplevel);
     screen = DefaultScreen(dpy);
 
@@ -509,14 +723,29 @@ int main(int argc, char **argv)
 
     XSelectInput(dpy, win,
                  ExposureMask |
-                 StructureNotifyMask |
-                 ButtonPressMask);
+                 StructureNotifyMask);
 
-    apply_timezone();
+    update_time_if_needed();
 
     int running = 1;
+    int xfd = ConnectionNumber(dpy);
+    fd_set rfds;
+    struct timeval tv;
 
     while (running) {
+        FD_ZERO(&rfds);
+        FD_SET(xfd, &rfds);
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+
+        int sel = select(xfd + 1, &rfds, NULL, NULL, &tv);
+        if (sel < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+
         while (XPending(dpy)) {
             XEvent ev;
             XNextEvent(dpy, &ev);
@@ -529,11 +758,7 @@ int main(int argc, char **argv)
             case ConfigureNotify:
                 handle_configure(&ev.xconfigure);
                 break;
-            case ButtonPress:
-                handle_button(&ev.xbutton);
-                break;
             case ClientMessage:
-                /* exit when the panel asks us to quit so we don't leave orphans */
                 if ((Atom)ev.xclient.message_type == wm_delete_atom) {
                     running = 0;
                 }
@@ -547,8 +772,7 @@ int main(int argc, char **argv)
             break;
         }
 
-        draw_clock();
-        usleep(200000);  /* 0.2s -> 5 FPS for smooth second hand */
+        update_time_if_needed();
     }
 
     /* Not normally reached */

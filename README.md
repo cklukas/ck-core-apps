@@ -15,7 +15,11 @@ Example desktop screenshot showing running CK-Core apps:
 
 ---
 
-**Info:** High-DPI is still a bit problematic. E.g., icons on desktop and start panel at bottom are too small. I can hopefully fix that one day in the project [ck-core-cde](https://github.com/cklukas/ck-core-cde).
+**Info:** 
+
+* High-DPI is still a bit problematic. E.g., icons on desktop and start panel at bottom are too small. I can hopefully fix that one day in the project [ck-core-cde](https://github.com/cklukas/ck-core-cde). 
+
+* Some of the applications (currently `ck-clock` and `ck-load`) support dynamic icons, when used with the improved dtwm window manager from teh `ck-core-cde` project. The dynamic icon screenshots are shown with icons that use the newly introduced "double window icon size" setting in dtstyle.
 
 ---
 
@@ -43,11 +47,34 @@ Character map and glyph browser with font selection and copy/paste support.
 
 Analog front-panel clock rendered with cairo and Motif color sets.
 
+**Simple view:**
+
+![ck-clock screenshot simple view](screenshots/ck-clock-1.png)
+
+**Extended view:**
+
+![ck-clock screenshot extended view with month calendar](screenshots/ck-clock-2.png)
+
+
+**Icon view (auto-updating when used with dtwm from ck-core-cde):**
+
+![ck-clock dynamic icon view](screenshots/ck-clock-3.png)
+
+The clock can (as other xwindow apps) be integrated into the launcher (dtpanel), but the panel is currently not well sized on high-dpi screens, I will add a screenshot of the panel integration once that issue is fixed in `ck-core-cde`.
+
+
+
 ### System Load (ck-load)
 
 System load monitor showing CPU, RAM, swap usage, and 1/5/15-minute load averages.
 
+**Main Window:**
+
 ![ck-load screenshot](screenshots/ck-load-1.png)
+
+**Icon view (auto-updating when used with dtwm from ck-core-cde):**
+
+![ck-load dynamic icon view](screenshots/ck-load-2.png)
 
 ### Volume Control (ck-mixer)
 
@@ -66,6 +93,8 @@ Minesweeper clone built for Motif/CDE with configurable grid and classic flags/r
 QBasic-style Nibbles (snake) clone with 1- or 2-player support and keyboard controls.
 
 ![ck-nibbles screenshot](screenshots/ck-nibbles-1.png)
+
+The game is currently a bit quick, speed options or progressing speed by level will be introduced a bit later.
 
 ## Build
 

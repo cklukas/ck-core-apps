@@ -40,7 +40,7 @@ static int screen;
 static Window win;
 static Widget top_widget = NULL;
 
-static int win_w = 48, win_h = 48;
+static int win_w = 250, win_h = 300;
 
 /* cairo state */
 static cairo_surface_t *cs = NULL;
@@ -78,6 +78,11 @@ static const char *month_labels[] = {
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
     "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"
 };
+/* Fine-tune x offsets for the AM/PM triplet glyphs.
+   [0] lead glyph (A/P), [1] first arch, [2] extra tweak for the 2nd arch.
+   The 2nd arch is automatically positioned to overlap the 1st arch by one
+   segment thickness; [2] is applied on top of that. */
+static const double PM_INDICATOR_P_OFFSETS[3] = { 0.0, -0.35, 0.0 };
 
 /* if set by --no-embedd, we use a different WM_CLASS so dtwm won't embed */
 static int no_embed = 0;
@@ -186,11 +191,46 @@ static double clamp01(double v)
     return v;
 }
 
+enum {
+    LED_SEG_BAR_T = 0x01,
+    LED_SEG_R_T   = 0x02,
+    LED_SEG_R_B   = 0x04,
+    LED_SEG_BAR_B = 0x08,
+    LED_SEG_L_B   = 0x10,
+    LED_SEG_L_T   = 0x20,
+    LED_SEG_BAR_M = 0x40
+};
+
+static const unsigned char PM_INDICATOR_LEAD = LED_SEG_BAR_T | LED_SEG_R_T |
+                                               LED_SEG_L_T | LED_SEG_L_B |
+                                               LED_SEG_BAR_M;
+static const unsigned char AM_INDICATOR_LEAD = LED_SEG_BAR_T | LED_SEG_R_T |
+                                               LED_SEG_R_B | LED_SEG_L_T |
+                                               LED_SEG_L_B | LED_SEG_BAR_M;
+static const unsigned char INDICATOR_M_ARCH = LED_SEG_BAR_T | LED_SEG_L_T |
+                                               LED_SEG_L_B | LED_SEG_R_T |
+                                               LED_SEG_R_B;
+
 static unsigned char led_segmap_for_digit(int d)
 {
     static const unsigned char map[10] = {
-        0x3F, 0x06, 0x5B, 0x4F, 0x66,
-        0x6D, 0x7D, 0x07, 0x7F, 0x6F
+        LED_SEG_BAR_T | LED_SEG_R_T | LED_SEG_R_B | LED_SEG_BAR_B |
+            LED_SEG_L_B | LED_SEG_L_T,
+        LED_SEG_R_T | LED_SEG_R_B,
+        LED_SEG_BAR_T | LED_SEG_R_T | LED_SEG_BAR_M | LED_SEG_L_B |
+            LED_SEG_BAR_B,
+        LED_SEG_BAR_T | LED_SEG_R_T | LED_SEG_BAR_M | LED_SEG_R_B |
+            LED_SEG_BAR_B,
+        LED_SEG_L_T | LED_SEG_BAR_M | LED_SEG_R_T | LED_SEG_R_B,
+        LED_SEG_BAR_T | LED_SEG_L_T | LED_SEG_BAR_M | LED_SEG_R_B |
+            LED_SEG_BAR_B,
+        LED_SEG_BAR_T | LED_SEG_L_T | LED_SEG_BAR_M | LED_SEG_L_B |
+            LED_SEG_R_B | LED_SEG_BAR_B,
+        LED_SEG_BAR_T | LED_SEG_R_T | LED_SEG_R_B,
+        LED_SEG_BAR_T | LED_SEG_R_T | LED_SEG_R_B | LED_SEG_BAR_B |
+            LED_SEG_L_B | LED_SEG_L_T | LED_SEG_BAR_M,
+        LED_SEG_BAR_T | LED_SEG_L_T | LED_SEG_BAR_M | LED_SEG_R_T |
+            LED_SEG_R_B | LED_SEG_BAR_B
     };
     if (d < 0 || d > 9) return 0;
     return map[d];
@@ -199,9 +239,12 @@ static unsigned char led_segmap_for_digit(int d)
 static unsigned char led_segmap_for_char(char c)
 {
     switch (toupper((unsigned char)c)) {
-    case 'A': return 0x77;
-    case 'P': return 0x73;
-    case 'M': return 0x37;
+    case 'A': return LED_SEG_BAR_T | LED_SEG_R_T | LED_SEG_R_B | LED_SEG_L_T |
+                 LED_SEG_L_B | LED_SEG_BAR_M;
+    case 'P': return LED_SEG_BAR_T | LED_SEG_R_T | LED_SEG_L_T | LED_SEG_L_B |
+                 LED_SEG_BAR_M;
+    case 'M': return LED_SEG_BAR_T | LED_SEG_L_T | LED_SEG_L_B | LED_SEG_R_T |
+                 LED_SEG_R_B;
     default: return 0;
     }
 }
@@ -281,29 +324,81 @@ static void draw_led_time(cairo_t *cr,
                           const char *indicator)
 {
     if (zone_w <= 0.0 || zone_h <= 0.0) return;
-    double margin = zone_w * 0.05;
+    double margin = fmax(3.0, fmin(zone_w, zone_h) * 0.02);
     double max_height = zone_h - 2.0 * margin;
     if (max_height <= 0.0) return;
 
-    double digit_height = max_height * 0.9;
+    double digit_height = max_height * 0.96;
     double digit_width = digit_height * 0.5;
     double gap = digit_width * 0.25;
     double colon_width = digit_width * 0.22;
     if (colon_width < 2.0) colon_width = 2.0;
 
     double available_width = zone_w - 2.0 * margin;
-    int indicator_len = (indicator && indicator[0]) ? (int)strlen(indicator) : 0;
-    double indicator_gap = digit_width * 0.35;
+    bool use_triplet = indicator &&
+                       (strcmp(indicator, "PM") == 0 ||
+                        strcmp(indicator, "AM") == 0);
+    unsigned char indicator_masks[4] = {0};
+    int indicator_len = 0;
+    if (use_triplet) {
+        indicator_len = 3;
+        unsigned char lead =
+            (strcmp(indicator, "PM") == 0)
+                ? PM_INDICATOR_LEAD
+                : AM_INDICATOR_LEAD;
+        indicator_masks[0] = lead;
+        indicator_masks[1] = INDICATOR_M_ARCH;
+        indicator_masks[2] = INDICATOR_M_ARCH;
+    } else if (indicator && indicator[0]) {
+        indicator_len = (int)strlen(indicator);
+        if (indicator_len > 3) indicator_len = 3;
+        for (int i = 0; i < indicator_len; ++i) {
+            indicator_masks[i] = led_segmap_for_char(indicator[i]);
+        }
+    }
+    double indicator_gap = gap;             /* match digit spacing */
+    double indicator_lead_gap = 0.0;        /* no gap between time and indicator */
     double indicator_digit_width = digit_width * 0.45;
-    double indicator_digit_height = digit_height * 0.45;
+    double indicator_digit_height = digit_height * 0.50;
+    double indicator_thickness = indicator_digit_height * 0.12;
+    if (indicator_thickness < 2.0) indicator_thickness = 2.0;
+    double indicator_offsets[4] = {0};
+    double indicator_min_off = 0.0;
+    double indicator_max_off = 0.0;
+    if (use_triplet) {
+        for (int i = 0; i < indicator_len; ++i) {
+            if (i == 2) {
+                /* Place #3 immediately after #2, overlapping by one segment thickness. */
+                indicator_offsets[i] = indicator_offsets[1] - (indicator_gap + indicator_thickness) +
+                                       (PM_INDICATOR_P_OFFSETS[2] * indicator_gap);
+            } else {
+                indicator_offsets[i] = PM_INDICATOR_P_OFFSETS[i] * indicator_gap;
+            }
+            indicator_min_off = fmin(indicator_min_off, indicator_offsets[i]);
+            indicator_max_off = fmax(indicator_max_off, indicator_offsets[i]);
+        }
+    }
     double digits_total = 4.0 * digit_width + 3.0 * gap + colon_width;
     double indicator_section = 0.0;
     if (indicator_len > 0) {
         indicator_section = indicator_len * indicator_digit_width +
                             (indicator_len - 1) * indicator_gap;
     }
+    double indicator_span_left = 0.0;
+    double indicator_span_right = 0.0;
+    if (indicator_len > 0) {
+        indicator_span_left = -fmin(indicator_min_off, 0.0);
+        indicator_span_right = fmax(indicator_max_off, 0.0);
+    }
+    double overlap_comp = (use_triplet && indicator_len == 3)
+                          ? (indicator_gap + indicator_thickness)
+                          : 0.0;
     double total_width = digits_total +
-                         ((indicator_len > 0) ? (indicator_gap + indicator_section) : 0.0);
+                         ((indicator_len > 0)
+                              ? (indicator_lead_gap + indicator_section -
+                                 overlap_comp +
+                                 indicator_span_left + indicator_span_right)
+                              : 0.0);
 
     if (total_width > available_width && total_width > 0.0) {
         double scale = available_width / total_width;
@@ -311,16 +406,43 @@ static void draw_led_time(cairo_t *cr,
         digit_height *= scale;
         gap *= scale;
         colon_width *= scale;
-        indicator_gap = digit_width * 0.35;
+        indicator_gap = gap;             /* keep indicator spacing aligned with digits */
         indicator_digit_width = digit_width * 0.45;
-        indicator_digit_height = digit_height * 0.45;
+        indicator_digit_height = digit_height * 0.50;
+        indicator_thickness = indicator_digit_height * 0.12;
+        if (indicator_thickness < 2.0) indicator_thickness = 2.0;
+        indicator_lead_gap = 0.0;        /* no gap between time and indicator */
+        indicator_min_off = 0.0;
+        indicator_max_off = 0.0;
+        if (use_triplet) {
+            for (int i = 0; i < indicator_len; ++i) {
+                if (i == 2) {
+                    /* Place #3 immediately after #2, overlapping by one segment thickness. */
+                    indicator_offsets[i] = indicator_offsets[1] - (indicator_gap + indicator_thickness) +
+                                           (PM_INDICATOR_P_OFFSETS[2] * indicator_gap);
+                } else {
+                    indicator_offsets[i] = PM_INDICATOR_P_OFFSETS[i] * indicator_gap;
+                }
+                indicator_min_off = fmin(indicator_min_off, indicator_offsets[i]);
+                indicator_max_off = fmax(indicator_max_off, indicator_offsets[i]);
+            }
+        }
+        overlap_comp = (use_triplet && indicator_len == 3)
+                       ? (indicator_gap + indicator_thickness)
+                       : 0.0;
+        indicator_span_left = indicator_len > 0 ? -fmin(indicator_min_off, 0.0) : 0.0;
+        indicator_span_right = indicator_len > 0 ? fmax(indicator_max_off, 0.0) : 0.0;
         digits_total = 4.0 * digit_width + 3.0 * gap + colon_width;
         indicator_section = indicator_len > 0
                             ? indicator_len * indicator_digit_width +
                               (indicator_len - 1) * indicator_gap
                             : 0.0;
         total_width = digits_total +
-                      ((indicator_len > 0) ? (indicator_gap + indicator_section) : 0.0);
+                      ((indicator_len > 0)
+                           ? (indicator_lead_gap + indicator_section -
+                              overlap_comp +
+                              indicator_span_left + indicator_span_right)
+                           : 0.0);
     }
 
     double start_x = zone_x + margin + (available_width - total_width) / 2.0;
@@ -366,15 +488,30 @@ static void draw_led_time(cairo_t *cr,
 
     if (indicator_len > 0) {
         double digits_width = digits_total;
-        double indicator_x = start_x + digits_width + indicator_gap;
+        double indicator_x = start_x + digits_width + indicator_lead_gap +
+                             indicator_span_left;
         double indicator_y = zone_y + (zone_h - indicator_digit_height) / 2.0;
         if (indicator_y < zone_y) indicator_y = zone_y;
         for (int i = 0; i < indicator_len; ++i) {
-            unsigned char segs = led_segmap_for_char(indicator[i]);
-            draw_led_digit(cr, indicator_x, indicator_y,
+            unsigned char segs = indicator_masks[i];
+            double char_x = indicator_x + i * (indicator_digit_width + indicator_gap) +
+                            indicator_offsets[i];
+            double char_on_r = on_r;
+            double char_on_g = on_g;
+            double char_on_b = on_b;
+            if (use_triplet && indicator_len == 3) {
+                if (i == 0) {          /* lead: A/P */
+                    char_on_r = 0.2;   char_on_g = 0.4;   char_on_b = 1.0; /* blue */
+                } else if (i == 1) {   /* first arch */
+                    char_on_r = 1.0;   char_on_g = 0.9;   char_on_b = 0.1; /* yellow */
+                } else {               /* second arch */
+                    char_on_r = 1.0;   char_on_g = 0.1;   char_on_b = 1.0; /* magenta */
+                }
+            }
+            draw_led_digit(cr, char_x, indicator_y,
                            indicator_digit_width, indicator_digit_height,
-                           segs, on_r, on_g, on_b, off_r, off_g, off_b);
-            indicator_x += indicator_digit_width + indicator_gap;
+                           segs, char_on_r, char_on_g, char_on_b,
+                           off_r, off_g, off_b);
         }
     }
 }
@@ -572,8 +709,8 @@ static void draw_clock(void)
         return;
     }
 
-    double weekday_font_coef = cal_height * 0.15;
-    double weekday_font = weekday_font_coef < 10.0 ? 10.0 : weekday_font_coef;
+    double weekday_font = cal_height * 0.15;
+    if (weekday_font < 10.0) weekday_font = 10.0;
     double day_font = cal_height * 0.55;
     if (day_font < weekday_font * 1.5) day_font = weekday_font * 1.5;
     if (day_font > cal_height * 0.7) day_font = cal_height * 0.7;
@@ -588,12 +725,14 @@ static void draw_clock(void)
 
     double shadow_offset = win_w * 0.015;
     if (shadow_offset < 2.0) shadow_offset = 2.0;
+    double shadow_offset_x = shadow_offset * 2.0;
+    double shadow_offset_y = shadow_offset * 2.0;
     cairo_set_source_rgb(cr,
                          clamp01(bs_r * 0.85 + bg_r * 0.15),
                          clamp01(bs_g * 0.85 + bg_g * 0.15),
                          clamp01(bs_b * 0.85 + bg_b * 0.15));
-    cairo_rectangle(cr, cal_left + shadow_offset,
-                    cal_top + shadow_offset / 2.0,
+    cairo_rectangle(cr, cal_left + shadow_offset_x,
+                    cal_top + shadow_offset_y,
                     cal_width, cal_height);
     cairo_fill(cr);
 
@@ -616,16 +755,38 @@ static void draw_clock(void)
     char day_buf[8];
     snprintf(day_buf, sizeof(day_buf), "%d", current_local_tm.tm_mday);
     cairo_set_font_size(cr, day_font);
-    double day_y = cal_top + cal_height * 0.5;
     cairo_text_extents_t day_ext = {0};
-    draw_centered_text(cr, day_buf, center_x, day_y,
-                       &day_ext, NULL);
+    cairo_text_extents(cr, day_buf, &day_ext);
 
     double spacing = cal_height * 0.05;
-    double weekday_y = day_y - (day_ext.height / 2.0) - (weekday_font / 2.0) - spacing;
-    if (weekday_y < cal_top + weekday_font) {
-        weekday_y = cal_top + weekday_font;
+    if (spacing < 4.0) spacing = 4.0;
+    double label_padding = cal_height * 0.02;
+    if (label_padding < 2.0) label_padding = 2.0;
+    double remaining_height = cal_height - day_ext.height - 2.0 * spacing - label_padding;
+    if (remaining_height < 0.0) remaining_height = 0.0;
+    double label_font = remaining_height / 2.0;
+    double label_max = day_font / 1.5;
+    if (label_font > label_max) label_font = label_max;
+    if (label_font < 10.0) label_font = 10.0;
+    weekday_font = label_font;
+
+    double total_block_height = day_ext.height + 2.0 * spacing +
+                                2.0 * weekday_font;
+    double cal_bottom = cal_top + cal_height;
+    double block_top = cal_top + (cal_height - total_block_height) / 2.0;
+    if (block_top < cal_top) block_top = cal_top;
+    if (block_top + total_block_height > cal_bottom) {
+        block_top = cal_bottom - total_block_height;
     }
+    double weekday_y = block_top + weekday_font / 2.0;
+    double day_y = weekday_y + weekday_font / 2.0 + spacing +
+                   day_ext.height / 2.0;
+    double month_y = day_y + day_ext.height / 2.0 + spacing +
+                     weekday_font / 2.0;
+
+    cairo_set_font_size(cr, day_font);
+    draw_centered_text(cr, day_buf, center_x, day_y, &day_ext, NULL);
+
     cairo_set_font_size(cr, weekday_font);
     draw_centered_text(cr,
                        weekday_labels[(current_local_tm.tm_wday + 7) % 7],
@@ -633,11 +794,6 @@ static void draw_clock(void)
                        NULL, NULL);
 
     double month_font = weekday_font;
-    double month_y = day_y + (day_ext.height / 2.0) + (month_font / 2.0) + spacing;
-    double month_limit = cal_top + cal_height - month_font;
-    if (month_y > month_limit) {
-        month_y = month_limit;
-    }
     cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_ITALIC, CAIRO_FONT_WEIGHT_BOLD);
     cairo_set_font_size(cr, month_font);
     draw_centered_text(cr,
@@ -647,6 +803,9 @@ static void draw_clock(void)
 
 
     cairo_surface_flush(cs);
+    if (dpy) {
+        XFlush(dpy);
+    }
 }
 
 /* Resize */
@@ -691,6 +850,12 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* force a sane preferred shell size so we do not start tiny */
+    XtVaSetValues(toplevel,
+                  XmNwidth,  win_w,
+                  XmNheight, win_h,
+                  NULL);
+
     top_widget = toplevel;
     dpy = XtDisplay(toplevel);
     screen = DefaultScreen(dpy);
@@ -715,7 +880,8 @@ int main(int argc, char **argv)
     sh.height     = win_h;
     XSetWMNormalHints(dpy, win, &sh);
 
-    XStoreName(dpy, win, no_embed ? "ck-clock (debug)" : "ck-clock");
+    XStoreName(dpy, win, "Time");
+    XSetIconName(dpy, win, "Time");
 
     Atom wm_delete_atom = XmInternAtom(dpy, "WM_DELETE_WINDOW", False);
     /* let dtwm send WM_DELETE_WINDOW so we can exit when the panel restarts */

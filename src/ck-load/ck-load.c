@@ -25,6 +25,8 @@
 #include <unistd.h>
 #include <limits.h>
 #include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#include <X11/Xatom.h>
 #include <Xm/Protocols.h>
 #include <Dt/Session.h>
 #include <Xm/Xm.h>
@@ -51,12 +53,37 @@ enum {
 /* Maxima in "percent" units for all meters */
 #define PERCENT_MAX 100
 #define LOAD_PERCENT_DEFAULT_MAX 100
+#define ICON_WIDTH 96
+#define ICON_HEIGHT 96
+#define ICON_MARGIN 4
+#define ICON_BAR_GAP 4
+#define ICON_SEGMENT_HEIGHT 2
+#define ICON_SEGMENT_GAP 2
+#define ICON_BORDER_INSET 4
+#define ICON_BAR_BG_DARKEN_FACTOR 0.4
+
+#ifndef DRAW_ICON_DEBUG_CIRCLES
+#define DRAW_ICON_DEBUG_CIRCLES 0
+#endif
 
 static Widget meters[NUM_METERS];
 static Widget value_labels[NUM_METERS];
 static XtAppContext app_context;
 static SessionData *session_data = NULL;
 static char g_exec_path[PATH_MAX] = "ck-load";
+static Pixmap g_icon_pixmap = None;
+static GC g_icon_gc = NULL;
+static Display *g_icon_display = NULL;
+static int g_icon_screen = -1;
+static Widget g_toplevel = NULL;
+static int g_icon_cpu_percent = 0;
+static int g_icon_ram_percent = 0;
+static Pixel g_icon_bg_color = 0;
+static Pixel g_icon_top_shadow = 0;
+static Pixel g_icon_bottom_shadow = 0;
+static Pixel g_icon_bar_bg_color = 0;
+static Pixel g_icon_segment_color = 0;
+static int g_icon_colors_inited = 0;
 
 /* ---------- Helper: CPU usage from /proc/stat ---------- */
 
@@ -248,6 +275,321 @@ read_load_percent(int *out_l1, int *out_l5, int *out_l15,
     return 0;
 }
 
+static void
+ensure_icon_resources(Display *display)
+{
+    if (!display) return;
+
+    int screen = DefaultScreen(display);
+    if (g_icon_display == display && g_icon_screen == screen &&
+        g_icon_gc != NULL) {
+        return;
+    }
+
+    if (g_icon_gc) {
+        XFreeGC(g_icon_display, g_icon_gc);
+        g_icon_gc = NULL;
+    }
+
+    g_icon_display = display;
+    g_icon_screen = screen;
+    Pixmap root = RootWindow(display, screen);
+
+    XGCValues values;
+    values.foreground = BlackPixel(display, screen);
+    values.background = WhitePixel(display, screen);
+    g_icon_gc = XCreateGC(display, root, GCForeground | GCBackground, &values);
+    XSetLineAttributes(display, g_icon_gc, 1, LineSolid, CapProjecting, JoinMiter);
+}
+
+static Pixel
+derive_darker_icon_pixel(Display *display, int screen, Pixel base_pixel)
+{
+    if (!display) return base_pixel;
+    Colormap colormap = DefaultColormap(display, screen);
+    if (colormap == None) return base_pixel;
+
+    XColor color;
+    color.pixel = base_pixel;
+    if (!XQueryColor(display, colormap, &color)) {
+        return base_pixel;
+    }
+
+    double factor = ICON_BAR_BG_DARKEN_FACTOR;
+    color.red = (unsigned short)(color.red * factor);
+    color.green = (unsigned short)(color.green * factor);
+    color.blue = (unsigned short)(color.blue * factor);
+    color.flags = DoRed | DoGreen | DoBlue;
+
+    if (!XAllocColor(display, colormap, &color)) {
+        return base_pixel;
+    }
+
+    return color.pixel;
+}
+
+static void
+update_icon_colors(void)
+{
+    if (!g_toplevel) return;
+
+    Widget sample = meters[METER_CPU];
+    Pixel bg = WhitePixel(g_icon_display, g_icon_screen);
+    Pixel top_shadow = bg;
+    Pixel bottom_shadow = bg;
+    Pixel segment_color = BlackPixel(g_icon_display, g_icon_screen);
+    Pixel highlight = segment_color;
+
+    if (sample) {
+        XtVaGetValues(sample,
+                      XmNbackground, &bg,
+                      XmNtopShadowColor, &top_shadow,
+                      XmNbottomShadowColor, &bottom_shadow,
+                      XmNforeground, &segment_color,
+                      XmNhighlightColor, &highlight,
+                      NULL);
+    } else {
+        XtVaGetValues(g_toplevel,
+                      XmNbackground, &bg,
+                      XmNtopShadowColor, &top_shadow,
+                      XmNbottomShadowColor, &bottom_shadow,
+                      XmNforeground, &segment_color,
+                      XmNhighlightColor, &highlight,
+                      NULL);
+    }
+
+    g_icon_bg_color = bg;
+    g_icon_top_shadow = top_shadow;
+    g_icon_bottom_shadow = bottom_shadow;
+    g_icon_segment_color = (highlight != 0 && highlight != bg) ? highlight : segment_color;
+    if (g_icon_segment_color == g_icon_bg_color && segment_color != g_icon_bg_color) {
+        g_icon_segment_color = segment_color;
+    }
+    g_icon_bar_bg_color = g_icon_bottom_shadow;
+    g_icon_bar_bg_color = derive_darker_icon_pixel(g_icon_display, g_icon_screen,
+                                                   g_icon_bar_bg_color);
+    g_icon_colors_inited = 1;
+}
+
+static int
+window_is_iconified(void)
+{
+    if (!g_toplevel || !XtIsRealized(g_toplevel)) return 0;
+    Display *display = XtDisplay(g_toplevel);
+    if (!display) return 0;
+    Window window = XtWindow(g_toplevel);
+    if (!window) return 0;
+
+    Atom prop = XInternAtom(display, "WM_STATE", True);
+    if (prop == None) return 0;
+
+    Atom actual;
+    int format;
+    unsigned long nitems;
+    unsigned long bytes_after;
+    unsigned char *data = NULL;
+
+    int status = XGetWindowProperty(display, window, prop, 0, 2, False,
+                                    AnyPropertyType, &actual,
+                                    &format, &nitems, &bytes_after, &data);
+    if (status != Success || !data) return 0;
+
+    long state = -1;
+    if (nitems >= 1) {
+        long *longs = (long *)data;
+        state = longs[0];
+    }
+    XFree(data);
+    return (state == IconicState);
+}
+
+static void
+update_window_title_with_cpu(int cpu_percent, int iconified)
+{
+    if (!g_toplevel) return;
+
+    char title[64];
+    if (iconified) {
+        snprintf(title, sizeof(title), "CPU %d%%", cpu_percent);
+    } else {
+        snprintf(title, sizeof(title), "System Load");
+    }
+
+    XtVaSetValues(g_toplevel, XmNtitle, title,
+                  XmNiconName, title, NULL);
+}
+
+static void
+draw_icon_bars(Display *display, Pixmap pixmap, int cpu_percent, int ram_percent)
+{
+    int screen = g_icon_screen;
+    unsigned long bg = g_icon_colors_inited ? g_icon_bg_color :
+                       WhitePixel(display, screen);
+    unsigned long fill_color = g_icon_colors_inited ? g_icon_bar_bg_color :
+                               BlackPixel(display, screen);
+    unsigned long segment_color = g_icon_colors_inited ? g_icon_segment_color :
+                                  BlackPixel(display, screen);
+    unsigned long top_color = g_icon_colors_inited ? g_icon_top_shadow :
+                       WhitePixel(display, screen);
+    unsigned long bottom_color = g_icon_colors_inited ? g_icon_bottom_shadow :
+                                  BlackPixel(display, screen);
+
+    XSetForeground(display, g_icon_gc, bg);
+    XFillRectangle(display, pixmap, g_icon_gc, 0, 0, ICON_WIDTH, ICON_HEIGHT);
+
+    int available_width = ICON_WIDTH - ICON_MARGIN * 2;
+    int bar_height = ICON_HEIGHT - ICON_MARGIN * 2;
+    int bar_width = (available_width - ICON_BAR_GAP) / 2;
+    if (bar_height <= 0 || bar_width <= 0) return;
+
+    if (cpu_percent < 0) cpu_percent = 0;
+    if (cpu_percent > 100) cpu_percent = 100;
+    if (ram_percent < 0) ram_percent = 0;
+    if (ram_percent > 100) ram_percent = 100;
+
+    int cpu_x = ICON_MARGIN;
+    int ram_x = ICON_MARGIN + bar_width + ICON_BAR_GAP;
+
+    int inner_height = bar_height - ICON_BORDER_INSET * 2;
+    if (inner_height < 1) inner_height = 1;
+    int inner_top = ICON_MARGIN + ICON_BORDER_INSET;
+    int inner_bottom = inner_top + inner_height - 1;
+    int inner_width = bar_width - ICON_BORDER_INSET * 2;
+
+    int segment_stride = ICON_SEGMENT_HEIGHT + ICON_SEGMENT_GAP;
+    int max_segments = 0;
+    if (segment_stride > 0 && inner_height > 0) {
+        max_segments = (inner_height + ICON_SEGMENT_GAP) / segment_stride;
+        if (max_segments < 1) max_segments = 1;
+    }
+
+    int cpu_segments = (cpu_percent * max_segments + 50) / 100;
+    if (cpu_segments > max_segments) cpu_segments = max_segments;
+    int cpu_inner_x = cpu_x + ICON_BORDER_INSET;
+    if (inner_width < 1) inner_width = 1;
+
+    XSetForeground(display, g_icon_gc, fill_color);
+    XFillRectangle(display, pixmap, g_icon_gc,
+                   cpu_x, ICON_MARGIN, bar_width, bar_height);
+    XSetForeground(display, g_icon_gc, segment_color);
+    for (int i = 0; i < cpu_segments; ++i) {
+        int seg_bottom = inner_bottom - i * segment_stride;
+        int seg_top = seg_bottom - ICON_SEGMENT_HEIGHT + 1;
+        if (seg_top < inner_top) break;
+        XFillRectangle(display, pixmap, g_icon_gc,
+                       cpu_inner_x, seg_top, inner_width, ICON_SEGMENT_HEIGHT);
+    }
+    int cpu_top = ICON_MARGIN;
+    int cpu_bottom = ICON_MARGIN + bar_height - 1;
+    int cpu_left = cpu_x;
+    int cpu_right = cpu_x + bar_width - 1;
+
+    XSetForeground(display, g_icon_gc, bottom_color);
+    XDrawLine(display, pixmap, g_icon_gc, cpu_left, cpu_top, cpu_right, cpu_top);
+    XDrawLine(display, pixmap, g_icon_gc, cpu_left, cpu_top, cpu_left, cpu_bottom);
+    XSetForeground(display, g_icon_gc, top_color);
+    XDrawLine(display, pixmap, g_icon_gc, cpu_left, cpu_bottom, cpu_right, cpu_bottom);
+    XDrawLine(display, pixmap, g_icon_gc, cpu_right, cpu_top, cpu_right, cpu_bottom);
+
+    int ram_segments = (ram_percent * max_segments + 50) / 100;
+    if (ram_segments > max_segments) ram_segments = max_segments;
+    int ram_inner_x = ram_x + ICON_BORDER_INSET;
+
+    XSetForeground(display, g_icon_gc, fill_color);
+    XFillRectangle(display, pixmap, g_icon_gc,
+                   ram_x, ICON_MARGIN, bar_width, bar_height);
+    XSetForeground(display, g_icon_gc, segment_color);
+    for (int i = 0; i < ram_segments; ++i) {
+        int seg_bottom = inner_bottom - i * segment_stride;
+        int seg_top = seg_bottom - ICON_SEGMENT_HEIGHT + 1;
+        if (seg_top < inner_top) break;
+        XFillRectangle(display, pixmap, g_icon_gc,
+                       ram_inner_x, seg_top, inner_width, ICON_SEGMENT_HEIGHT);
+    }
+    int ram_top = ICON_MARGIN;
+    int ram_bottom = ICON_MARGIN + bar_height - 1;
+    int ram_left = ram_x;
+    int ram_right = ram_x + bar_width - 1;
+
+    XSetForeground(display, g_icon_gc, bottom_color);
+    XDrawLine(display, pixmap, g_icon_gc, ram_left, ram_top, ram_right, ram_top);
+    XDrawLine(display, pixmap, g_icon_gc, ram_left, ram_top, ram_left, ram_bottom);
+    XSetForeground(display, g_icon_gc, top_color);
+    XDrawLine(display, pixmap, g_icon_gc, ram_left, ram_bottom, ram_right, ram_bottom);
+    XDrawLine(display, pixmap, g_icon_gc, ram_right, ram_top, ram_right, ram_bottom);
+
+    int circle_radius = (ICON_WIDTH < ICON_HEIGHT ? ICON_WIDTH : ICON_HEIGHT) / 2;
+    circle_radius -= ICON_MARGIN + 1;
+    if (circle_radius < 1) circle_radius = 1;
+    if (DRAW_ICON_DEBUG_CIRCLES) {
+        XSetForeground(display, g_icon_gc, BlackPixel(display, screen));
+        int cx = ICON_WIDTH / 2;
+        int cy = ICON_HEIGHT / 2;
+        int diameter = circle_radius * 2;
+        XDrawArc(display, pixmap, g_icon_gc,
+                 cx - circle_radius, cy - circle_radius,
+                 diameter, diameter, 0, 360 * 64);
+        int inner_radius = circle_radius - 5;
+        if (inner_radius > 0) {
+            int inner_diameter = inner_radius * 2;
+            XDrawArc(display, pixmap, g_icon_gc,
+                     cx - inner_radius, cy - inner_radius,
+                     inner_diameter, inner_diameter, 0, 360 * 64);
+        }
+    }
+}
+
+static void
+update_wm_icon_pixmap(Display *display)
+{
+    if (!g_icon_pixmap || !g_toplevel || !XtIsRealized(g_toplevel)) return;
+    Window window = XtWindow(g_toplevel);
+    if (!window) return;
+
+    XWMHints *hints = XGetWMHints(display, window);
+    XWMHints local;
+    if (hints) {
+        local = *hints;
+        XFree(hints);
+    } else {
+        memset(&local, 0, sizeof(local));
+    }
+    local.flags |= IconPixmapHint;
+    local.icon_pixmap = g_icon_pixmap;
+    XSetWMHints(display, window, &local);
+}
+
+static void
+refresh_dynamic_icon(int cpu_percent, int ram_percent)
+{
+    if (!g_toplevel) return;
+
+    Display *display = XtDisplay(g_toplevel);
+    if (!display) return;
+
+    ensure_icon_resources(display);
+    update_icon_colors();
+    Pixmap root = RootWindow(display, g_icon_screen);
+    Pixmap new_pixmap = XCreatePixmap(display, root, ICON_WIDTH, ICON_HEIGHT,
+                                      DefaultDepth(display, g_icon_screen));
+    if (new_pixmap == None) return;
+
+    draw_icon_bars(display, new_pixmap, cpu_percent, ram_percent);
+    XFlush(display);
+    Pixmap prev_pixmap = g_icon_pixmap;
+    g_icon_pixmap = new_pixmap;
+    XtVaSetValues(g_toplevel, XmNiconPixmap, g_icon_pixmap, NULL);
+    if (XtIsRealized(g_toplevel)) {
+        update_wm_icon_pixmap(display);
+    }
+    int iconic = window_is_iconified();
+    update_window_title_with_cpu(cpu_percent, iconic);
+
+    if (prev_pixmap != None) {
+        XFreePixmap(display, prev_pixmap);
+    }
+}
+
 /* ---------- Timer callback: update all meters ---------- */
 
 static void
@@ -280,6 +622,7 @@ update_meters_cb(XtPointer client_data, XtIntervalId *id)
             XmStringFree(s);
             snprintf(last_labels[METER_CPU], sizeof(last_labels[METER_CPU]), "%s", buf);
         }
+        g_icon_cpu_percent = cpu_percent;
     }
 
     if (read_mem_and_swap_percent(&ram_percent, &swap_percent,
@@ -310,6 +653,7 @@ update_meters_cb(XtPointer client_data, XtIntervalId *id)
             XmStringFree(s_swap);
             snprintf(last_labels[METER_SWAP], sizeof(last_labels[METER_SWAP]), "%s", buf_swap);
         }
+        g_icon_ram_percent = ram_percent;
     }
 
     if (read_load_percent(&load1_percent, &load5_percent, &load15_percent,
@@ -368,6 +712,8 @@ update_meters_cb(XtPointer client_data, XtIntervalId *id)
             snprintf(last_labels[METER_LOAD15], sizeof(last_labels[METER_LOAD15]), "%s", buf15);
         }
     }
+
+    refresh_dynamic_icon(g_icon_cpu_percent, g_icon_ram_percent);
 
     /* Re-arm timer */
     XtAppAddTimeOut(app_context, UPDATE_INTERVAL_MS, update_meters_cb, NULL);
@@ -432,11 +778,11 @@ static void session_save_cb(Widget w, XtPointer client_data, XtPointer call_data
 
 /* ---------- Main + UI setup ---------- */
 
-int
-main(int argc, char *argv[])
-{
-    Widget toplevel, main_form;
-    XmString xm_title;
+    int
+    main(int argc, char *argv[])
+    {
+        Widget toplevel, main_form;
+        XmString xm_title;
     static char *meter_labels[NUM_METERS] = {
         "CPU",
         "RAM",
@@ -556,10 +902,15 @@ main(int argc, char *argv[])
         value_labels[i] = value_label;
     }
 
+    g_toplevel = toplevel;
+
     /* Set an application icon or window title if desired */
+    const char *window_title = "System Load";
     XtVaSetValues(toplevel,
-                  XmNtitle, "System Load",
+                  XmNtitle, window_title,
+                  XmNiconName, window_title,
                   NULL);
+    refresh_dynamic_icon(g_icon_cpu_percent, g_icon_ram_percent);
 
     /* Session restore (geometry) */
     if (session_data && session_load(toplevel, session_data)) {

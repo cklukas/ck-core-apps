@@ -19,6 +19,7 @@
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/cursorfont.h>
 
 #include <Dt/Dt.h>
 #include <Dt/Session.h>
@@ -96,6 +97,11 @@ typedef struct FontGroup {
     int enc_cap;
 } FontGroup;
 
+typedef struct FontInfoLine {
+    Widget widget;
+    char *copy_value;
+} FontInfoLine;
+
 typedef struct AppState {
     XtAppContext app_context;
     Widget toplevel;
@@ -114,7 +120,6 @@ typedef struct AppState {
     int size_combo_items;
     bool updating_controls;
 
-    Widget font_file_label;
     Widget sample_preview;
     XtIntervalId sample_reflow_timer;
     Dimension last_sample_w;
@@ -132,6 +137,11 @@ typedef struct AppState {
     Widget bottom_form;
     Widget text_field;
     Widget copy_btn;
+    Widget font_info_form;
+    FontInfoLine **font_info_lines;
+    int font_info_line_count;
+    int font_info_line_cap;
+    Cursor hand_cursor;
 
     Widget about_shell;
 
@@ -197,6 +207,11 @@ static void update_selected_char_label_code(unsigned int code);
 static void sample_preview_update_and_draw(void);
 static void apply_selected_font(void);
 static void schedule_apply_selected_font(void);
+static Cursor ensure_hand_cursor(void);
+static void font_info_line_button_press(Widget, XtPointer, XEvent *, Boolean *);
+static void font_info_lines_clear(void);
+static void font_info_lines_add(const char *, const char *);
+static void update_font_info_lines(void);
 
 /* -------------------------------------------------------------------------------------------------
  * Small utilities
@@ -1447,10 +1462,101 @@ static char *x11_find_font_file_path(Display *dpy, const char *font_name)
     return out;
 }
 
-static void update_font_file_label_for_loaded_font(void)
+static Cursor ensure_hand_cursor(void)
 {
-    if (!G.font_file_label) return;
+    if (!G.hand_cursor && G.dpy) {
+        G.hand_cursor = XCreateFontCursor(G.dpy, XC_hand2);
+    }
+    return G.hand_cursor;
+}
 
+static void font_info_cursor_enter(Widget w, XtPointer client, XEvent *event, Boolean *cont)
+{
+    (void)client;
+    (void)event;
+    (void)cont;
+    Cursor cursor = ensure_hand_cursor();
+    if (!cursor) return;
+    Display *dpy = XtDisplay(w);
+    Window win = XtWindow(w);
+    if (!dpy || !win) return;
+    XDefineCursor(dpy, win, cursor);
+}
+
+static void font_info_cursor_leave(Widget w, XtPointer client, XEvent *event, Boolean *cont)
+{
+    (void)client;
+    (void)event;
+    (void)cont;
+    Display *dpy = XtDisplay(w);
+    Window win = XtWindow(w);
+    if (!dpy || !win) return;
+    XUndefineCursor(dpy, win);
+}
+static void font_info_line_button_press(Widget w, XtPointer client, XEvent *event, Boolean *cont)
+{
+    (void)w;
+    (void)event;
+    (void)cont;
+    FontInfoLine *line = (FontInfoLine *)client;
+    if (!line || !line->copy_value || !G.text_field) return;
+    XmTextFieldSetString(G.text_field, line->copy_value);
+}
+
+static void font_info_lines_clear(void)
+{
+    if (!G.font_info_lines) return;
+    for (int i = 0; i < G.font_info_line_count; ++i) {
+        FontInfoLine *line = G.font_info_lines[i];
+        if (!line) continue;
+        if (line->widget) XtDestroyWidget(line->widget);
+        free(line->copy_value);
+        free(line);
+        G.font_info_lines[i] = NULL;
+    }
+    G.font_info_line_count = 0;
+}
+
+static void font_info_lines_add(const char *text, const char *copy_value)
+{
+    if (!text || !G.font_info_form) return;
+    if (G.font_info_line_count >= G.font_info_line_cap) {
+        int new_cap = G.font_info_line_cap ? G.font_info_line_cap * 2 : 8;
+        FontInfoLine **new_lines = (FontInfoLine **)realloc(G.font_info_lines, new_cap * sizeof(FontInfoLine *));
+        if (!new_lines) return;
+        G.font_info_lines = new_lines;
+        G.font_info_line_cap = new_cap;
+    }
+
+    FontInfoLine *line = (FontInfoLine *)calloc(1, sizeof(FontInfoLine));
+    if (!line) return;
+    if (copy_value) {
+        line->copy_value = xstrdup(copy_value);
+    }
+
+    XmString label = XmStringCreateLocalized((char *)text);
+    line->widget = XtVaCreateManagedWidget("fontInfoLine",
+                                           xmLabelWidgetClass, G.font_info_form,
+                                           XmNlabelString, label,
+                                           XmNalignment, XmALIGNMENT_BEGINNING,
+                                           NULL);
+    XmStringFree(label);
+
+    Cursor cursor = ensure_hand_cursor();
+    if (cursor && line->copy_value) {
+        XtVaSetValues(line->widget, XmNcursor, cursor, NULL);
+    }
+    if (line->copy_value) {
+        XtAddEventHandler(line->widget, ButtonPressMask, False, font_info_line_button_press, line);
+        XtAddEventHandler(line->widget, EnterWindowMask, False, font_info_cursor_enter, line);
+        XtAddEventHandler(line->widget, LeaveWindowMask, False, font_info_cursor_leave, line);
+    }
+
+    G.font_info_lines[G.font_info_line_count++] = line;
+}
+
+static void update_font_info_lines(void)
+{
     char *loaded_name = NULL;
     if (G.dpy && G.font) {
         loaded_name = xfont_get_property_string(G.dpy, G.font, "FONT");
@@ -1487,71 +1593,92 @@ static void update_font_file_label_for_loaded_font(void)
     bool have_rx = (G.dpy && G.font) ? xfont_get_property_card32(G.dpy, G.font, "RESOLUTION_X", &res_x) : false;
     bool have_ry = (G.dpy && G.font) ? xfont_get_property_card32(G.dpy, G.font, "RESOLUTION_Y", &res_y) : false;
 
-    char buf[2048];
-    const char *n = (name && name[0]) ? name : "(unknown)";
-    const char *p = (path && path[0]) ? path : "(unknown)";
-    snprintf(buf, sizeof(buf), "Loaded font: %s\nFont file: %s", n, p);
+    font_info_lines_clear();
+    if (!G.font_info_form) goto cleanup;
+
+    const char *display_name = (name && name[0]) ? name : "(unknown)";
+    const char *file_value = (path && path[0]) ? path : "(unknown)";
+
+    char label[512];
+    snprintf(label, sizeof(label), "Loaded font: %s", display_name);
+    font_info_lines_add(label, display_name);
+    snprintf(label, sizeof(label), "Font file: %s", file_value);
+    font_info_lines_add(label, file_value);
 
     if (weight || slant) {
-        strncat(buf, "\nStyle: ", sizeof(buf) - strlen(buf) - 1);
-        strncat(buf, weight ? weight : "?", sizeof(buf) - strlen(buf) - 1);
-        strncat(buf, ", ", sizeof(buf) - strlen(buf) - 1);
-        strncat(buf, slant ? slant : "?", sizeof(buf) - strlen(buf) - 1);
+        char style_value[128];
+        char style_label[192];
+        snprintf(style_value, sizeof(style_value), "%s, %s", weight ? weight : "?", slant ? slant : "?");
+        snprintf(style_label, sizeof(style_label), "Style: %s", style_value);
+        font_info_lines_add(style_label, style_value);
     }
 
     if (charset_reg || charset_enc) {
-        strncat(buf, "\nCharset: ", sizeof(buf) - strlen(buf) - 1);
-        strncat(buf, charset_reg ? charset_reg : "?", sizeof(buf) - strlen(buf) - 1);
-        strncat(buf, "-", sizeof(buf) - strlen(buf) - 1);
-        strncat(buf, charset_enc ? charset_enc : "?", sizeof(buf) - strlen(buf) - 1);
+        char charset_value[128];
+        char charset_label[192];
+        snprintf(charset_value, sizeof(charset_value), "%s-%s",
+                 charset_reg ? charset_reg : "?", charset_enc ? charset_enc : "?");
+        snprintf(charset_label, sizeof(charset_label), "Charset: %s", charset_value);
+        font_info_lines_add(charset_label, charset_value);
     }
 
     if (have_px || have_pt || (have_rx && have_ry)) {
-        strncat(buf, "\nSize:", sizeof(buf) - strlen(buf) - 1);
+        char size_value[256];
+        size_value[0] = '\0';
         if (have_px) {
             char tmp[64];
-            snprintf(tmp, sizeof(tmp), " %lu px", pixel_size);
-            strncat(buf, tmp, sizeof(buf) - strlen(buf) - 1);
+            snprintf(tmp, sizeof(tmp), "%lu px", pixel_size);
+            if (size_value[0]) strncat(size_value, " ", sizeof(size_value) - strlen(size_value) - 1);
+            strncat(size_value, tmp, sizeof(size_value) - strlen(size_value) - 1);
         }
         if (have_pt) {
             char tmp[64];
-            snprintf(tmp, sizeof(tmp), " %.1f pt", (double)point_deci / 10.0);
-            strncat(buf, tmp, sizeof(buf) - strlen(buf) - 1);
+            snprintf(tmp, sizeof(tmp), "%.1f pt", (double)point_deci / 10.0);
+            if (size_value[0]) strncat(size_value, " ", sizeof(size_value) - strlen(size_value) - 1);
+            strncat(size_value, tmp, sizeof(size_value) - strlen(size_value) - 1);
         }
         if (have_rx && have_ry) {
             char tmp[64];
-            snprintf(tmp, sizeof(tmp), " @ %lux%lu dpi", res_x, res_y);
-            strncat(buf, tmp, sizeof(buf) - strlen(buf) - 1);
+            snprintf(tmp, sizeof(tmp), "@ %lux%lu dpi", res_x, res_y);
+            if (size_value[0]) strncat(size_value, " ", sizeof(size_value) - strlen(size_value) - 1);
+            strncat(size_value, tmp, sizeof(size_value) - strlen(size_value) - 1);
         }
+        char size_label[320];
+        snprintf(size_label, sizeof(size_label), "Size: %s", size_value);
+        font_info_lines_add(size_label, size_value);
     }
 
     if (spacing || have_aw) {
-        strncat(buf, "\nSpacing:", sizeof(buf) - strlen(buf) - 1);
+        char spacing_value[256];
+        spacing_value[0] = '\0';
         if (spacing) {
-            strncat(buf, " ", sizeof(buf) - strlen(buf) - 1);
-            strncat(buf, spacing, sizeof(buf) - strlen(buf) - 1);
+            strncat(spacing_value, spacing, sizeof(spacing_value) - strlen(spacing_value) - 1);
         }
         if (have_aw) {
             char tmp[64];
-            snprintf(tmp, sizeof(tmp), "%sAvg width: %lu", spacing ? ", " : " ", avg_width);
-            strncat(buf, tmp, sizeof(buf) - strlen(buf) - 1);
+            if (spacing && spacing[0]) {
+                snprintf(tmp, sizeof(tmp), ", Avg width: %lu", avg_width);
+            } else {
+                snprintf(tmp, sizeof(tmp), "Avg width: %lu", avg_width);
+            }
+            strncat(spacing_value, tmp, sizeof(spacing_value) - strlen(spacing_value) - 1);
         }
+        char spacing_label[320];
+        snprintf(spacing_label, sizeof(spacing_label), "Spacing: %s", spacing_value);
+        font_info_lines_add(spacing_label, spacing_value);
     }
 
     if (G.font) {
-        char tmp[256];
-        snprintf(tmp, sizeof(tmp), "\nGrid glyphs: %d  Range: b1 %d..%d, b2 %d..%d  Ascent/Descent: %d/%d",
+        char grid_value[256];
+        snprintf(grid_value, sizeof(grid_value), "Grid glyphs: %d  Range: b1 %d..%d, b2 %d..%d  Ascent/Descent: %d/%d",
                  G.glyph_count,
                  G.font->min_byte1, G.font->max_byte1,
                  G.font->min_char_or_byte2, G.font->max_char_or_byte2,
                  G.font->ascent, G.font->descent);
-        strncat(buf, tmp, sizeof(buf) - strlen(buf) - 1);
+        font_info_lines_add(grid_value, grid_value);
     }
 
-    XmString s = XmStringCreateLocalized(buf);
-    XtVaSetValues(G.font_file_label, XmNlabelString, s, NULL);
-    XmStringFree(s);
-
+cleanup:
     free(charset_reg);
     free(charset_enc);
     free(weight);
@@ -3056,7 +3183,7 @@ static void apply_selected_font(void)
     }
 
     sample_preview_update_and_draw();
-    update_font_file_label_for_loaded_font();
+    update_font_info_lines();
 
     recompute_grid_geometry();
     redraw_all();
@@ -3229,11 +3356,14 @@ static void build_ui(void)
                                                XmNresizePolicy, XmRESIZE_NONE,
                                                XmNshadowThickness, 1,
                                                XmNshadowType, XmSHADOW_IN,
+                                               XmNcursor, ensure_hand_cursor(),
                                                NULL);
 
     XtAddCallback(G.sample_preview, XmNexposeCallback, sample_expose_cb, NULL);
     XtAddEventHandler(G.sample_preview, ButtonPressMask, False, sample_button_press, NULL);
     XtAddEventHandler(G.sample_preview, StructureNotifyMask, False, sample_configure_event, NULL);
+    XtAddEventHandler(G.sample_preview, EnterWindowMask, False, font_info_cursor_enter, NULL);
+    XtAddEventHandler(G.sample_preview, LeaveWindowMask, False, font_info_cursor_leave, NULL);
 
     /* Separator */
     Widget sep = XtVaCreateManagedWidget("sep",
@@ -3266,26 +3396,26 @@ static void build_ui(void)
                                                     NULL);
     XmStringFree(s_sel);
 
-    XmString s_file = XmStringCreateLocalized("Font file: (unknown)");
-    G.font_file_label = XtVaCreateManagedWidget("fontFileLabel",
-                                                xmLabelWidgetClass, G.bottom_form,
-                                                XmNlabelString, s_file,
-                                                XmNtopAttachment, XmATTACH_WIDGET,
-                                                XmNtopWidget, G.selected_char_label,
-                                                XmNtopOffset, 2,
-                                                XmNleftAttachment, XmATTACH_FORM,
-                                                XmNrightAttachment, XmATTACH_FORM,
-                                                XmNalignment, XmALIGNMENT_BEGINNING,
-                                                XmNmarginBottom, 6,
-                                                NULL);
-    XmStringFree(s_file);
+    G.font_info_form = XtVaCreateManagedWidget("fontInfoForm",
+                                               xmRowColumnWidgetClass, G.bottom_form,
+                                               XmNorientation, XmVERTICAL,
+                                               XmNpacking, XmPACK_TIGHT,
+                                               XmNspacing, 0,
+                                               XmNmarginWidth, 0,
+                                               XmNmarginHeight, 0,
+                                               XmNtopAttachment, XmATTACH_WIDGET,
+                                               XmNtopWidget, G.selected_char_label,
+                                               XmNtopOffset, 2,
+                                               XmNleftAttachment, XmATTACH_FORM,
+                                               XmNrightAttachment, XmATTACH_FORM,
+                                               NULL);
 
     XmString s_chars = XmStringCreateLocalized("Characters to copy:");
     Widget chars_label = XtVaCreateManagedWidget("charsLabel",
                                                  xmLabelWidgetClass, G.bottom_form,
                                                  XmNlabelString, s_chars,
                                                  XmNtopAttachment, XmATTACH_WIDGET,
-                                                 XmNtopWidget, G.font_file_label,
+                                                 XmNtopWidget, G.font_info_form,
                                                  XmNtopOffset, 2,
                                                  XmNleftAttachment, XmATTACH_FORM,
                                                  XmNalignment, XmALIGNMENT_BEGINNING,
@@ -3344,6 +3474,8 @@ static void build_ui(void)
 
     XtAddCallback(G.drawing, XmNexposeCallback, drawing_expose_cb, NULL);
     XtAddEventHandler(G.drawing, ButtonPressMask, False, drawing_button_press, NULL);
+    XtAddEventHandler(G.drawing, EnterWindowMask, False, font_info_cursor_enter, NULL);
+    XtAddEventHandler(G.drawing, LeaveWindowMask, False, font_info_cursor_leave, NULL);
 
     XmMainWindowSetAreas(G.mainw, G.menubar, NULL, NULL, NULL, G.work_form);
 }
@@ -3585,6 +3717,14 @@ int main(int argc, char *argv[])
     free(G.faces);
     free_font_groups();
     sample_lines_clear();
+    font_info_lines_clear();
+    free(G.font_info_lines);
+    G.font_info_lines = NULL;
+    G.font_info_line_cap = 0;
+    if (G.hand_cursor) {
+        XFreeCursor(G.dpy, G.hand_cursor);
+        G.hand_cursor = 0;
+    }
     free(G.sample_text);
     session_data_free(G.session_data);
 

@@ -741,6 +741,16 @@ void tasks_ctrl_handle_viewport_change(TasksController *ctrl)
     tasks_ctrl_set_virtual_window(ctrl, ctrl->virtual_row_start);
 }
 
+void tasks_ctrl_set_selected_application(TasksController *ctrl, int index)
+{
+    if (!ctrl) return;
+    if (index < 0 || index >= ctrl->applications_count) {
+        ctrl->selected_application = -1;
+        return;
+    }
+    ctrl->selected_application = index;
+}
+
 static void on_process_scroll(Widget widget, XtPointer client, XtPointer call)
 {
     (void)widget;
@@ -842,6 +852,7 @@ TasksController *tasks_ctrl_create(TasksUi *ui, SessionData *session_data)
     ctrl->session = session_data;
     ctrl->refresh_interval_ms = 2000;
     ctrl->virtual_row_start = 0;
+    ctrl->selected_application = -1;
 
     XtAddCallback(ui->menu_file_exit, XmNactivateCallback, on_file_exit, ctrl);
     XtAddCallback(ui->menu_file_connect, XmNactivateCallback, on_file_connect, ctrl);
@@ -869,6 +880,9 @@ TasksController *tasks_ctrl_create(TasksUi *ui, SessionData *session_data)
 
     XtAddCallback(ui->menu_help_help, XmNactivateCallback, on_help_view, ctrl);
     XtAddCallback(ui->menu_help_about, XmNactivateCallback, on_about, ctrl);
+    if (ui->apps_search_field) {
+        XtAddCallback(ui->apps_search_field, XmNvalueChangedCallback, on_apps_search_changed, ctrl);
+    }
     if (ui->apps_close_button) {
         XtAddCallback(ui->apps_close_button, XmNactivateCallback, on_apps_close, ctrl);
     }
@@ -898,9 +912,7 @@ void tasks_ctrl_destroy(TasksController *ctrl)
         XtDestroyWidget(ctrl->about_shell);
     }
     tasks_model_free_processes(ctrl->process_entries, ctrl->process_count);
-    free(ctrl->app_windows);
-    free(ctrl->app_pids);
-    free(ctrl->app_window_counts);
+    free(ctrl->applications);
     if (ctrl->ui) {
         ctrl->ui->controller = NULL;
     }

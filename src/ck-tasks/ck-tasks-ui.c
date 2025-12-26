@@ -1020,6 +1020,7 @@ static Widget create_applications_tab(TasksUi *ui)
 
     Widget controls = XmCreateForm(page, "appsControlsForm", NULL, 0);
     XtVaSetValues(controls,
+                  XmNfractionBase, 100,
                   XmNleftAttachment, XmATTACH_FORM,
                   XmNrightAttachment, XmATTACH_FORM,
                   XmNbottomAttachment, XmATTACH_FORM,

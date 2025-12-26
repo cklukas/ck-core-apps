@@ -4,6 +4,7 @@
 #include <Xm/Xm.h>
 
 #include "../shared/gridlayout/gridlayout.h"
+#include "ck-tasks-model.h"
 
 typedef enum {
     TASKS_TAB_PROCESSES = 1,
@@ -18,7 +19,7 @@ typedef struct {
     Widget toplevel;
     Widget main_form;
     Widget menu_bar;
-    Widget notebook;
+    Widget tab_stack;
     Widget tab_processes;
     Widget tab_performance;
     Widget tab_networking;
@@ -27,6 +28,13 @@ typedef struct {
     Widget status_label;
     Widget process_filter_toggle;
     GridLayout *process_grid;
+    Widget apps_list;
+    Widget apps_close_button;
+    Widget perf_cpu_meter;
+    Widget perf_mem_meter;
+    Widget perf_load1_meter;
+    Widget perf_load5_meter;
+    Widget perf_load15_meter;
     Widget menu_file_connect;
     Widget menu_file_new_window;
     Widget menu_file_exit;
@@ -51,5 +59,8 @@ int tasks_ui_get_current_tab(TasksUi *ui);
 void tasks_ui_set_current_tab(TasksUi *ui, TasksTab tab);
 void tasks_ui_update_status(TasksUi *ui, const char *text);
 void tasks_ui_center_on_screen(TasksUi *ui);
+void tasks_ui_set_processes(TasksUi *ui, const TasksProcessEntry *entries, int count);
+void tasks_ui_set_applications(TasksUi *ui, const XmString *items, int count);
+void tasks_ui_update_system_stats(TasksUi *ui, const TasksSystemStats *stats);
 
 #endif /* CK_TASKS_UI_H */

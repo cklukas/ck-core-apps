@@ -1,6 +1,6 @@
 /*
  * TODO: Recreate Windows 95 Task Manager layout and behavior in Motif/CDE
- * 1. Build the window structure with chrome, menu bar, notebook, and placeholders. (done)
+ * 1. Build the window structure with chrome, menu bar, tab strip, and placeholders. (done)
  * 2. Process tab: process list with filtering, kill/refresh controls, user checkbox, dtsession hooks.
  * 3. Performance tab: overall/divided CPU history, memory details, summary meters.
  * 4. Networking tab: adapters, connections, throughput, flow charts.

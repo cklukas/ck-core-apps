@@ -3,12 +3,13 @@
 #include <Xm/RowColumn.h>
 #include <Xm/Form.h>
 #include <Xm/LabelG.h>
+#include <Xm/ToggleB.h>
 #include <Xm/ToggleBG.h>
 #include <Xm/PushBG.h>
 #include <Xm/CascadeBG.h>
 #include <Xm/Label.h>
-#include <Xm/Notebook.h>
 #include <Xm/ArrowBG.h>
+#include <Xm/TabStack.h>
 #include <X11/Xlib.h>
 #include <X11/Intrinsic.h>
 #include <Xm/MenuShell.h>
@@ -24,6 +25,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "../ck-load/vertical_meter.h"
+
 static const char *process_headers[] = {
     "Image Name",
     "PID",
@@ -33,17 +36,7 @@ static const char *process_headers[] = {
     "User/Session",
 };
 
-static const char *sample_process_rows[][6] = {
-    { "firefox.exe", "2157", "12", "234", "38", "guest" },
-    { "ck-core", "1024", "5", "148", "22", "root" },
-    { "ck-clock", "2079", "1", "32", "10", "guest" },
-    { "ck-load", "1830", "2", "48", "12", "guest" },
-    { "ssh-agent", "1988", "0", "12", "1", "guest" },
-    { "XmServer", "1505", "0", "7", "6", "root" },
-};
-
 #define PROCESS_COLUMN_COUNT (sizeof(process_headers) / sizeof(process_headers[0]))
-#define PROCESS_SAMPLE_ROW_COUNT (sizeof(sample_process_rows) / sizeof(sample_process_rows[0]))
 
 static XmString make_string(const char *text)
 {
@@ -73,25 +66,27 @@ static const Boolean process_numeric_columns[PROCESS_COLUMN_COUNT] = {
 
 static SortDirection g_process_sort_direction = SORT_DIR_NONE;
 static int g_process_sort_column = -1;
-static int g_process_row_order[PROCESS_SAMPLE_ROW_COUNT];
 static Widget g_process_header_buttons[PROCESS_COLUMN_COUNT];
 static Widget g_process_header_indicators[PROCESS_COLUMN_COUNT];
 static GridLayout *g_process_grid = NULL;
+static int *g_process_row_order = NULL;
+static int g_process_row_count = 0;
 
 static int process_row_compare(const void *a, const void *b);
 static void process_refresh_rows(void);
 static void process_refresh_header_labels(void);
 static void process_toggle_sort(int column);
 static void process_apply_sort(void);
-static void add_process_row(GridLayout *grid, int data_index);
+static void add_process_row(GridLayout *grid, const TasksProcessEntry *entry);
 static void on_process_header_activate(Widget widget, XtPointer client, XtPointer call);
+static const TasksProcessEntry *g_process_entries = NULL;
 
 static void process_refresh_rows(void)
 {
     if (!g_process_grid) return;
     gridlayout_clear_rows(g_process_grid, 1);
-    for (int i = 0; i < PROCESS_SAMPLE_ROW_COUNT; ++i) {
-        add_process_row(g_process_grid, g_process_row_order[i]);
+    for (int i = 0; i < g_process_row_count; ++i) {
+        add_process_row(g_process_grid, &g_process_entries[g_process_row_order[i]]);
     }
 }
 
@@ -133,16 +128,49 @@ static int process_row_compare(const void *a, const void *b)
     }
     int ia = *(const int *)a;
     int ib = *(const int *)b;
-    const char *va = sample_process_rows[ia][g_process_sort_column];
-    const char *vb = sample_process_rows[ib][g_process_sort_column];
+    const TasksProcessEntry *ea = &g_process_entries[ia];
+    const TasksProcessEntry *eb = &g_process_entries[ib];
+    char va[64] = {0};
+    char vb[64] = {0};
     int cmp = 0;
     if (process_numeric_columns[g_process_sort_column]) {
-        double da = strtod(va, NULL);
-        double db = strtod(vb, NULL);
+        double da = 0.0;
+        double db = 0.0;
+        switch (g_process_sort_column) {
+        case 1:
+            da = (double)ea->pid;
+            db = (double)eb->pid;
+            break;
+        case 2:
+            da = ea->cpu_percent;
+            db = eb->cpu_percent;
+            break;
+        case 3:
+            da = ea->memory_mb;
+            db = eb->memory_mb;
+            break;
+        case 4:
+            da = (double)ea->threads;
+            db = (double)eb->threads;
+            break;
+        default:
+            break;
+        }
         if (da < db) cmp = -1;
         else if (da > db) cmp = 1;
         else cmp = 0;
     } else {
+        const char *sa = "";
+        const char *sb = "";
+        if (g_process_sort_column == 0) {
+            sa = ea->name;
+            sb = eb->name;
+        } else if (g_process_sort_column == 5) {
+            sa = ea->user;
+            sb = eb->user;
+        }
+        snprintf(va, sizeof(va), "%s", sa ? sa : "");
+        snprintf(vb, sizeof(vb), "%s", sb ? sb : "");
         cmp = strcoll(va, vb);
     }
     if (g_process_sort_direction == SORT_DIR_DESC) cmp = -cmp;
@@ -152,25 +180,59 @@ static int process_row_compare(const void *a, const void *b)
 
 static void process_apply_sort(void)
 {
+    if (!g_process_row_order || g_process_row_count <= 0) {
+        process_refresh_rows();
+        process_refresh_header_labels();
+        return;
+    }
     if (g_process_sort_direction == SORT_DIR_NONE) {
-        for (int i = 0; i < PROCESS_SAMPLE_ROW_COUNT; ++i) {
+        for (int i = 0; i < g_process_row_count; ++i) {
             g_process_row_order[i] = i;
         }
     } else {
-        qsort(g_process_row_order, PROCESS_SAMPLE_ROW_COUNT, sizeof(int), process_row_compare);
+        qsort(g_process_row_order, g_process_row_count, sizeof(int), process_row_compare);
     }
     process_refresh_rows();
     process_refresh_header_labels();
 }
 
-static void add_process_row(GridLayout *grid, int data_index)
+static void add_process_row(GridLayout *grid, const TasksProcessEntry *entry)
 {
-    if (!grid || data_index < 0 || data_index >= PROCESS_SAMPLE_ROW_COUNT) return;
+    if (!grid || !entry) return;
     int row_id = gridlayout_add_row(grid);
     Widget row_form = gridlayout_get_row_form(grid, row_id);
+    char buffer[64];
     for (int col = 0; col < PROCESS_COLUMN_COUNT; ++col) {
         Widget cell = XmCreateLabelGadget(row_form, "processCell", NULL, 0);
-        XmString label = make_string(sample_process_rows[data_index][col]);
+        const char *text = "";
+        switch (col) {
+        case 0:
+            text = entry->name;
+            break;
+        case 1:
+            snprintf(buffer, sizeof(buffer), "%d", (int)entry->pid);
+            text = buffer;
+            break;
+        case 2:
+            snprintf(buffer, sizeof(buffer), "%.1f", entry->cpu_percent);
+            text = buffer;
+            break;
+        case 3:
+            snprintf(buffer, sizeof(buffer), "%.0f", entry->memory_mb);
+            text = buffer;
+            break;
+        case 4:
+            snprintf(buffer, sizeof(buffer), "%d", entry->threads);
+            text = buffer;
+            break;
+        case 5:
+            text = entry->user;
+            break;
+        default:
+            text = "";
+            break;
+        }
+        XmString label = make_string(text);
         XtVaSetValues(cell,
                       XmNlabelString, label,
                       XmNalignment, col == 1 || col == 2 || col == 3 || col == 4
@@ -304,6 +366,44 @@ static Widget create_metric_row(Widget parent, const char *label_text, int value
     return container;
 }
 
+static Widget create_meter_column(Widget parent, const char *label_text, Widget *out_meter)
+{
+    Widget col_form = XmCreateForm(parent, "meterColumn", NULL, 0);
+    XtVaSetValues(col_form,
+                  XmNfractionBase, 100,
+                  XmNmarginWidth, 4,
+                  XmNmarginHeight, 4,
+                  NULL);
+    XtManageChild(col_form);
+
+    XmString label = make_string(label_text);
+    XtVaCreateManagedWidget(
+        "meterLabel",
+        xmLabelGadgetClass, col_form,
+        XmNlabelString, label,
+        XmNalignment, XmALIGNMENT_CENTER,
+        XmNtopAttachment, XmATTACH_FORM,
+        XmNleftAttachment, XmATTACH_FORM,
+        XmNrightAttachment, XmATTACH_FORM,
+        XmNtopOffset, 2,
+        NULL);
+    XmStringFree(label);
+
+    Arg args[4];
+    int n = 0;
+    XtSetArg(args[n], XmNbottomAttachment, XmATTACH_FORM); n++;
+    XtSetArg(args[n], XmNbottomOffset, 2); n++;
+    XtSetArg(args[n], XmNtopAttachment, XmATTACH_POSITION); n++;
+    XtSetArg(args[n], XmNtopPosition, 20); n++;
+    Widget meter = VerticalMeterCreate(col_form, "verticalMeter", args, n);
+    VerticalMeterSetMaximum(meter, 100);
+    VerticalMeterSetDefaultMaximum(meter, 100);
+    VerticalMeterSetCellHeight(meter, 4);
+    if (out_meter) *out_meter = meter;
+    XtManageChild(meter);
+    return col_form;
+}
+
 static void add_performance_tab_content(TasksUi *ui, Widget page)
 {
     Widget heading = XtNameToWidget(page, "tabHeading");
@@ -343,12 +443,33 @@ static void add_performance_tab_content(TasksUi *ui, Widget page)
     XmStringFree(divided);
     XtManageChild(mode_box);
 
+    Widget meter_row = XmCreateRowColumn(page, "performanceMeters", NULL, 0);
+    XtVaSetValues(meter_row,
+                  XmNorientation, XmHORIZONTAL,
+                  XmNpacking, XmPACK_COLUMN,
+                  XmNspacing, 12,
+                  XmNtopAttachment, XmATTACH_WIDGET,
+                  XmNtopWidget, mode_box,
+                  XmNtopOffset, 10,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNleftOffset, 12,
+                  XmNrightOffset, 12,
+                  NULL);
+    XtManageChild(meter_row);
+
+    create_meter_column(meter_row, "CPU", &ui->perf_cpu_meter);
+    create_meter_column(meter_row, "Memory", &ui->perf_mem_meter);
+    create_meter_column(meter_row, "Load 1m", &ui->perf_load1_meter);
+    create_meter_column(meter_row, "Load 5m", &ui->perf_load5_meter);
+    create_meter_column(meter_row, "Load 15m", &ui->perf_load15_meter);
+
     Widget metrics_column = XmCreateRowColumn(page, "performanceMetrics", NULL, 0);
     XtVaSetValues(metrics_column,
                   XmNorientation, XmVERTICAL,
                   XmNspacing, 10,
                   XmNtopAttachment, XmATTACH_WIDGET,
-                  XmNtopWidget, mode_box,
+                  XmNtopWidget, meter_row,
                   XmNtopOffset, 10,
                   XmNleftAttachment, XmATTACH_FORM,
                   XmNrightAttachment, XmATTACH_FORM,
@@ -495,30 +616,20 @@ static void attach_menu_bar(Widget menu_bar, Widget parent)
                   NULL);
 }
 
-static void attach_notebook(Widget notebook, Widget parent, Widget menu_bar, Widget status)
-{
-    if (!notebook) return;
-    XtVaSetValues(notebook,
-                  XmNtopAttachment, XmATTACH_WIDGET,
-                  XmNtopWidget, menu_bar,
-                  XmNbottomAttachment, XmATTACH_WIDGET,
-                  XmNbottomWidget, status,
-                  XmNleftAttachment, XmATTACH_FORM,
-                  XmNrightAttachment, XmATTACH_FORM,
-                  XmNmarginWidth, 12,
-                  XmNmarginHeight, 12,
-                  NULL);
-}
-
 static Widget create_page(TasksUi *ui, const char *name, TasksTab tab_number,
                           const char *title, const char *subtitle)
 {
-    Widget page = XmCreateForm(ui->notebook, (String)name, NULL, 0);
+    (void)tab_number;
+    XmString tab_label = make_string(title);
+    Widget page = XmTabStackAddPage(ui->tab_stack, (String)name, tab_label, False);
+    XmStringFree(tab_label);
     XtVaSetValues(page,
-                  XmNpageNumber, tab_number,
                   XmNfractionBase, 100,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
                   NULL);
-    XtManageChild(page);
 
     XmString heading = make_string(title);
     Widget heading_label = XtVaCreateManagedWidget(
@@ -729,6 +840,57 @@ static Widget create_networking_tab(TasksUi *ui)
     return page;
 }
 
+static Widget create_applications_tab(TasksUi *ui)
+{
+    Widget page = create_page(ui, "applicationsPage", TASKS_TAB_APPLICATIONS,
+                              "Applications", "Windows grouped by process.");
+    Widget heading = XtNameToWidget(page, "tabSubtext");
+    Widget anchor = heading ? heading : XtNameToWidget(page, "tabHeading");
+    if (!anchor) anchor = page;
+
+    Arg scroll_args[9];
+    int sn = 0;
+    XtSetArg(scroll_args[sn], XmNtopAttachment, XmATTACH_WIDGET); sn++;
+    XtSetArg(scroll_args[sn], XmNtopWidget, anchor); sn++;
+    XtSetArg(scroll_args[sn], XmNtopOffset, 10); sn++;
+    XtSetArg(scroll_args[sn], XmNbottomAttachment, XmATTACH_FORM); sn++;
+    XtSetArg(scroll_args[sn], XmNbottomOffset, 48); sn++;
+    XtSetArg(scroll_args[sn], XmNleftAttachment, XmATTACH_FORM); sn++;
+    XtSetArg(scroll_args[sn], XmNrightAttachment, XmATTACH_FORM); sn++;
+    XtSetArg(scroll_args[sn], XmNleftOffset, 8); sn++;
+    XtSetArg(scroll_args[sn], XmNrightOffset, 8); sn++;
+    XtSetArg(scroll_args[sn], XmNscrollingPolicy, XmAUTOMATIC); sn++;
+    Widget scroll = XmCreateScrolledWindow(page, "appsListScroll", scroll_args, sn);
+    XtManageChild(scroll);
+
+    Widget list = XmCreateScrolledList(scroll, "appsList", NULL, 0);
+    XtVaSetValues(list,
+                  XmNvisibleItemCount, 8,
+                  XmNselectionPolicy, XmSINGLE_SELECT,
+                  XmNscrollBarDisplayPolicy, XmAS_NEEDED,
+                  NULL);
+    XtManageChild(list);
+    ui->apps_list = list;
+
+    XmString close_label = make_string("Close Window");
+    Widget close_button = XtVaCreateManagedWidget(
+        "appsCloseButton",
+        xmPushButtonGadgetClass, page,
+        XmNlabelString, close_label,
+        XmNtopAttachment, XmATTACH_WIDGET,
+        XmNtopWidget, scroll,
+        XmNtopOffset, 8,
+        XmNrightAttachment, XmATTACH_FORM,
+        XmNrightOffset, 8,
+        XmNbottomAttachment, XmATTACH_FORM,
+        XmNbottomOffset, 8,
+        NULL);
+    XmStringFree(close_label);
+    ui->apps_close_button = close_button;
+
+    return page;
+}
+
 TasksUi *tasks_ui_create(XtAppContext app, Widget toplevel)
 {
     if (!app || !toplevel) return NULL;
@@ -786,18 +948,30 @@ TasksUi *tasks_ui_create(XtAppContext app, Widget toplevel)
     Widget status = create_status_label(ui, form);
     ui->status_label = status;
 
-    Widget notebook = XmCreateNotebook(form, "tasksNotebook", NULL, 0);
-    attach_notebook(notebook, form, menu_bar, status);
-    ui->notebook = notebook;
-    XtManageChild(notebook);
+    Widget tab_stack = XmCreateTabStack(form, "tasksTabStack", NULL, 0);
+    XtVaSetValues(tab_stack,
+                  XmNtopAttachment, XmATTACH_WIDGET,
+                  XmNtopWidget, menu_bar,
+                  XmNbottomAttachment, XmATTACH_WIDGET,
+                  XmNbottomWidget, status,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNleftOffset, 12,
+                  XmNrightOffset, 12,
+                  XmNtopOffset, 6,
+                  XmNbottomOffset, 6,
+                  NULL);
+    ui->tab_stack = tab_stack;
+    XtManageChild(tab_stack);
 
     ui->tab_processes = create_process_tab(ui);
     ui->tab_performance = create_performance_tab(ui);
     ui->tab_networking = create_networking_tab(ui);
-    ui->tab_applications = create_simple_tab(ui, TASKS_TAB_APPLICATIONS, "applicationsPage",
-                                             "Applications", "Application list similar to classic Task Manager.");
+    ui->tab_applications = create_applications_tab(ui);
     ui->tab_services = create_simple_tab(ui, TASKS_TAB_SERVICES, "servicesPage",
                                          "Services", "Service status, start/stop controls, and dependencies.");
+
+    XmTabStackSetCurrentPage(ui->tab_stack, TASKS_TAB_PROCESSES);
 
     return ui;
 }
@@ -806,6 +980,10 @@ void tasks_ui_destroy(TasksUi *ui)
 {
     if (ui && ui->process_grid) {
         gridlayout_destroy(ui->process_grid);
+    }
+    if (g_process_row_order) {
+        free(g_process_row_order);
+        g_process_row_order = NULL;
     }
     free(ui);
 }
@@ -822,16 +1000,14 @@ Widget tasks_ui_get_toplevel(TasksUi *ui)
 
 int tasks_ui_get_current_tab(TasksUi *ui)
 {
-    if (!ui || !ui->notebook) return 0;
-    int page = 0;
-    XtVaGetValues(ui->notebook, XmNcurrentPageNumber, &page, NULL);
-    return page;
+    if (!ui || !ui->tab_stack) return 0;
+    return XmTabStackGetCurrentPage(ui->tab_stack);
 }
 
 void tasks_ui_set_current_tab(TasksUi *ui, TasksTab tab)
 {
-    if (!ui || !ui->notebook || tab < TASKS_TAB_PROCESSES) return;
-    XtVaSetValues(ui->notebook, XmNcurrentPageNumber, (int)tab, NULL);
+    if (!ui || !ui->tab_stack || tab < TASKS_TAB_PROCESSES) return;
+    XmTabStackSetCurrentPage(ui->tab_stack, tab);
 }
 
 void tasks_ui_update_status(TasksUi *ui, const char *text)
@@ -862,4 +1038,63 @@ void tasks_ui_center_on_screen(TasksUi *ui)
                   XmNx, x,
                   XmNy, y,
                   NULL);
+}
+
+void tasks_ui_set_processes(TasksUi *ui, const TasksProcessEntry *entries, int count)
+{
+    if (!ui || !ui->process_grid) return;
+    if (!entries || count <= 0) {
+        g_process_entries = NULL;
+        g_process_row_count = 0;
+        if (g_process_row_order) {
+            free(g_process_row_order);
+            g_process_row_order = NULL;
+        }
+        gridlayout_clear_rows(ui->process_grid, 1);
+        return;
+    }
+    g_process_entries = entries;
+    if (g_process_row_order) {
+        free(g_process_row_order);
+        g_process_row_order = NULL;
+    }
+    g_process_row_order = (int *)calloc(count, sizeof(int));
+    if (!g_process_row_order) return;
+    g_process_row_count = count;
+    process_apply_sort();
+}
+
+void tasks_ui_set_applications(TasksUi *ui, const XmString *items, int count)
+{
+    if (!ui || !ui->apps_list) return;
+    XmListDeleteAllItems(ui->apps_list);
+    if (!items || count <= 0) return;
+    XmListAddItems(ui->apps_list, (XmString *)items, (Cardinal)count, 0);
+}
+
+void tasks_ui_update_system_stats(TasksUi *ui, const TasksSystemStats *stats)
+{
+    if (!ui || !stats) return;
+    if (ui->perf_cpu_meter) {
+        VerticalMeterSetValue(ui->perf_cpu_meter, stats->cpu_percent);
+    }
+    if (ui->perf_mem_meter) {
+        VerticalMeterSetValue(ui->perf_mem_meter, stats->memory_percent);
+    }
+    int load_max = 100;
+    if (stats->load1_percent > load_max) load_max = stats->load1_percent;
+    if (stats->load5_percent > load_max) load_max = stats->load5_percent;
+    if (stats->load15_percent > load_max) load_max = stats->load15_percent;
+    if (ui->perf_load1_meter) {
+        VerticalMeterSetMaximum(ui->perf_load1_meter, load_max);
+        VerticalMeterSetValue(ui->perf_load1_meter, stats->load1_percent);
+    }
+    if (ui->perf_load5_meter) {
+        VerticalMeterSetMaximum(ui->perf_load5_meter, load_max);
+        VerticalMeterSetValue(ui->perf_load5_meter, stats->load5_percent);
+    }
+    if (ui->perf_load15_meter) {
+        VerticalMeterSetMaximum(ui->perf_load15_meter, load_max);
+        VerticalMeterSetValue(ui->perf_load15_meter, stats->load15_percent);
+    }
 }

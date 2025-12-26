@@ -72,22 +72,150 @@ static GridLayout *g_process_grid = NULL;
 static int *g_process_row_order = NULL;
 static int g_process_row_count = 0;
 
+typedef struct {
+    Widget row_form;
+    Widget cells[PROCESS_COLUMN_COUNT];
+    int row_id;
+} ProcessRow;
+
+static ProcessRow *g_process_rows = NULL;
+static int g_process_rows_alloc = 0;
+
 static int process_row_compare(const void *a, const void *b);
 static void process_refresh_rows(void);
 static void process_refresh_header_labels(void);
 static void process_toggle_sort(int column);
 static void process_apply_sort(void);
-static void add_process_row(GridLayout *grid, const TasksProcessEntry *entry);
+static void process_set_cell_text(Widget cell, const char *text);
+static void process_update_row(ProcessRow *row, const TasksProcessEntry *entry);
+static void ensure_process_rows(GridLayout *grid, int needed);
+static void release_process_rows(void);
+static Boolean process_suspend_updates(void);
+static void process_resume_updates(Boolean suspended);
 static void on_process_header_activate(Widget widget, XtPointer client, XtPointer call);
+static Widget tasks_ui_get_tab_widget(TasksUi *ui, TasksTab tab);
 static const TasksProcessEntry *g_process_entries = NULL;
 
 static void process_refresh_rows(void)
 {
     if (!g_process_grid) return;
-    gridlayout_clear_rows(g_process_grid, 1);
-    for (int i = 0; i < g_process_row_count; ++i) {
-        add_process_row(g_process_grid, &g_process_entries[g_process_row_order[i]]);
+    Boolean suspended = process_suspend_updates();
+    int visible_rows = g_process_row_count;
+    ensure_process_rows(g_process_grid, g_process_row_count);
+    if (g_process_rows_alloc < visible_rows) {
+        visible_rows = g_process_rows_alloc;
     }
+    for (int i = 0; i < visible_rows; ++i) {
+        ProcessRow *row = &g_process_rows[i];
+        if (!row || !row->row_form) continue;
+        int entry_index = g_process_row_order ? g_process_row_order[i] : i;
+        const TasksProcessEntry *entry = &g_process_entries[entry_index];
+        process_update_row(row, entry);
+        if (!XtIsManaged(row->row_form)) {
+            XtManageChild(row->row_form);
+        }
+    }
+    for (int i = visible_rows; i < g_process_rows_alloc; ++i) {
+        if (g_process_rows[i].row_form && XtIsManaged(g_process_rows[i].row_form)) {
+            XtUnmanageChild(g_process_rows[i].row_form);
+        }
+    }
+    process_resume_updates(suspended);
+}
+
+static void process_set_cell_text(Widget cell, const char *text)
+{
+    if (!cell) return;
+    XmString label = make_string(text);
+    XtVaSetValues(cell, XmNlabelString, label, NULL);
+    XmStringFree(label);
+}
+
+static void process_update_row(ProcessRow *row, const TasksProcessEntry *entry)
+{
+    if (!row || !entry) return;
+    char buffer[64];
+    process_set_cell_text(row->cells[0], entry->name);
+    if (row->cells[1]) {
+        snprintf(buffer, sizeof(buffer), "%d", (int)entry->pid);
+        process_set_cell_text(row->cells[1], buffer);
+    }
+    if (row->cells[2]) {
+        snprintf(buffer, sizeof(buffer), "%.1f", entry->cpu_percent);
+        process_set_cell_text(row->cells[2], buffer);
+    }
+    if (row->cells[3]) {
+        snprintf(buffer, sizeof(buffer), "%.0f", entry->memory_mb);
+        process_set_cell_text(row->cells[3], buffer);
+    }
+    if (row->cells[4]) {
+        snprintf(buffer, sizeof(buffer), "%d", entry->threads);
+        process_set_cell_text(row->cells[4], buffer);
+    }
+    process_set_cell_text(row->cells[5], entry->user);
+}
+
+static void ensure_process_rows(GridLayout *grid, int needed)
+{
+    if (!grid || needed <= g_process_rows_alloc) return;
+    ProcessRow *expanded = (ProcessRow *)realloc(g_process_rows, sizeof(ProcessRow) * needed);
+    if (!expanded) return;
+    g_process_rows = expanded;
+    for (int i = g_process_rows_alloc; i < needed; ++i) {
+        ProcessRow *row = &g_process_rows[i];
+        memset(row, 0, sizeof(*row));
+        row->row_id = gridlayout_add_row(grid);
+        row->row_form = gridlayout_get_row_form(grid, row->row_id);
+        if (!row->row_form) continue;
+        for (int col = 0; col < PROCESS_COLUMN_COUNT; ++col) {
+            Widget cell = XmCreateLabelGadget(row->row_form, "processCell", NULL, 0);
+            XtVaSetValues(cell,
+                          XmNalignment, (col == 1 || col == 2 || col == 3 || col == 4)
+                                        ? XmALIGNMENT_END : XmALIGNMENT_BEGINNING,
+                          XmNrecomputeSize, False,
+                          XmNmarginWidth, 6,
+                          XmNmarginHeight, 3,
+                          XmNborderWidth, 1,
+                          XmNshadowThickness, 1,
+                          XmNshadowType, XmSHADOW_OUT,
+                          NULL);
+            gridlayout_add_cell(grid, row->row_id, col, cell, 1);
+            row->cells[col] = cell;
+        }
+        XtUnmanageChild(row->row_form);
+    }
+    g_process_rows_alloc = needed;
+}
+
+static void release_process_rows(void)
+{
+    if (!g_process_rows) return;
+    for (int i = 0; i < g_process_rows_alloc; ++i) {
+        if (g_process_rows[i].row_form && XtIsManaged(g_process_rows[i].row_form)) {
+            XtUnmanageChild(g_process_rows[i].row_form);
+        }
+    }
+    free(g_process_rows);
+    g_process_rows = NULL;
+    g_process_rows_alloc = 0;
+}
+
+static Boolean process_suspend_updates(void)
+{
+    if (!g_process_grid) return False;
+    Widget grid_widget = gridlayout_get_widget(g_process_grid);
+    if (!grid_widget || !XtIsManaged(grid_widget)) return False;
+    XtUnmanageChild(grid_widget);
+    return True;
+}
+
+static void process_resume_updates(Boolean suspended)
+{
+    if (!suspended || !g_process_grid) return;
+    Widget grid_widget = gridlayout_get_widget(g_process_grid);
+    if (!grid_widget) return;
+    XtManageChild(grid_widget);
+    XmUpdateDisplay(grid_widget);
 }
 
 static void process_refresh_header_labels(void)
@@ -185,68 +313,14 @@ static void process_apply_sort(void)
         process_refresh_header_labels();
         return;
     }
-    if (g_process_sort_direction == SORT_DIR_NONE) {
-        for (int i = 0; i < g_process_row_count; ++i) {
-            g_process_row_order[i] = i;
-        }
-    } else {
+    for (int i = 0; i < g_process_row_count; ++i) {
+        g_process_row_order[i] = i;
+    }
+    if (g_process_sort_direction != SORT_DIR_NONE) {
         qsort(g_process_row_order, g_process_row_count, sizeof(int), process_row_compare);
     }
     process_refresh_rows();
     process_refresh_header_labels();
-}
-
-static void add_process_row(GridLayout *grid, const TasksProcessEntry *entry)
-{
-    if (!grid || !entry) return;
-    int row_id = gridlayout_add_row(grid);
-    Widget row_form = gridlayout_get_row_form(grid, row_id);
-    char buffer[64];
-    for (int col = 0; col < PROCESS_COLUMN_COUNT; ++col) {
-        Widget cell = XmCreateLabelGadget(row_form, "processCell", NULL, 0);
-        const char *text = "";
-        switch (col) {
-        case 0:
-            text = entry->name;
-            break;
-        case 1:
-            snprintf(buffer, sizeof(buffer), "%d", (int)entry->pid);
-            text = buffer;
-            break;
-        case 2:
-            snprintf(buffer, sizeof(buffer), "%.1f", entry->cpu_percent);
-            text = buffer;
-            break;
-        case 3:
-            snprintf(buffer, sizeof(buffer), "%.0f", entry->memory_mb);
-            text = buffer;
-            break;
-        case 4:
-            snprintf(buffer, sizeof(buffer), "%d", entry->threads);
-            text = buffer;
-            break;
-        case 5:
-            text = entry->user;
-            break;
-        default:
-            text = "";
-            break;
-        }
-        XmString label = make_string(text);
-        XtVaSetValues(cell,
-                      XmNlabelString, label,
-                      XmNalignment, col == 1 || col == 2 || col == 3 || col == 4
-                                    ? XmALIGNMENT_END : XmALIGNMENT_BEGINNING,
-                      XmNrecomputeSize, False,
-                      XmNmarginWidth, 6,
-                      XmNmarginHeight, 3,
-                      XmNborderWidth, 1,
-                      XmNshadowThickness, 1,
-                      XmNshadowType, XmSHADOW_OUT,
-                      NULL);
-        XmStringFree(label);
-        gridlayout_add_cell(grid, row_id, col, cell, 1);
-    }
 }
 
 static void process_toggle_sort(int column)
@@ -621,15 +695,20 @@ static Widget create_page(TasksUi *ui, const char *name, TasksTab tab_number,
 {
     (void)tab_number;
     XmString tab_label = make_string(title);
-    Widget page = XmTabStackAddPage(ui->tab_stack, (String)name, tab_label, False);
-    XmStringFree(tab_label);
+    Widget page = XmCreateForm(ui->tab_stack, (String)(name ? name : "tasksPage"), NULL, 0);
+    if (!page) {
+        XmStringFree(tab_label);
+        return NULL;
+    }
     XtVaSetValues(page,
+                  XmNtabLabelString, tab_label,
                   XmNfractionBase, 100,
                   XmNtopAttachment, XmATTACH_FORM,
                   XmNbottomAttachment, XmATTACH_FORM,
                   XmNleftAttachment, XmATTACH_FORM,
                   XmNrightAttachment, XmATTACH_FORM,
                   NULL);
+    XmStringFree(tab_label);
 
     XmString heading = make_string(title);
     Widget heading_label = XtVaCreateManagedWidget(
@@ -664,6 +743,7 @@ static Widget create_page(TasksUi *ui, const char *name, TasksTab tab_number,
         XmStringFree(sub);
     }
 
+    XtManageChild(page);
     return page;
 }
 
@@ -688,21 +768,30 @@ static Widget create_process_tab(TasksUi *ui)
     XmStringFree(toggle_label);
     ui->process_filter_toggle = toggle;
 
-    GridLayout *grid = gridlayout_create(page, "processGrid", PROCESS_COLUMN_COUNT);
+    Widget scroll = XmCreateScrolledWindow(page, "processListScroll", NULL, 0);
+    XtVaSetValues(scroll,
+                  XmNtopAttachment, XmATTACH_WIDGET,
+                  XmNtopWidget, toggle,
+                  XmNtopOffset, 12,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNleftOffset, 8,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNrightOffset, 8,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  XmNbottomOffset, 8,
+                  XmNscrollingPolicy, XmAUTOMATIC,
+                  XmNresizePolicy, XmRESIZE_ANY,
+                  XmNvisualPolicy, XmVARIABLE,
+                  XmNscrollBarDisplayPolicy, XmAS_NEEDED,
+                  NULL);
+    XtManageChild(scroll);
+
+    GridLayout *grid = gridlayout_create(scroll, "processGrid", PROCESS_COLUMN_COUNT);
     if (grid) {
         gridlayout_set_row_spacing(grid, 4);
         Widget grid_widget = gridlayout_get_widget(grid);
-        XtVaSetValues(grid_widget,
-                      XmNtopAttachment, XmATTACH_WIDGET,
-                      XmNtopWidget, toggle,
-                      XmNtopOffset, 12,
-                      XmNleftAttachment, XmATTACH_FORM,
-                      XmNrightAttachment, XmATTACH_FORM,
-                      XmNbottomAttachment, XmATTACH_FORM,
-                      XmNleftOffset, 8,
-                      XmNrightOffset, 8,
-                      XmNbottomOffset, 8,
-                      NULL);
+        XtVaSetValues(scroll, XmNworkWindow, grid_widget, NULL);
+        XmScrolledWindowSetAreas(scroll, NULL, NULL, grid_widget);
 
         int header_row = gridlayout_add_row(grid);
         Widget header_form = gridlayout_get_row_form(grid, header_row);
@@ -848,7 +937,7 @@ static Widget create_applications_tab(TasksUi *ui)
     Widget anchor = heading ? heading : XtNameToWidget(page, "tabHeading");
     if (!anchor) anchor = page;
 
-    Arg scroll_args[9];
+    Arg scroll_args[10];
     int sn = 0;
     XtSetArg(scroll_args[sn], XmNtopAttachment, XmATTACH_WIDGET); sn++;
     XtSetArg(scroll_args[sn], XmNtopWidget, anchor); sn++;
@@ -971,7 +1060,10 @@ TasksUi *tasks_ui_create(XtAppContext app, Widget toplevel)
     ui->tab_services = create_simple_tab(ui, TASKS_TAB_SERVICES, "servicesPage",
                                          "Services", "Service status, start/stop controls, and dependencies.");
 
-    XmTabStackSetCurrentPage(ui->tab_stack, TASKS_TAB_PROCESSES);
+    Widget initial_tab = tasks_ui_get_tab_widget(ui, TASKS_TAB_PROCESSES);
+    if (initial_tab) {
+        XmTabStackSelectTab(initial_tab, False);
+    }
 
     return ui;
 }
@@ -981,6 +1073,7 @@ void tasks_ui_destroy(TasksUi *ui)
     if (ui && ui->process_grid) {
         gridlayout_destroy(ui->process_grid);
     }
+    release_process_rows();
     if (g_process_row_order) {
         free(g_process_row_order);
         g_process_row_order = NULL;
@@ -1001,13 +1094,22 @@ Widget tasks_ui_get_toplevel(TasksUi *ui)
 int tasks_ui_get_current_tab(TasksUi *ui)
 {
     if (!ui || !ui->tab_stack) return 0;
-    return XmTabStackGetCurrentPage(ui->tab_stack);
+    Widget selected = XmTabStackGetSelectedTab(ui->tab_stack);
+    if (!selected) return 0;
+    if (selected == ui->tab_processes) return TASKS_TAB_PROCESSES;
+    if (selected == ui->tab_performance) return TASKS_TAB_PERFORMANCE;
+    if (selected == ui->tab_networking) return TASKS_TAB_NETWORKING;
+    if (selected == ui->tab_applications) return TASKS_TAB_APPLICATIONS;
+    if (selected == ui->tab_services) return TASKS_TAB_SERVICES;
+    return TASKS_TAB_PROCESSES;
 }
 
 void tasks_ui_set_current_tab(TasksUi *ui, TasksTab tab)
 {
-    if (!ui || !ui->tab_stack || tab < TASKS_TAB_PROCESSES) return;
-    XmTabStackSetCurrentPage(ui->tab_stack, tab);
+    if (!ui || !ui->tab_stack) return;
+    Widget page = tasks_ui_get_tab_widget(ui, tab);
+    if (!page) return;
+    XmTabStackSelectTab(page, True);
 }
 
 void tasks_ui_update_status(TasksUi *ui, const char *text)
@@ -1040,6 +1142,19 @@ void tasks_ui_center_on_screen(TasksUi *ui)
                   NULL);
 }
 
+static Widget tasks_ui_get_tab_widget(TasksUi *ui, TasksTab tab)
+{
+    if (!ui) return NULL;
+    switch (tab) {
+    case TASKS_TAB_PROCESSES: return ui->tab_processes;
+    case TASKS_TAB_PERFORMANCE: return ui->tab_performance;
+    case TASKS_TAB_NETWORKING: return ui->tab_networking;
+    case TASKS_TAB_APPLICATIONS: return ui->tab_applications;
+    case TASKS_TAB_SERVICES: return ui->tab_services;
+    default: return NULL;
+    }
+}
+
 void tasks_ui_set_processes(TasksUi *ui, const TasksProcessEntry *entries, int count)
 {
     if (!ui || !ui->process_grid) return;
@@ -1050,7 +1165,8 @@ void tasks_ui_set_processes(TasksUi *ui, const TasksProcessEntry *entries, int c
             free(g_process_row_order);
             g_process_row_order = NULL;
         }
-        gridlayout_clear_rows(ui->process_grid, 1);
+        process_refresh_rows();
+        process_refresh_header_labels();
         return;
     }
     g_process_entries = entries;

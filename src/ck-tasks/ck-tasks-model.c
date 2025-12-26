@@ -48,8 +48,7 @@ static int read_proc_stat(pid_t pid, char *name, size_t name_len,
     if (scanned < 5) return -1;
 
     if (name && name_len > 0) {
-        strncpy(name, comm, name_len - 1);
-        name[name_len - 1] = '\0';
+        (void)snprintf(name, name_len, "%s", comm);
     }
     if (utime) *utime = ut;
     if (stime) *stime = st;

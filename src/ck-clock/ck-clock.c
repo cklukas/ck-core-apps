@@ -20,6 +20,7 @@
 
 #include <X11/Intrinsic.h>  /* XtAppInitialize, XtDisplay, XtWindow, ... */
 #include <Xm/Xm.h>          /* XmGetColors */
+#include <Xm/ColorObjP.h>   /* XmeGetColorObjData, XmCO_* */
 #include <Xm/AtomMgr.h>     /* XmInternAtom */
 #include <Xm/RowColumn.h>
 #include <Xm/PushBG.h>
@@ -67,6 +68,7 @@ static Widget year_spin = NULL;
 static Widget year_text = NULL;
 static int controls_visible = 0;
 static int updating_year_spin = 0;
+static double right_controls_bottom = 0.0;
 
 
 /* cairo state */
@@ -133,6 +135,39 @@ static void pixel_to_rgb(Pixel p, double *r, double *g, double *b)
     *b = xc.blue  / 65535.0;
 }
 
+static bool fetch_panel_bg_from_palette(Pixel *out_pixel)
+{
+    if (!out_pixel || !dpy) return false;
+    Screen *scr = ScreenOfDisplay(dpy, screen);
+    if (!scr) return false;
+
+    XmPixelSet pixels[XmCO_MAX_NUM_COLORS];
+    short active = 0, inactive = 0, primary = 0, secondary = 0, text = 0;
+    int color_use = 0;
+    if (!XmeGetColorObjData(scr, &color_use, pixels, XmCO_MAX_NUM_COLORS,
+                            &active, &inactive, &primary, &secondary, &text)) {
+        return false;
+    }
+
+    int count = 0;
+    if (color_use == XmCO_HIGH_COLOR) {
+        count = 8;
+    } else if (color_use == XmCO_MEDIUM_COLOR) {
+        count = 4;
+    } else if (color_use == XmCO_LOW_COLOR || color_use == XmCO_BLACK_WHITE) {
+        count = 2;
+    } else {
+        count = 2;
+    }
+    if (count <= 0) return false;
+
+    int target_index = XmCO_MAX_NUM_COLORS - 1;
+    if (target_index >= count) target_index = count - 1;
+    if (target_index < 0) target_index = 0;
+    *out_pixel = pixels[target_index].bg;
+    return true;
+}
+
 /* Initialize bg/fg/ts/bs/sel pixels using XmGetColors on the parent window background */
 static void init_motif_colors(void)
 {
@@ -159,9 +194,9 @@ static void init_motif_colors(void)
     }
     
     XWindowAttributes attrs;
+    Pixel base_bg = WhitePixel(dpy, screen);
     if (!XGetWindowAttributes(dpy, parent, &attrs)) {
         panel_cmap = DefaultColormap(dpy, screen);
-        bg_pixel   = WhitePixel(dpy, screen);
     } else {
         panel_cmap = (attrs.colormap != None)
                        ? attrs.colormap
@@ -178,8 +213,14 @@ static void init_motif_colors(void)
         if (chosen_bg == 0 || chosen_bg == None) {
             chosen_bg = WhitePixel(dpy, screen);
         }
-        bg_pixel = chosen_bg;
+        base_bg = chosen_bg;
     }
+
+    Pixel palette_bg = 0;
+    if (fetch_panel_bg_from_palette(&palette_bg)) {
+        base_bg = palette_bg;
+    }
+    bg_pixel = base_bg;
 
     /* XmGetColors: given a background pixel, derive
        foreground, top_shadow, bottom_shadow, select. */
@@ -279,6 +320,19 @@ static void choose_contrast_color(double bg_r, double bg_g, double bg_b,
     *out_r = in_r; *out_g = in_g; *out_b = in_b;
 }
 
+static double fit_font_size(cairo_t *cr, const char *text, double max_w, double max_h)
+{
+    cairo_text_extents_t ext = {0};
+    cairo_set_font_size(cr, 1.0);
+    cairo_text_extents(cr, text, &ext);
+    if (ext.width <= 0.0 || ext.height <= 0.0) {
+        return fmax(6.0, fmin(max_w, max_h));
+    }
+    double size = fmin(max_w / ext.width, max_h / ext.height);
+    if (size < 6.0) size = 6.0;
+    return size;
+}
+
 static void draw_centered_text(cairo_t *cr,
                                const char *text,
                                double cx,
@@ -307,6 +361,20 @@ static void canvas_event_handler(Widget w, XtPointer client_data, XEvent *event,
 static void tick_cb(XtPointer client_data, XtIntervalId *id);
 static void wm_delete_cb(Widget w, XtPointer client_data, XtPointer call_data);
 static void handle_configure(XConfigureEvent *cev);
+static void draw_calendar_paper(cairo_t *cr,
+                                double cal_left,
+                                double cal_top,
+                                double cal_width,
+                                double cal_height,
+                                double paper_r,
+                                double paper_g,
+                                double paper_b,
+                                double text_r,
+                                double text_g,
+                                double text_b,
+                                double day_font,
+                                double weekday_font,
+                                double month_font);
 
 static int guess_initial_year(void)
 {
@@ -866,6 +934,74 @@ static void draw_centered_text(cairo_t *cr,
     if (out_y) *out_y = y;
 }
 
+/* Calendar paper: draws the white card with today’s day, weekday, and month */
+static void draw_calendar_paper(cairo_t *cr,
+                                double cal_left,
+                                double cal_top,
+                                double cal_width,
+                                double cal_height,
+                                double paper_r,
+                                double paper_g,
+                                double paper_b,
+                                double text_r,
+                                double text_g,
+                                double text_b,
+                                double day_font,
+                                double weekday_font,
+                                double month_font)
+{
+    cairo_set_source_rgb(cr, paper_r, paper_g, paper_b);
+    cairo_rectangle(cr, cal_left, cal_top, cal_width, cal_height);
+    cairo_fill(cr);
+
+    double spacing = cal_height * 0.05;
+    if (spacing < 4.0) spacing = 4.0;
+    double label_padding = cal_height * 0.02;
+    if (label_padding < 2.0) label_padding = 2.0;
+
+    cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+
+    char day_buf[8];
+    snprintf(day_buf, sizeof(day_buf), "%d", current_local_tm.tm_mday);
+    cairo_set_font_size(cr, day_font);
+    cairo_text_extents_t day_ext = {0};
+    cairo_text_extents(cr, day_buf, &day_ext);
+
+    double remaining_height = cal_height - day_ext.height - 2.0 * spacing - label_padding;
+    if (remaining_height < 0.0) remaining_height = 0.0;
+    double label_font = (remaining_height / 2.0) * 1.15;
+    double label_max = day_font / 1.5;
+    if (label_font > label_max) label_font = label_max;
+    if (label_font < 10.0) label_font = 10.0;
+    weekday_font = label_font;
+    month_font = weekday_font;
+
+    double center_x = cal_left + cal_width / 2.0;
+    double space_remain = cal_height - day_ext.height;
+    if (space_remain < 0.0) space_remain = 0.0;
+    double half_space = space_remain / 2.0;
+    double weekday_y = cal_top + half_space / 2.0;
+    double day_y     = cal_top + half_space + day_ext.height / 2.0;
+    double month_y   = cal_top + half_space + day_ext.height + half_space / 2.0;
+
+    cairo_set_source_rgb(cr, text_r, text_g, text_b);
+    cairo_set_font_size(cr, day_font);
+    draw_centered_text(cr, day_buf, center_x, day_y, &day_ext, NULL);
+
+    cairo_set_font_size(cr, weekday_font);
+    draw_centered_text(cr,
+                       weekday_labels[(current_local_tm.tm_wday + 7) % 7],
+                       center_x, weekday_y,
+                       NULL, NULL);
+
+    cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_ITALIC, CAIRO_FONT_WEIGHT_BOLD);
+    cairo_set_font_size(cr, month_font);
+    draw_centered_text(cr,
+                       month_labels[current_local_tm.tm_mon % 12],
+                       center_x, month_y,
+                       NULL, NULL);
+}
+
 static int get_first_weekday(void)
 {
 #ifdef _NL_TIME_FIRST_WEEKDAY
@@ -935,15 +1071,17 @@ static void draw_month_view(cairo_t *cr,
     double text_r, text_g, text_b;
     choose_contrast_color(bg_r, bg_g, bg_b, fg_r, fg_g, fg_b, &text_r, &text_g, &text_b);
 
-    cairo_set_source_rgb(cr, clamp01(bg_r * 0.95 + 0.05),
-                         clamp01(bg_g * 0.95 + 0.05),
-                         clamp01(bg_b * 0.95 + 0.05));
+    cairo_set_source_rgb(cr, bg_r, bg_g, bg_b);
     cairo_rectangle(cr, x, y, w, h);
     cairo_fill(cr);
 
     double padding = w * 0.05;
     if (padding < 4.0) padding = 4.0;
     double header_h = h * 0.12;
+    if (right_controls_bottom > y) {
+        double controls_h = right_controls_bottom - y;
+        if (controls_h > header_h) header_h = controls_h;
+    }
     double grid_y = y + header_h + padding;
     double grid_h = h - header_h - padding * 1.5;
     if (grid_h < 10.0) grid_h = 10.0;
@@ -958,7 +1096,11 @@ static void draw_month_view(cairo_t *cr,
     int rows = 7; /* header + up to 6 weeks */
     double cell_w = (w - 2.0 * padding) / cols;
     double cell_h = grid_h / rows;
-    cairo_set_font_size(cr, cell_h * 0.4);
+    cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+    double weekday_font = fit_font_size(cr, "THU", cell_w * 0.85, cell_h * 0.6);
+    double day_font = fit_font_size(cr, "88", cell_w * 0.85, cell_h * 0.7);
+    double week_font = fit_font_size(cr, "52", cell_w * 0.75, cell_h * 0.6);
+    cairo_set_font_size(cr, weekday_font);
     cairo_set_source_rgb(cr, text_r, text_g, text_b);
     for (int c = 0; c < 7; ++c) {
         int widx = (c + first_weekday) % 7;
@@ -978,7 +1120,7 @@ static void draw_month_view(cairo_t *cr,
 
     int row = 1;
     int col = 1;
-    cairo_set_font_size(cr, cell_h * 0.5);
+    cairo_set_font_size(cr, day_font);
 
     /* previous month filler */
     int leading_slots = first_wday;
@@ -1055,7 +1197,7 @@ static void draw_month_view(cairo_t *cr,
     }
 
     /* week numbers */
-    cairo_set_font_size(cr, cell_h * 0.4);
+    cairo_set_font_size(cr, week_font);
     cairo_set_source_rgb(cr, text_r, text_g, text_b);
     int week_row = 1;
     int day_for_week = 1;
@@ -1181,6 +1323,7 @@ static void update_controls_layout(void)
             if (year_spin && XtIsManaged(year_spin)) XtUnmanageChild(year_spin);
             controls_visible = 0;
         }
+        right_controls_bottom = 0.0;
         if (top_widget && XtIsRealized(top_widget) && last_split_mode != lay.split_mode) {
             const char *title = lay.split_mode ? "Time and Calendar" : "Time";
             XtVaSetValues(top_widget, XmNtitle, title, XmNiconName, title, NULL);
@@ -1255,6 +1398,11 @@ static void update_controls_layout(void)
                   XmNwidth, (Dimension)year_w,
                   XmNheight, (Dimension)year_h,
                   NULL);
+
+    int month_bottom = header_y + row_h;
+    int year_bottom = year_y + year_h;
+    int header_bottom = month_bottom > year_bottom ? month_bottom : year_bottom;
+    right_controls_bottom = (double)header_bottom + pad * 0.5;
 
     if (XtIsRealized(month_option)) XRaiseWindow(dpy, XtWindow(month_option));
     if (XtIsRealized(year_spin)) XRaiseWindow(dpy, XtWindow(year_spin));
@@ -1387,9 +1535,11 @@ static void draw_clock(void)
     double led_on_r = 0.4;
     double led_on_g = 0.95;
     double led_on_b = 0.55;
-    double led_off_r = clamp01(fg_r * 0.45 + 0.05);
-    double led_off_g = clamp01(fg_g * 0.45 + 0.05);
-    double led_off_b = clamp01(fg_b * 0.45 + 0.05);
+    const double LED_OFF_SCALE = 0.22;
+    const double LED_OFF_BIAS = 0.02;
+    double led_off_r = clamp01(fg_r * LED_OFF_SCALE + LED_OFF_BIAS);
+    double led_off_g = clamp01(fg_g * LED_OFF_SCALE + LED_OFF_BIAS);
+    double led_off_b = clamp01(fg_b * LED_OFF_SCALE + LED_OFF_BIAS);
 
     int display_hour = current_local_tm.tm_hour;
     if (show_ampm_indicator) {
@@ -1486,9 +1636,9 @@ static void draw_clock(void)
                     cal_width, cal_height);
     cairo_fill(cr);
 
-    double paper_r = clamp01(ts_r * 0.6 + bg_r * 0.4 + 0.05);
-    double paper_g = clamp01(ts_g * 0.6 + bg_g * 0.4 + 0.05);
-    double paper_b = clamp01(ts_b * 0.6 + bg_b * 0.4 + 0.05);
+    double paper_r = 1.0;
+    double paper_g = 1.0;
+    double paper_b = 1.0;
     cairo_set_source_rgb(cr, paper_r, paper_g, paper_b);
     cairo_rectangle(cr, cal_left, cal_top, cal_width, cal_height);
     cairo_fill(cr);
@@ -1501,55 +1651,21 @@ static void draw_clock(void)
     cairo_rectangle(cr, cal_left, cal_top, cal_width, cal_height);
     cairo_stroke(cr);
 
-    double center_x = cal_left + cal_width / 2.0;
-
-    cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
-
-    char day_buf[8];
-    snprintf(day_buf, sizeof(day_buf), "%d", current_local_tm.tm_mday);
-    cairo_set_font_size(cr, day_font);
-    cairo_text_extents_t day_ext = {0};
-    cairo_text_extents(cr, day_buf, &day_ext);
-
-    double spacing = cal_height * 0.05;
-    if (spacing < 4.0) spacing = 4.0;
-    double label_padding = cal_height * 0.02;
-    if (label_padding < 2.0) label_padding = 2.0;
-    double remaining_height = cal_height - day_ext.height - 2.0 * spacing - label_padding;
-    if (remaining_height < 0.0) remaining_height = 0.0;
-    double label_font = (remaining_height / 2.0) * 1.15; /* boost 15% */
-    double label_max = day_font / 1.5;
-    if (label_font > label_max) label_font = label_max;
-    if (label_font < 10.0) label_font = 10.0;
-    weekday_font = label_font;
-
-    /* Compute vertical positions based on actual day height:
-       split remaining space evenly above/below the day, then
-       center weekday/month in those halves. */
-    double space_remain = cal_height - day_ext.height;
-    if (space_remain < 0.0) space_remain = 0.0;
-    double half_space = space_remain / 2.0;
-    double weekday_y = cal_top + half_space / 2.0;
-    double day_y     = cal_top + half_space + day_ext.height / 2.0;
-    double month_y   = cal_top + half_space + day_ext.height + half_space / 2.0;
-
-    cairo_set_source_rgb(cr, paper_fg_r, paper_fg_g, paper_fg_b);
-    cairo_set_font_size(cr, day_font);
-    draw_centered_text(cr, day_buf, center_x, day_y, &day_ext, NULL);
-
-    cairo_set_font_size(cr, weekday_font);
-    draw_centered_text(cr,
-                       weekday_labels[(current_local_tm.tm_wday + 7) % 7],
-                       center_x, weekday_y,
-                       NULL, NULL);
-
     double month_font = weekday_font;
-    cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_ITALIC, CAIRO_FONT_WEIGHT_BOLD);
-    cairo_set_font_size(cr, month_font);
-    draw_centered_text(cr,
-                       month_labels[current_local_tm.tm_mon % 12],
-                       center_x, month_y,
-                       NULL, NULL);
+    draw_calendar_paper(cr,
+                        cal_left,
+                        cal_top,
+                        cal_width,
+                        cal_height,
+                        paper_r,
+                        paper_g,
+                        paper_b,
+                        paper_fg_r,
+                        paper_fg_g,
+                        paper_fg_b,
+                        day_font,
+                        weekday_font,
+                        month_font);
 
 
     cairo_surface_flush(cs);

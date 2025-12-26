@@ -16,6 +16,7 @@ CDE_LIBS := -lDtSvc -lDtXinerama -lDtWidget -ltt -lXm -lXt -lSM -lICE -lXinerama
 
 PROGRAMS := $(BIN_DIR)/ck-about \
             $(BIN_DIR)/ck-load \
+            $(BIN_DIR)/ck-tasks \
             $(BIN_DIR)/ck-mixer \
             $(BIN_DIR)/ck-clock \
             $(BIN_DIR)/ck-calc \
@@ -23,7 +24,7 @@ PROGRAMS := $(BIN_DIR)/ck-about \
             $(BIN_DIR)/ck-nibbles \
             $(BIN_DIR)/ck-mines
 
-.PHONY: all clean ck-about ck-load ck-mixer ck-clock ck-calc ck-character-map ck-nibbles ck-mines
+.PHONY: all clean ck-about ck-load ck-tasks ck-mixer ck-clock ck-calc ck-character-map ck-nibbles ck-mines
 
 all: $(PROGRAMS)
 
@@ -46,6 +47,10 @@ $(BIN_DIR)/ck-about: src/ck-about/ck-about.c src/shared/session_utils.c src/shar
 # ck-load
 $(BIN_DIR)/ck-load: src/ck-load/ck-load.c src/ck-load/vertical_meter.c src/ck-load/vertical_meter.h src/shared/session_utils.c src/shared/session_utils.h | $(BIN_DIR)
 	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-load/ck-load.c src/ck-load/vertical_meter.c src/shared/session_utils.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
+
+# ck-tasks
+$(BIN_DIR)/ck-tasks: src/ck-tasks/ck-tasks.c src/ck-tasks/ck-tasks-ctrl.c src/ck-tasks/ck-tasks-model.c src/ck-tasks/ck-tasks-ui.c src/shared/session_utils.c src/shared/session_utils.h src/shared/about_dialog.c src/shared/about_dialog.h src/shared/table/table_widget.c src/shared/gridlayout/gridlayout.c | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-tasks/ck-tasks.c src/ck-tasks/ck-tasks-ctrl.c src/ck-tasks/ck-tasks-model.c src/ck-tasks/ck-tasks-ui.c src/shared/session_utils.c src/shared/about_dialog.c src/shared/table/table_widget.c src/shared/gridlayout/gridlayout.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
 
 # ck-mixer
 $(BIN_DIR)/ck-mixer: src/ck-mixer/ck-mixer.c src/shared/session_utils.c src/shared/session_utils.h src/shared/config_utils.c src/shared/config_utils.h src/shared/about_dialog.c src/shared/about_dialog.h | $(BIN_DIR)

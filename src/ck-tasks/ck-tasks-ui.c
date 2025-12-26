@@ -435,23 +435,106 @@ static void on_process_header_activate(Widget widget, XtPointer client, XtPointe
 }
 
 
-static Widget create_status_label(TasksUi *ui, Widget parent)
+static void status_set_label_text(Widget label, char *cache, size_t cache_len, const char *text)
 {
-    XmString label = make_string("Status: idle");
-    Widget status = XtVaCreateManagedWidget(
-        "tasksStatusLabel",
-        xmLabelGadgetClass, parent,
-        XmNlabelString, label,
+    if (!label || !cache || cache_len == 0) return;
+    const char *value = text ? text : "";
+    if (strncmp(cache, value, cache_len) == 0) return;
+    strncpy(cache, value, cache_len - 1);
+    cache[cache_len - 1] = '\0';
+    XmString label_text = make_string(value);
+    XtVaSetValues(label, XmNlabelString, label_text, NULL);
+    XmStringFree(label_text);
+}
+
+static Widget create_status_segment(Widget parent, const char *name, Widget *out_label)
+{
+    Widget frame = XmCreateFrame(parent, (String)name, NULL, 0);
+    XtVaSetValues(frame,
+                  XmNshadowType, XmSHADOW_IN,
+                  XmNmarginWidth, 4,
+                  XmNmarginHeight, 2,
+                  NULL);
+    XtManageChild(frame);
+
+    Widget label = XtVaCreateManagedWidget(
+        "statusSegmentLabel",
+        xmLabelGadgetClass, frame,
         XmNalignment, XmALIGNMENT_BEGINNING,
-        XmNbottomAttachment, XmATTACH_FORM,
-        XmNleftAttachment, XmATTACH_FORM,
-        XmNrightAttachment, XmATTACH_FORM,
-        XmNbottomOffset, 6,
-        XmNleftOffset, 10,
-        XmNrightOffset, 10,
+        XmNmarginLeft, 4,
+        XmNmarginRight, 4,
         NULL);
-    XmStringFree(label);
-    return status;
+    if (out_label) *out_label = label;
+    return frame;
+}
+
+static Widget create_status_bar(TasksUi *ui, Widget parent)
+{
+    Widget status_form = XmCreateForm(parent, "tasksStatusBar", NULL, 0);
+    XtVaSetValues(status_form,
+                  XmNfractionBase, 100,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNbottomOffset, 6,
+                  XmNleftOffset, 10,
+                  XmNrightOffset, 10,
+                  NULL);
+    XtManageChild(status_form);
+
+    ui->status_frame_processes = create_status_segment(status_form, "statusProcessesFrame",
+                                                       &ui->status_processes_label);
+    ui->status_frame_cpu = create_status_segment(status_form, "statusCpuFrame",
+                                                 &ui->status_cpu_label);
+    ui->status_frame_memory = create_status_segment(status_form, "statusMemoryFrame",
+                                                    &ui->status_memory_label);
+    ui->status_frame_message = create_status_segment(status_form, "statusMessageFrame",
+                                                     &ui->status_message_label);
+
+    XtVaSetValues(ui->status_frame_processes,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_POSITION,
+                  XmNrightPosition, 25,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  NULL);
+    XtVaSetValues(ui->status_frame_cpu,
+                  XmNleftAttachment, XmATTACH_POSITION,
+                  XmNleftPosition, 25,
+                  XmNrightAttachment, XmATTACH_POSITION,
+                  XmNrightPosition, 50,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  XmNleftOffset, 6,
+                  NULL);
+    XtVaSetValues(ui->status_frame_memory,
+                  XmNleftAttachment, XmATTACH_POSITION,
+                  XmNleftPosition, 50,
+                  XmNrightAttachment, XmATTACH_POSITION,
+                  XmNrightPosition, 75,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  XmNleftOffset, 6,
+                  NULL);
+    XtVaSetValues(ui->status_frame_message,
+                  XmNleftAttachment, XmATTACH_POSITION,
+                  XmNleftPosition, 75,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  XmNleftOffset, 6,
+                  NULL);
+
+    status_set_label_text(ui->status_processes_label, ui->status_processes_text,
+                          sizeof(ui->status_processes_text), "Processes: 0");
+    status_set_label_text(ui->status_cpu_label, ui->status_cpu_text,
+                          sizeof(ui->status_cpu_text), "CPU Usage: 0%");
+    status_set_label_text(ui->status_memory_label, ui->status_memory_text,
+                          sizeof(ui->status_memory_text), "Physical Memory: 0% (0 GB/0 GB)");
+    status_set_label_text(ui->status_message_label, ui->status_message_text,
+                          sizeof(ui->status_message_text), "Status: idle");
+
+    return status_form;
 }
 
 static Widget create_menu_item(Widget parent, const char *name, const char *label)
@@ -1145,12 +1228,6 @@ TasksUi *tasks_ui_create(XtAppContext app, Widget toplevel)
     ui->menu_file_new_window = create_menu_item(file_menu, "fileNewWindow", "New Window");
     ui->menu_file_exit = create_menu_item(file_menu, "fileExit", "Exit");
 
-    Widget view_menu = create_cascade_menu(menu_bar, "View", "viewMenu", NULL);
-    ui->menu_view_refresh = create_menu_item(view_menu, "viewRefresh", "Refresh");
-    ui->menu_view_processes = create_menu_item(view_menu, "viewProcesses", "Show Processes");
-    ui->menu_view_performance = create_menu_item(view_menu, "viewPerformance", "Show Performance");
-    ui->menu_view_networking = create_menu_item(view_menu, "viewNetworking", "Show Networking");
-
     Widget options_menu = create_cascade_menu(menu_bar, "Options", "optionsMenu", NULL);
     ui->menu_options_always_on_top = create_toggle_item(options_menu, "optionsAlwaysOnTop", "Always on Top");
     Widget update_menu = XmCreatePulldownMenu(menu_bar, "updateFrequencyMenu", NULL, 0);
@@ -1167,12 +1244,17 @@ TasksUi *tasks_ui_create(XtAppContext app, Widget toplevel)
     ui->menu_options_update_5s = create_menu_item(update_menu, "update5s", "5s");
     ui->menu_options_filter_by_user = create_checkbox_item(options_menu, "filterByUser", "Filter by User");
 
+    Widget view_menu = create_cascade_menu(menu_bar, "View", "viewMenu", NULL);
+    ui->menu_view_refresh = create_menu_item(view_menu, "viewRefresh", "Refresh");
+    ui->menu_view_processes = create_menu_item(view_menu, "viewProcesses", "Show Processes");
+    ui->menu_view_performance = create_menu_item(view_menu, "viewPerformance", "Show Performance");
+    ui->menu_view_networking = create_menu_item(view_menu, "viewNetworking", "Show Networking");
+
     Widget help_menu = create_cascade_menu(menu_bar, "Help", "helpMenu", NULL);
     ui->menu_help_help = create_menu_item(help_menu, "helpView", "View Help");
     ui->menu_help_about = create_menu_item(help_menu, "helpAbout", "About");
 
-    Widget status = create_status_label(ui, form);
-    ui->status_label = status;
+    Widget status = create_status_bar(ui, form);
 
     Widget tab_stack = XmCreateTabStack(form, "tasksTabStack", NULL, 0);
     XtVaSetValues(tab_stack,
@@ -1190,12 +1272,14 @@ TasksUi *tasks_ui_create(XtAppContext app, Widget toplevel)
     ui->tab_stack = tab_stack;
     XtManageChild(tab_stack);
 
-    ui->tab_processes = create_process_tab(ui);
-    ui->tab_performance = create_performance_tab(ui);
-    ui->tab_networking = create_networking_tab(ui);
     ui->tab_applications = create_applications_tab(ui);
+    ui->tab_processes = create_process_tab(ui);
     ui->tab_services = create_simple_tab(ui, TASKS_TAB_SERVICES, "servicesPage",
                                          "Services", "Service status, start/stop controls, and dependencies.");
+    ui->tab_performance = create_performance_tab(ui);
+    ui->tab_networking = create_networking_tab(ui);
+    ui->tab_users = create_simple_tab(ui, TASKS_TAB_USERS, "usersPage",
+                                      "Users", "User sessions and resource consumption.");
 
     Widget initial_tab = tasks_ui_get_tab_widget(ui, TASKS_TAB_PROCESSES);
     if (initial_tab) {
@@ -1242,6 +1326,7 @@ int tasks_ui_get_current_tab(TasksUi *ui)
     if (selected == ui->tab_networking) return TASKS_TAB_NETWORKING;
     if (selected == ui->tab_applications) return TASKS_TAB_APPLICATIONS;
     if (selected == ui->tab_services) return TASKS_TAB_SERVICES;
+    if (selected == ui->tab_users) return TASKS_TAB_USERS;
     return TASKS_TAB_PROCESSES;
 }
 
@@ -1255,10 +1340,9 @@ void tasks_ui_set_current_tab(TasksUi *ui, TasksTab tab)
 
 void tasks_ui_update_status(TasksUi *ui, const char *text)
 {
-    if (!ui || !ui->status_label) return;
-    XmString status = make_string(text ? text : "Status: idle");
-    XtVaSetValues(ui->status_label, XmNlabelString, status, NULL);
-    XmStringFree(status);
+    if (!ui || !ui->status_message_label) return;
+    status_set_label_text(ui->status_message_label, ui->status_message_text,
+                          sizeof(ui->status_message_text), text ? text : "Status: idle");
 }
 
 void tasks_ui_center_on_screen(TasksUi *ui)
@@ -1292,6 +1376,7 @@ static Widget tasks_ui_get_tab_widget(TasksUi *ui, TasksTab tab)
     case TASKS_TAB_NETWORKING: return ui->tab_networking;
     case TASKS_TAB_APPLICATIONS: return ui->tab_applications;
     case TASKS_TAB_SERVICES: return ui->tab_services;
+    case TASKS_TAB_USERS: return ui->tab_users;
     default: return NULL;
     }
 }
@@ -1372,6 +1457,16 @@ void tasks_ui_set_applications_table(TasksUi *ui, const TasksApplicationEntry *e
     }
 }
 
+void tasks_ui_update_process_count(TasksUi *ui, int total_processes)
+{
+    if (!ui || !ui->status_processes_label) return;
+    char buffer[64];
+    if (total_processes < 0) total_processes = 0;
+    snprintf(buffer, sizeof(buffer), "Processes: %d", total_processes);
+    status_set_label_text(ui->status_processes_label, ui->status_processes_text,
+                          sizeof(ui->status_processes_text), buffer);
+}
+
 void tasks_ui_update_system_stats(TasksUi *ui, const TasksSystemStats *stats)
 {
     if (!ui || !stats) return;
@@ -1389,6 +1484,21 @@ void tasks_ui_update_system_stats(TasksUi *ui, const TasksSystemStats *stats)
     if (ui->perf_mem_value_label) {
         snprintf(buffer, sizeof(buffer), "%d%%", stats->memory_percent);
         process_set_cell_text(ui->perf_mem_value_label, buffer);
+    }
+    if (ui->status_cpu_label) {
+        snprintf(buffer, sizeof(buffer), "CPU Usage: %d%%", stats->cpu_percent);
+        status_set_label_text(ui->status_cpu_label, ui->status_cpu_text,
+                              sizeof(ui->status_cpu_text), buffer);
+    }
+    if (ui->status_memory_label) {
+        double used_gb = (double)stats->mem_used_kb / (1024.0 * 1024.0);
+        double total_gb = (double)stats->mem_total_kb / (1024.0 * 1024.0);
+        char mem_buffer[128];
+        snprintf(mem_buffer, sizeof(mem_buffer),
+                 "Physical Memory: %d%% (%.1f GB/%.1f GB)",
+                 stats->memory_percent, used_gb, total_gb);
+        status_set_label_text(ui->status_memory_label, ui->status_memory_text,
+                              sizeof(ui->status_memory_text), mem_buffer);
     }
     int load_max = 100;
     if (stats->load1_percent > load_max) load_max = stats->load1_percent;

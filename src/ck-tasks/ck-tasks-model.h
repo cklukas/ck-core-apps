@@ -20,6 +20,8 @@ typedef struct {
     int load1_percent;
     int load5_percent;
     int load15_percent;
+    unsigned long mem_total_kb;
+    unsigned long mem_used_kb;
 } TasksSystemStats;
 
 void tasks_model_initialize(void);

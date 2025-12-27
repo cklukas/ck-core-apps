@@ -1160,24 +1160,24 @@ static Widget create_applications_tab(TasksUi *ui)
     XmStringFree(close_label);
     ui->apps_close_button = close_button;
 
-    TableWidget *table = table_widget_create(page, "appsTable", apps_columns, (int)APPS_COLUMN_COUNT);
-    if (table) {
-        Widget table_widget = table_widget_get_widget(table);
-        XtVaSetValues(table_widget,
-                      XmNtopAttachment, XmATTACH_FORM,
-                      XmNtopOffset, 10,
-                      XmNleftAttachment, XmATTACH_FORM,
-                      XmNrightAttachment, XmATTACH_FORM,
-                      XmNleftOffset, 8,
-                      XmNrightOffset, 8,
-                      XmNbottomAttachment, XmATTACH_WIDGET,
-                      XmNbottomWidget, controls,
-                      XmNbottomOffset, 8,
-                      NULL);
-        table_widget_set_grid(table, True);
-        table_widget_set_alternate_row_colors(table, True);
-        ui->apps_table = table;
-    }
+    /* Disabled temporarily: apps table triggers redraw hang when window is exposed. */
+    XmString disabled_text = make_string("Applications table temporarily disabled.");
+    XtVaCreateManagedWidget(
+        "appsTableDisabled",
+        xmLabelGadgetClass, page,
+        XmNlabelString, disabled_text,
+        XmNalignment, XmALIGNMENT_CENTER,
+        XmNtopAttachment, XmATTACH_FORM,
+        XmNtopOffset, 10,
+        XmNleftAttachment, XmATTACH_FORM,
+        XmNrightAttachment, XmATTACH_FORM,
+        XmNleftOffset, 8,
+        XmNrightOffset, 8,
+        XmNbottomAttachment, XmATTACH_WIDGET,
+        XmNbottomWidget, controls,
+        XmNbottomOffset, 8,
+        NULL);
+    XmStringFree(disabled_text);
 
     return page;
 }

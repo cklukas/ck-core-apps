@@ -46,6 +46,35 @@ struct TableWidget {
     Pixel *column_colors;
 };
 
+static const char *sort_direction_label(TableSortDirection direction)
+{
+    switch (direction) {
+    case TABLE_SORT_ASCENDING:
+        return "asc";
+    case TABLE_SORT_DESCENDING:
+        return "desc";
+    case TABLE_SORT_NONE:
+    default:
+        return "none";
+    }
+}
+
+static void log_table_event(TableWidget *table, const char *event, Widget widget, int column)
+{
+    if (!table || !event) return;
+    const char *table_name = table->container ? XtName(table->container) : "(unknown)";
+    const char *widget_name = widget ? XtName(widget) : "(unknown)";
+    fprintf(stderr,
+            "[table-widget] %s table=%s widget=%s column=%d sort_column=%d sort_dir=%s rows=%d\n",
+            event,
+            table_name,
+            widget_name,
+            column,
+            table->sort_column,
+            sort_direction_label(table->sort_direction),
+            table->row_count);
+}
+
 static XmString make_string(const char *text)
 {
     return XmStringCreateLocalized((String)(text ? text : ""));
@@ -267,11 +296,13 @@ static void update_header_labels(TableWidget *table)
 
 static void header_activate_cb(Widget widget, XtPointer client, XtPointer call)
 {
+    (void)call;
     TableWidget *table = (TableWidget *)client;
     XtPointer index_ptr = NULL;
     XtVaGetValues(widget, XmNuserData, &index_ptr, NULL);
     int index = index_ptr ? (int)(intptr_t)index_ptr : -1;
     if (index < 0) return;
+    log_table_event(table, "header_activate", widget, index);
     table_widget_toggle_sorting(table, index);
 }
 
@@ -403,15 +434,15 @@ TableWidget *table_widget_create(Widget parent, const char *name,
         XtManageChild(header_frame);
     }
 
-    Widget scroll = XmCreateScrolledWindow(form, "tableScroll", NULL, 0);
-    XtVaSetValues(scroll,
-                  XmNtopAttachment, XmATTACH_WIDGET,
-                  XmNtopWidget, table->header_row,
-                  XmNleftAttachment, XmATTACH_FORM,
-                  XmNrightAttachment, XmATTACH_FORM,
-                  XmNbottomAttachment, XmATTACH_FORM,
-                  XmNscrollingPolicy, XmAUTOMATIC,
-                  NULL);
+    Arg scroll_args[10];
+    int sn = 0;
+    XtSetArg(scroll_args[sn], XmNtopAttachment, XmATTACH_WIDGET); sn++;
+    XtSetArg(scroll_args[sn], XmNtopWidget, table->header_row); sn++;
+    XtSetArg(scroll_args[sn], XmNleftAttachment, XmATTACH_FORM); sn++;
+    XtSetArg(scroll_args[sn], XmNrightAttachment, XmATTACH_FORM); sn++;
+    XtSetArg(scroll_args[sn], XmNbottomAttachment, XmATTACH_FORM); sn++;
+    XtSetArg(scroll_args[sn], XmNscrollingPolicy, XmAUTOMATIC); sn++;
+    Widget scroll = XmCreateScrolledWindow(form, "tableScroll", scroll_args, sn);
     XtManageChild(scroll);
 
     table->rows_column = XmCreateRowColumn(scroll, "tableRows", NULL, 0);
@@ -582,6 +613,7 @@ void table_widget_sort_by_column(TableWidget *table, int column,
     table->sort_direction = direction;
     sort_rows(table);
     update_header_labels(table);
+    log_table_event(table, "sort_by_column", table->header_buttons[column], column);
 }
 
 void table_widget_toggle_sorting(TableWidget *table, int column)
@@ -597,4 +629,5 @@ void table_widget_toggle_sorting(TableWidget *table, int column)
     }
     sort_rows(table);
     update_header_labels(table);
+    log_table_event(table, "toggle_sorting", table->header_buttons[column], column);
 }

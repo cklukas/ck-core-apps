@@ -1,6 +1,8 @@
 #include "table_widget.h"
 
 #include <X11/Xlib.h>
+#include <X11/Intrinsic.h>
+#include <X11/StringDefs.h>
 #include <Xm/ArrowBG.h>
 #include <Xm/Form.h>
 #include <Xm/LabelG.h>
@@ -15,11 +17,19 @@
 #include <string.h>
 #include <stdint.h>
 
+#ifndef XtNbackingStore
+#define XtNbackingStore "backingStore"
+#endif
+#ifndef XtNsaveUnder
+#define XtNsaveUnder "saveUnder"
+#endif
+
 typedef struct TableRow {
     TableWidget *table;
     Widget row_form;
     Widget *cells;
     char **values;
+    char **sort_values;
     int original_index;
 } TableRow;
 
@@ -45,7 +55,20 @@ struct TableWidget {
     XmFontList header_font;
     XmFontList row_font;
     Pixel *column_colors;
+    Boolean updates_suspended;
+    Boolean sort_pending;
 };
+
+static void table_widget_refresh_layout(TableWidget *table);
+
+static void table_widget_enable_backing_store(Widget widget)
+{
+    if (!widget || !XtIsWidget(widget)) return;
+    XtVaSetValues(widget,
+                  XtNbackingStore, Always,
+                  XtNsaveUnder, True,
+                  NULL);
+}
 
 static const char *sort_direction_label(TableSortDirection direction)
 {
@@ -88,12 +111,73 @@ static void table_widget_update_header_offset(TableWidget *table)
     XtVaSetValues(table->header_row, XmNrightOffset, (int)offset, NULL);
 }
 
-static void table_widget_scrollbar_visibility_cb(Widget widget, XtPointer client, XtPointer call)
+static void table_widget_update_row_width(TableWidget *table)
+{
+    if (!table || !table->rows_column || !table->scroll_window) return;
+    Widget clip = NULL;
+    XtVaGetValues(table->scroll_window, XmNclipWindow, &clip, NULL);
+    Dimension width = 0;
+    XtVaGetValues(table->scroll_window, XmNwidth, &width, NULL);
+
+    Dimension reserved = 0;
+    Widget vscroll = NULL;
+    XtVaGetValues(table->scroll_window, XmNverticalScrollBar, &vscroll, NULL);
+    if (vscroll && XtIsManaged(vscroll)) {
+        XtVaGetValues(vscroll, XmNwidth, &reserved, NULL);
+    }
+    if (reserved > 0 && width > reserved) {
+        width = (Dimension)(width - reserved);
+    }
+
+    if (clip) {
+        Dimension clip_width = 0;
+        XtVaGetValues(clip, XmNwidth, &clip_width, NULL);
+        if (clip_width > 0 && clip_width < width) {
+            width = clip_width;
+        }
+    }
+    if (width <= 0) return;
+    XtVaSetValues(table->rows_column, XmNwidth, width, NULL);
+    for (int i = 0; i < table->row_count; ++i) {
+        XtVaSetValues(table->rows[i]->row_form, XmNwidth, width, NULL);
+    }
+}
+
+static void table_widget_scrollbar_structure_event(Widget widget, XtPointer client, XEvent *event, Boolean *continue_to_dispatch)
 {
     (void)widget;
-    (void)call;
+    (void)continue_to_dispatch;
+    if (!event) return;
+    if (event->type != MapNotify && event->type != UnmapNotify && event->type != ConfigureNotify) return;
+    TableWidget *table = (TableWidget *)client;
+    table_widget_refresh_layout(table);
+}
+
+static void table_widget_scroll_resize_cb(Widget widget, XtPointer client, XEvent *event, Boolean *continue_to_dispatch)
+{
+    (void)widget;
+    (void)continue_to_dispatch;
+    if (!event || event->type != ConfigureNotify) return;
     TableWidget *table = (TableWidget *)client;
     table_widget_update_header_offset(table);
+    table_widget_update_row_width(table);
+}
+
+static void table_widget_refresh_layout(TableWidget *table)
+{
+    if (!table) return;
+    table_widget_update_header_offset(table);
+    table_widget_update_row_width(table);
+    if (table->scroll_window) {
+        Widget clip = NULL;
+        Widget vscroll = NULL;
+        XtVaGetValues(table->scroll_window,
+                      XmNclipWindow, &clip,
+                      XmNverticalScrollBar, &vscroll,
+                      NULL);
+        table_widget_enable_backing_store(clip);
+        table_widget_enable_backing_store(vscroll);
+    }
 }
 
 static XmString make_string(const char *text)
@@ -104,6 +188,14 @@ static XmString make_string(const char *text)
 static const char *safe_value(const char *value)
 {
     return value ? value : "";
+}
+
+static const char *row_sort_value(const TableRow *row, int column)
+{
+    if (!row || column < 0 || column >= row->table->column_count) return "";
+    if (row->sort_values && row->sort_values[column]) return row->sort_values[column];
+    if (row->values && row->values[column]) return row->values[column];
+    return "";
 }
 
 static void apply_row_colors(TableWidget *table, TableRow *row, int row_index)
@@ -134,7 +226,9 @@ static void update_cell_label(TableRow *row, int column, const char *value)
 
 static void sort_rows(TableWidget *table);
 
-static TableRow *table_row_create(TableWidget *table, const char *const values[])
+static TableRow *table_row_create(TableWidget *table,
+                                  const char *const values[],
+                                  const char *const sort_values[])
 {
     if (!table) return NULL;
     TableRow *row = (TableRow *)calloc(1, sizeof(TableRow));
@@ -142,9 +236,11 @@ static TableRow *table_row_create(TableWidget *table, const char *const values[]
     row->table = table;
     row->cells = (Widget *)calloc(table->column_count, sizeof(Widget));
     row->values = (char **)calloc(table->column_count, sizeof(char *));
-    if (!row->cells || !row->values) {
+    row->sort_values = (char **)calloc(table->column_count, sizeof(char *));
+    if (!row->cells || !row->values || !row->sort_values) {
         free(row->cells);
         free(row->values);
+        free(row->sort_values);
         free(row);
         return NULL;
     }
@@ -153,17 +249,27 @@ static TableRow *table_row_create(TableWidget *table, const char *const values[]
                   XmNfractionBase, table->column_count * 10,
                   XmNmarginHeight, 2,
                   XmNmarginWidth, 2,
+                  XmNrecomputeSize, False,
                   XmNshadowThickness, table->grid ? 1 : 0,
                   XmNshadowType, table->grid ? XmSHADOW_ETCHED_IN : XmSHADOW_OUT,
                   XmNnavigationType, XmTAB_GROUP,
                   XmNleftAttachment, XmATTACH_FORM,
                   XmNrightAttachment, XmATTACH_FORM,
                   NULL);
+    table_widget_enable_backing_store(row->row_form);
 
     for (int col = 0; col < table->column_count; ++col) {
         TableColumnDef *def = &table->columns[col];
         const char *content = safe_value(values ? values[col] : NULL);
         row->values[col] = strdup(content);
+        const char *sort_value = safe_value(sort_values ? sort_values[col] : NULL);
+        if (sort_values && sort_values[col] == NULL) {
+            sort_value = content;
+        }
+        if (!sort_values) {
+            sort_value = content;
+        }
+        row->sort_values[col] = strdup(sort_value);
         int left_pos = col * 10;
         int right_pos = (col + 1) * 10;
         if (col == table->column_count - 1) {
@@ -199,6 +305,27 @@ static TableRow *table_row_create(TableWidget *table, const char *const values[]
     return row;
 }
 
+static Boolean table_row_update_sort_values(TableRow *row,
+                                            const char *const values[],
+                                            const char *const sort_values[])
+{
+    if (!row) return False;
+    Boolean changed = False;
+    for (int i = 0; i < row->table->column_count; ++i) {
+        const char *display = safe_value(values ? values[i] : NULL);
+        const char *sort_value = safe_value(sort_values ? sort_values[i] : NULL);
+        if (!sort_values || (sort_values && sort_values[i] == NULL)) {
+            sort_value = display;
+        }
+        const char *current = row->sort_values[i] ? row->sort_values[i] : "";
+        if (strcmp(current, sort_value) == 0) continue;
+        free(row->sort_values[i]);
+        row->sort_values[i] = strdup(sort_value);
+        changed = True;
+    }
+    return changed;
+}
+
 static void destroy_row(TableRow *row)
 {
     if (!row) return;
@@ -213,6 +340,12 @@ static void destroy_row(TableRow *row)
             free(row->values[i]);
         }
         free(row->values);
+    }
+    if (row->sort_values) {
+        for (int i = 0; i < row->table->column_count; ++i) {
+            free(row->sort_values[i]);
+        }
+        free(row->sort_values);
     }
     free(row);
 }
@@ -233,12 +366,14 @@ static void reorder_row_children(TableWidget *table)
 {
     if (!table) return;
     for (int i = 0; i < table->row_count; ++i) {
-        XtUnmanageChild(table->rows[i]->row_form);
-    }
-    for (int i = 0; i < table->row_count; ++i) {
-        XtManageChild(table->rows[i]->row_form);
+        if (table->rows[i] && table->rows[i]->row_form) {
+            XtVaSetValues(table->rows[i]->row_form,
+                          XmNpositionIndex, i,
+                          NULL);
+        }
         apply_row_colors(table, table->rows[i], i);
     }
+    table_widget_update_row_width(table);
 }
 
 static int compare_rows(TableWidget *table, const TableRow *a, const TableRow *b)
@@ -251,12 +386,26 @@ static int compare_rows(TableWidget *table, const TableRow *a, const TableRow *b
     if (column < 0 || column >= table->column_count) {
         return a->original_index - b->original_index;
     }
-    const char *av = safe_value(a->values[column]);
-    const char *bv = safe_value(b->values[column]);
+    const char *av = row_sort_value(a, column);
+    const char *bv = row_sort_value(b, column);
     int cmp = 0;
     if (table->columns[column].numeric) {
-        double da = strtod(av, NULL);
-        double db = strtod(bv, NULL);
+        double da = 0.0;
+        double db = 0.0;
+        char *end_a = NULL;
+        char *end_b = NULL;
+        if (!av || av[0] == '\0') {
+            da = 1e18;
+        } else {
+            da = strtod(av, &end_a);
+            if (end_a == av) da = 1e18;
+        }
+        if (!bv || bv[0] == '\0') {
+            db = 1e18;
+        } else {
+            db = strtod(bv, &end_b);
+            if (end_b == bv) db = 1e18;
+        }
         if (da < db) cmp = -1;
         else if (da > db) cmp = 1;
         else cmp = 0;
@@ -349,6 +498,7 @@ TableWidget *table_widget_create(Widget parent, const char *name,
 
     Widget form = XmCreateForm(parent, (String)(name ? name : "tableForm"), NULL, 0);
     table->container = form;
+    table_widget_enable_backing_store(form);
 
     table->header_row = XmCreateForm(form, "tableHeader", NULL, 0);
     XtVaSetValues(table->header_row,
@@ -356,11 +506,11 @@ TableWidget *table_widget_create(Widget parent, const char *name,
                   XmNtopAttachment, XmATTACH_FORM,
                   XmNleftAttachment, XmATTACH_FORM,
                   XmNrightAttachment, XmATTACH_FORM,
-                  XmNmarginHeight, 2,
-                  XmNmarginWidth, 2,
-                  XmNshadowThickness, 1,
-                  XmNshadowType, XmSHADOW_OUT,
+                  XmNmarginHeight, 0,
+                  XmNmarginWidth, 0,
+                  XmNshadowThickness, 0,
                   NULL);
+    table_widget_enable_backing_store(table->header_row);
     XtManageChild(table->header_row);
 
     for (int i = 0; i < column_count; ++i) {
@@ -465,16 +615,18 @@ TableWidget *table_widget_create(Widget parent, const char *name,
     XtSetArg(scroll_args[sn], XmNrightAttachment, XmATTACH_FORM); sn++;
     XtSetArg(scroll_args[sn], XmNbottomAttachment, XmATTACH_FORM); sn++;
     XtSetArg(scroll_args[sn], XmNscrollingPolicy, XmAUTOMATIC); sn++;
+    XtSetArg(scroll_args[sn], XmNshadowThickness, 0); sn++;
     Widget scroll = XmCreateScrolledWindow(form, "tableScroll", scroll_args, sn);
     XtManageChild(scroll);
     table->scroll_window = scroll;
+    table_widget_enable_backing_store(scroll);
     Widget vscroll = NULL;
     XtVaGetValues(scroll, XmNverticalScrollBar, &vscroll, NULL);
     if (vscroll) {
-        XtAddCallback(vscroll, XmNmapCallback, table_widget_scrollbar_visibility_cb, table);
-        XtAddCallback(vscroll, XmNunmapCallback, table_widget_scrollbar_visibility_cb, table);
+        XtAddEventHandler(vscroll, StructureNotifyMask, False, table_widget_scrollbar_structure_event, (XtPointer)table);
     }
     table_widget_update_header_offset(table);
+    XtAddEventHandler(scroll, StructureNotifyMask, False, table_widget_scroll_resize_cb, table);
 
     table->rows_column = XmCreateRowColumn(scroll, "tableRows", NULL, 0);
     XtVaSetValues(table->rows_column,
@@ -484,7 +636,9 @@ TableWidget *table_widget_create(Widget parent, const char *name,
                   XmNmarginWidth, 0,
                   XmNmarginHeight, 0,
                   NULL);
+    table_widget_enable_backing_store(table->rows_column);
     XtManageChild(table->rows_column);
+    table_widget_update_row_width(table);
 
     XtManageChild(table->container);
     return table;
@@ -520,25 +674,63 @@ Widget table_widget_get_widget(TableWidget *table)
 
 TableRow *table_widget_add_row(TableWidget *table, const char *const values[])
 {
+    return table_widget_add_row_with_sort_values(table, values, NULL);
+}
+
+TableRow *table_widget_add_row_with_sort_values(TableWidget *table,
+                                                const char *const values[],
+                                                const char *const sort_values[])
+{
     if (!table) return NULL;
     ensure_row_capacity(table);
-    TableRow *row = table_row_create(table, values);
+    TableRow *row = table_row_create(table, values, sort_values);
     if (!row) return NULL;
     table->rows[table->row_count++] = row;
-    sort_rows(table);
+    if (table->sort_direction != TABLE_SORT_NONE) {
+        if (table->updates_suspended) {
+            table->sort_pending = True;
+        } else {
+            sort_rows(table);
+        }
+    }
+    if (!table->updates_suspended) {
+        table_widget_update_row_width(table);
+    }
     return row;
 }
 
 void table_widget_update_row(TableRow *row, const char *const values[])
 {
+    table_widget_update_row_with_sort_values(row, values, NULL);
+}
+
+void table_widget_update_row_with_sort_values(TableRow *row,
+                                              const char *const values[],
+                                              const char *const sort_values[])
+{
     if (!row || !values) return;
+    Boolean updated = False;
     for (int i = 0; i < row->table->column_count; ++i) {
-        free(row->values[i]);
         const char *value = safe_value(values[i]);
+        const char *current = row->values[i] ? row->values[i] : "";
+        if (strcmp(current, value) == 0) {
+            continue;
+        }
+        free(row->values[i]);
         row->values[i] = strdup(value);
         update_cell_label(row, i, value);
+        updated = True;
     }
-    sort_rows(row->table);
+    Boolean sort_updated = table_row_update_sort_values(row, values, sort_values);
+    TableWidget *table = row->table;
+    if (table && table->sort_direction != TABLE_SORT_NONE) {
+        if (!updated && !sort_updated) return;
+        if (table->updates_suspended) {
+            table->sort_pending = True;
+        } else {
+            sort_rows(table);
+        }
+    }
 }
 
 void table_widget_remove_row(TableWidget *table, TableRow *row)
@@ -557,7 +749,12 @@ void table_widget_remove_row(TableWidget *table, TableRow *row)
         table->rows[i] = table->rows[i + 1];
     }
     table->row_count--;
-    reorder_row_children(table);
+    for (int i = 0; i < table->row_count; ++i) {
+        apply_row_colors(table, table->rows[i], i);
+    }
+    if (!table->updates_suspended) {
+        table_widget_update_row_width(table);
+    }
 }
 
 void table_widget_clear(TableWidget *table)
@@ -661,4 +858,26 @@ void table_widget_toggle_sorting(TableWidget *table, int column)
     sort_rows(table);
     update_header_labels(table);
     log_table_event(table, "toggle_sorting", table->header_buttons[column], column);
+}
+
+Boolean table_widget_suspend_updates(TableWidget *table)
+{
+    if (!table || !table->rows_column) return False;
+    if (!XtIsManaged(table->rows_column)) return False;
+    table->updates_suspended = True;
+    XtUnmanageChild(table->rows_column);
+    return True;
+}
+
+void table_widget_resume_updates(TableWidget *table, Boolean suspended)
+{
+    if (!table || !suspended || !table->rows_column) return;
+    if (table->updates_suspended && table->sort_pending && table->sort_direction != TABLE_SORT_NONE) {
+        sort_rows(table);
+    }
+    table->sort_pending = False;
+    table_widget_refresh_layout(table);
+    XtManageChild(table->rows_column);
+    XmUpdateDisplay(table->rows_column);
+    table->updates_suspended = False;
 }

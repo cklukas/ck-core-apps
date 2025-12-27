@@ -29,16 +29,17 @@ void tasks_ui_set_label_text(Widget widget, const char *text)
     XmStringFree(label);
 }
 
-void tasks_ui_status_set_label_text(Widget label, char *cache, size_t cache_len, const char *text)
+Boolean tasks_ui_status_set_label_text(Widget label, char *cache, size_t cache_len, const char *text)
 {
-    if (!label || !cache || cache_len == 0) return;
+    if (!label || !cache || cache_len == 0) return False;
     const char *value = text ? text : "";
-    if (strncmp(cache, value, cache_len) == 0) return;
+    if (strncmp(cache, value, cache_len) == 0) return False;
     strncpy(cache, value, cache_len - 1);
     cache[cache_len - 1] = '\0';
     XmString label_text = tasks_ui_make_string(value);
     XtVaSetValues(label, XmNlabelString, label_text, NULL);
     XmStringFree(label_text);
+    return True;
 }
 
 Widget tasks_ui_create_page(TasksUi *ui, const char *name, TasksTab tab_number,

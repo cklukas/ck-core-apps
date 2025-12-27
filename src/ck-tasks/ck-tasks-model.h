@@ -30,6 +30,7 @@ typedef struct {
     char host[64];
     char login_time[64];
     char idle_time[32];
+    long long idle_seconds;
     pid_t pid;
 } TasksUserEntry;
 

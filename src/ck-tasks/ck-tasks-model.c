@@ -474,6 +474,7 @@ int tasks_model_list_users(TasksUserEntry **out_entries, int *out_count)
         time_t login_seconds = ut->ut_time;
         tasks_model_format_login_time(entry->login_time, sizeof(entry->login_time), login_seconds);
         long long idle_seconds = tasks_model_get_idle_seconds(ut->ut_line);
+        entry->idle_seconds = idle_seconds;
         tasks_model_format_idle_time(entry->idle_time, sizeof(entry->idle_time), idle_seconds);
         entry->pid = ut->ut_pid;
         count++;

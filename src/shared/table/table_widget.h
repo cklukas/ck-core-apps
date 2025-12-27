@@ -33,7 +33,13 @@ void table_widget_destroy(TableWidget *table);
 Widget table_widget_get_widget(TableWidget *table);
 
 TableRow *table_widget_add_row(TableWidget *table, const char *const values[]);
+TableRow *table_widget_add_row_with_sort_values(TableWidget *table,
+                                                const char *const values[],
+                                                const char *const sort_values[]);
 void table_widget_update_row(TableRow *row, const char *const values[]);
+void table_widget_update_row_with_sort_values(TableRow *row,
+                                              const char *const values[],
+                                              const char *const sort_values[]);
 void table_widget_remove_row(TableWidget *table, TableRow *row);
 void table_widget_clear(TableWidget *table);
 Widget table_row_get_widget(TableRow *row);
@@ -49,5 +55,8 @@ void table_widget_set_alternate_row_colors(TableWidget *table, Boolean enabled);
 void table_widget_sort_by_column(TableWidget *table, int column,
                                  TableSortDirection direction);
 void table_widget_toggle_sorting(TableWidget *table, int column);
+
+Boolean table_widget_suspend_updates(TableWidget *table);
+void table_widget_resume_updates(TableWidget *table, Boolean suspended);
 
 #endif /* CK_SHARED_TABLE_WIDGET_H */

@@ -46,6 +46,8 @@ static SortDirection g_process_sort_direction = SORT_DIR_NONE;
 static int g_process_sort_column = -1;
 static Widget g_process_header_buttons[PROCESS_COLUMN_COUNT];
 static Widget g_process_header_indicators[PROCESS_COLUMN_COUNT];
+static int g_process_header_last_sort_column = -2;
+static SortDirection g_process_header_last_sort_direction = (SortDirection)999;
 static GridLayout *g_process_grid = NULL;
 static int *g_process_row_order = NULL;
 static int g_process_row_count = 0;
@@ -58,6 +60,7 @@ static int g_process_row_page_size = PROCESS_VIRTUAL_ROW_COUNT;
 typedef struct {
     Widget row_form;
     Widget cells[PROCESS_COLUMN_COUNT];
+    char *cell_text[PROCESS_COLUMN_COUNT];
     int row_id;
 } ProcessRow;
 
@@ -74,8 +77,6 @@ static void process_set_cell_text(Widget cell, const char *text);
 static void process_update_row(ProcessRow *row, const TasksProcessEntry *entry);
 static void ensure_process_rows(GridLayout *grid, int needed);
 static void release_process_rows(void);
-static Boolean process_suspend_updates(void);
-static void process_resume_updates(Boolean suspended);
 static void on_process_header_activate(Widget widget, XtPointer client, XtPointer call);
 static void process_update_viewport_metrics(void);
 static void on_process_scroll_window_resize(Widget widget, XtPointer client, XEvent *event, Boolean *continue_to_dispatch);
@@ -84,7 +85,6 @@ static void process_refresh_rows(void)
 {
     if (!g_process_grid) return;
     process_update_viewport_metrics();
-    Boolean suspended = process_suspend_updates();
     int total_rows = g_process_row_count;
     int page_size = g_process_row_page_size;
     if (page_size <= 0) page_size = PROCESS_VIRTUAL_ROW_COUNT;
@@ -118,7 +118,6 @@ static void process_refresh_rows(void)
             XtUnmanageChild(g_process_rows[i].row_form);
         }
     }
-    process_resume_updates(suspended);
 }
 
 static void process_set_cell_text(Widget cell, const char *text)
@@ -126,28 +125,41 @@ static void process_set_cell_text(Widget cell, const char *text)
     tasks_ui_set_label_text(cell, text);
 }
 
+static void process_set_row_cell_text(ProcessRow *row, int column, const char *text)
+{
+    if (!row || column < 0 || column >= PROCESS_COLUMN_COUNT) return;
+    Widget cell = row->cells[column];
+    if (!cell) return;
+    const char *value = text ? text : "";
+    const char *current = row->cell_text[column] ? row->cell_text[column] : "";
+    if (strcmp(current, value) == 0) return;
+    free(row->cell_text[column]);
+    row->cell_text[column] = strdup(value);
+    process_set_cell_text(cell, value);
+}
+
 static void process_update_row(ProcessRow *row, const TasksProcessEntry *entry)
 {
     if (!row || !entry) return;
     char buffer[64];
-    process_set_cell_text(row->cells[0], entry->name);
+    process_set_row_cell_text(row, 0, entry->name);
     if (row->cells[1]) {
         snprintf(buffer, sizeof(buffer), "%d", (int)entry->pid);
-        process_set_cell_text(row->cells[1], buffer);
+        process_set_row_cell_text(row, 1, buffer);
     }
     if (row->cells[2]) {
         snprintf(buffer, sizeof(buffer), "%.1f", entry->cpu_percent);
-        process_set_cell_text(row->cells[2], buffer);
+        process_set_row_cell_text(row, 2, buffer);
     }
     if (row->cells[3]) {
         snprintf(buffer, sizeof(buffer), "%.0f", entry->memory_mb);
-        process_set_cell_text(row->cells[3], buffer);
+        process_set_row_cell_text(row, 3, buffer);
     }
     if (row->cells[4]) {
         snprintf(buffer, sizeof(buffer), "%d", entry->threads);
-        process_set_cell_text(row->cells[4], buffer);
+        process_set_row_cell_text(row, 4, buffer);
     }
-    process_set_cell_text(row->cells[5], entry->user);
+    process_set_row_cell_text(row, 5, entry->user);
 }
 
 static void ensure_process_rows(GridLayout *grid, int needed)
@@ -186,6 +198,10 @@ static void release_process_rows(void)
 {
     if (!g_process_rows) return;
     for (int i = 0; i < g_process_rows_alloc; ++i) {
+        for (int col = 0; col < PROCESS_COLUMN_COUNT; ++col) {
+            free(g_process_rows[i].cell_text[col]);
+            g_process_rows[i].cell_text[col] = NULL;
+        }
         if (g_process_rows[i].row_form && XtIsManaged(g_process_rows[i].row_form)) {
             XtUnmanageChild(g_process_rows[i].row_form);
         }
@@ -193,24 +209,6 @@ static void release_process_rows(void)
     free(g_process_rows);
     g_process_rows = NULL;
     g_process_rows_alloc = 0;
-}
-
-static Boolean process_suspend_updates(void)
-{
-    if (!g_process_grid) return False;
-    Widget grid_widget = gridlayout_get_widget(g_process_grid);
-    if (!grid_widget || !XtIsManaged(grid_widget)) return False;
-    XtUnmanageChild(grid_widget);
-    return True;
-}
-
-static void process_resume_updates(Boolean suspended)
-{
-    if (!suspended || !g_process_grid) return;
-    Widget grid_widget = gridlayout_get_widget(g_process_grid);
-    if (!grid_widget) return;
-    XtManageChild(grid_widget);
-    XmUpdateDisplay(grid_widget);
 }
 
 static void process_update_viewport_metrics(void)
@@ -264,6 +262,10 @@ static void on_process_scroll_window_resize(Widget widget, XtPointer client, XEv
 static void process_refresh_header_labels(void)
 {
     if (!g_process_grid) return;
+    if (g_process_header_last_sort_column == g_process_sort_column &&
+        g_process_header_last_sort_direction == g_process_sort_direction) {
+        return;
+    }
     for (int col = 0; col < PROCESS_COLUMN_COUNT; ++col) {
         Widget button = g_process_header_buttons[col];
         if (!button) continue;
@@ -286,6 +288,8 @@ static void process_refresh_header_labels(void)
             }
         }
     }
+    g_process_header_last_sort_column = g_process_sort_column;
+    g_process_header_last_sort_direction = g_process_sort_direction;
 }
 
 static int process_row_compare(const void *a, const void *b)

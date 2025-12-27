@@ -1,5 +1,6 @@
 #include "ck-tasks-tabs.h"
 #include "ck-tasks-ui-helpers.h"
+#include "ck-tasks-ui.h"
 
 #include <Xm/Form.h>
 #include <Xm/Frame.h>
@@ -193,8 +194,11 @@ void tasks_ui_update_system_stats(TasksUi *ui, const TasksSystemStats *stats)
     }
     if (ui->status_cpu_label) {
         snprintf(buffer, sizeof(buffer), "CPU Usage: %d%%", stats->cpu_percent);
-        tasks_ui_status_set_label_text(ui->status_cpu_label, ui->status_cpu_text,
-                                       sizeof(ui->status_cpu_text), buffer);
+        Boolean changed = tasks_ui_status_set_label_text(ui->status_cpu_label, ui->status_cpu_text,
+                                                         sizeof(ui->status_cpu_text), buffer);
+        if (changed) {
+            tasks_ui_statusbar_maybe_resize(ui);
+        }
     }
     if (ui->status_memory_label) {
         double used_gb = (double)stats->mem_used_kb / (1024.0 * 1024.0);
@@ -203,8 +207,11 @@ void tasks_ui_update_system_stats(TasksUi *ui, const TasksSystemStats *stats)
         snprintf(mem_buffer, sizeof(mem_buffer),
                  "Physical Memory: %d%% (%.1f GB/%.1f GB)",
                  stats->memory_percent, used_gb, total_gb);
-        tasks_ui_status_set_label_text(ui->status_memory_label, ui->status_memory_text,
-                                       sizeof(ui->status_memory_text), mem_buffer);
+        Boolean changed = tasks_ui_status_set_label_text(ui->status_memory_label, ui->status_memory_text,
+                                                         sizeof(ui->status_memory_text), mem_buffer);
+        if (changed) {
+            tasks_ui_statusbar_maybe_resize(ui);
+        }
     }
     int load_max = 100;
     if (stats->load1_percent > load_max) load_max = stats->load1_percent;

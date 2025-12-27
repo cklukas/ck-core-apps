@@ -53,12 +53,27 @@ typedef struct {
     char status_cpu_text[128];
     char status_memory_text[128];
     char status_message_text[256];
+    Boolean status_bar_layout_initialized;
+    Dimension status_bar_width_processes;
+    Dimension status_bar_width_cpu;
+    Dimension status_bar_width_memory;
     Widget process_filter_toggle;
     Widget process_search_field;
     Widget process_scrollbar;
     GridLayout *process_grid;
     TableWidget *apps_table;
     TableWidget *users_table;
+    TableRow **users_rows;
+    int users_row_count;
+    int users_row_capacity;
+    const TasksUserEntry *users_entries;
+    int users_entries_count;
+    Widget users_controls_form;
+    Widget users_logout_button;
+    Widget users_logout_status_label;
+    Widget users_selected_row;
+    int users_selected_index;
+    Boolean users_updates_paused;
     Widget apps_search_field;
     Widget apps_selected_row;
     Widget apps_close_button;
@@ -104,5 +119,6 @@ void tasks_ui_set_applications_table(TasksUi *ui, const TasksApplicationEntry *e
 void tasks_ui_set_users_table(TasksUi *ui, const TasksUserEntry *entries, int count);
 void tasks_ui_update_process_count(TasksUi *ui, int total_processes);
 void tasks_ui_update_system_stats(TasksUi *ui, const TasksSystemStats *stats);
+void tasks_ui_statusbar_maybe_resize(TasksUi *ui);
 
 #endif /* CK_TASKS_UI_H */

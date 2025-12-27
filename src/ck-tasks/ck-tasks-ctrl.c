@@ -280,12 +280,12 @@ static void on_about(Widget widget, XtPointer client, XtPointer call)
     }
     Widget shell = NULL;
     Widget notebook = about_dialog_build(tasks_ui_get_toplevel(ctrl->ui),
-                                         "about_tasks", "About CK Task Manager", &shell);
+                                         "about_tasks", "About Task Manager", &shell);
     if (!notebook || !shell) return;
     about_add_standard_pages(notebook, 1,
                              "Task Manager",
-                             "CK Task Manager",
-                             "Motif/CDE recreation of the classic Windows 95 Task Manager.",
+                             "Task Manager",
+                             "Task Manager for CK-Core",
                              True);
     XtAddCallback(shell, XmNdestroyCallback, on_about_destroy, ctrl);
     ctrl->about_shell = shell;
@@ -653,6 +653,7 @@ static void tasks_ctrl_refresh_applications(TasksController *ctrl)
 static void tasks_ctrl_refresh_users(TasksController *ctrl)
 {
     if (!ctrl || !ctrl->ui) return;
+    if (ctrl->ui->users_updates_paused) return;
     TasksUserEntry *entries = NULL;
     int count = 0;
     if (tasks_model_list_users(&entries, &count) != 0) {

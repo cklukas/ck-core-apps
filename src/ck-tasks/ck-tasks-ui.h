@@ -74,6 +74,7 @@ typedef struct {
     int services_entries_count;
     Widget services_info_label;
     char services_info_text[160];
+    Widget services_split_line;
     Widget services_info_frame;
     Widget services_info_title;
     TableWidget *services_info_table;

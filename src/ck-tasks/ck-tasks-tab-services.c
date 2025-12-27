@@ -54,11 +54,15 @@ static Dimension services_clamp_info_height(TasksUi *ui, Dimension desired, Dime
     if (!ui || !ui->services_info_frame) return desired;
     Dimension pane_height = 0;
     Dimension spacing = 0;
+    Dimension split_height = 0;
     Dimension table_min = 120;
     Dimension info_min = 96;
     XtVaGetValues(ui->services_info_frame, XmNpaneMinimum, &info_min, NULL);
     if (ui->services_pane) {
         XtVaGetValues(ui->services_pane, XmNheight, &pane_height, XmNspacing, &spacing, NULL);
+    }
+    if (ui->services_split_line && XtIsManaged(ui->services_split_line)) {
+        XtVaGetValues(ui->services_split_line, XmNheight, &split_height, NULL);
     }
     if (ui->services_table) {
         Widget table_widget = table_widget_get_widget(ui->services_table);
@@ -67,8 +71,9 @@ static Dimension services_clamp_info_height(TasksUi *ui, Dimension desired, Dime
         }
     }
     Dimension max_height = 0;
-    if (pane_height > 0 && pane_height > table_min + spacing + info_min) {
-        max_height = pane_height - table_min - spacing;
+    Dimension reserved = spacing + split_height;
+    if (pane_height > 0 && pane_height > table_min + reserved + info_min) {
+        max_height = pane_height - table_min - reserved;
     }
     if (desired < info_min) desired = info_min;
     if (max_height > 0 && desired > max_height) desired = max_height;
@@ -83,12 +88,17 @@ static Dimension services_get_pane_available_height(TasksUi *ui, Dimension *out_
 {
     Dimension pane_height = 0;
     Dimension spacing = 0;
+    Dimension split_height = 0;
     if (ui && ui->services_pane) {
         XtVaGetValues(ui->services_pane, XmNheight, &pane_height, XmNspacing, &spacing, NULL);
     }
+    if (ui && ui->services_split_line && XtIsManaged(ui->services_split_line)) {
+        XtVaGetValues(ui->services_split_line, XmNheight, &split_height, NULL);
+    }
     Dimension available = 0;
-    if (pane_height > spacing) {
-        available = pane_height - spacing;
+    Dimension reserved = spacing + split_height;
+    if (pane_height > reserved) {
+        available = pane_height - reserved;
     } else if (pane_height > 0) {
         available = pane_height;
     }
@@ -132,9 +142,15 @@ static void services_set_info_visible(TasksUi *ui, Boolean visible)
     if (!ui || !ui->services_table || !ui->services_info_frame) return;
     ui->services_info_visible = visible;
     if (visible) {
+        if (ui->services_split_line) {
+            XtManageChild(ui->services_split_line);
+        }
         XtManageChild(ui->services_info_frame);
     } else {
         XtUnmanageChild(ui->services_info_frame);
+        if (ui->services_split_line) {
+            XtUnmanageChild(ui->services_split_line);
+        }
         Dimension pane_height = 0;
         Dimension spacing = 0;
         Dimension available = services_get_pane_available_height(ui, &pane_height, &spacing);
@@ -280,7 +296,12 @@ static void services_set_selection(TasksUi *ui, Widget row_widget, int index)
 {
     if (!ui || !row_widget || index < 0) return;
     if (ui->services_selected_row == row_widget && ui->services_selected_index == index) return;
-    services_clear_selection(ui);
+    if (ui->services_selected_row && ui->services_selected_row != row_widget) {
+        XtVaSetValues(ui->services_selected_row,
+                      XmNshadowThickness, 1,
+                      XmNshadowType, XmSHADOW_ETCHED_IN,
+                      NULL);
+    }
     ui->services_selected_row = row_widget;
     ui->services_selected_index = index;
     ui->services_updates_paused = True;
@@ -425,13 +446,27 @@ Widget tasks_ui_create_services_tab(TasksUi *ui)
     if (table_widget) {
         XtVaSetValues(table_widget,
                       XmNpaneMinimum, 120,
-                      XmNmarginHeight, 10,
+                      XmNmarginHeight, 0,
                       XmNmarginWidth, 0,
                       XmNallowResize, True,
                       NULL);
     }
     table_widget_set_grid(ui->services_table, True);
     table_widget_set_alternate_row_colors(ui->services_table, True);
+
+    ui->services_split_line = XtVaCreateManagedWidget(
+        "servicesSplitLine",
+        xmSeparatorWidgetClass, ui->services_pane,
+        XmNorientation, XmHORIZONTAL,
+        XmNseparatorType, XmSINGLE_LINE,
+        XmNmargin, 0,
+        XmNheight, 10,
+        NULL);
+    XtVaSetValues(ui->services_split_line,
+                  XmNpaneMinimum, 10,
+                  XmNpaneMaximum, 10,
+                  XmNallowResize, False,
+                  NULL);
 
     ui->services_info_frame = XmCreateFrame(ui->services_pane, "servicesInfoFrame", NULL, 0);
     XtVaSetValues(ui->services_info_frame,
@@ -443,19 +478,6 @@ Widget tasks_ui_create_services_tab(TasksUi *ui)
                   NULL);
     XtAddEventHandler(ui->services_info_frame, StructureNotifyMask, False,
                       on_services_info_frame_configure, (XtPointer)ui);
-
-    Widget services_split = XtVaCreateManagedWidget(
-        "servicesSplitLine",
-        xmSeparatorWidgetClass, ui->services_pane,
-        XmNorientation, XmHORIZONTAL,
-        XmNseparatorType, XmSINGLE_LINE,
-        XmNmargin, 0,
-        NULL);
-    XtVaSetValues(services_split,
-                  XmNpaneMinimum, 2,
-                  XmNpaneMaximum, 2,
-                  XmNallowResize, False,
-                  NULL);
     Widget info_form = XmCreateForm(ui->services_info_frame, "servicesInfoForm", NULL, 0);
     XtVaSetValues(info_form,
                   XmNfractionBase, 100,

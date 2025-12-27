@@ -73,6 +73,12 @@ typedef struct {
     int services_entries_count;
     Widget services_info_label;
     char services_info_text[160];
+    Widget services_info_frame;
+    Widget services_info_title;
+    TableWidget *services_info_table;
+    Widget services_selected_row;
+    int services_selected_index;
+    Boolean services_updates_paused;
     TableWidget *users_table;
     TableRow **users_rows;
     int users_row_count;

@@ -39,10 +39,21 @@ typedef struct {
     char init_detail[64];
 } TasksInitInfo;
 
+#define TASKS_SERVICE_INFO_MAX_FIELDS 16
+
+typedef struct {
+    char key[64];
+    char value[512];
+} TasksServiceInfoField;
+
 typedef struct {
     char order[8];
     char name[128];
     char state[32];
+    char filename_path[PATH_MAX];
+    char symlink_path[PATH_MAX];
+    int info_count;
+    TasksServiceInfoField info_fields[TASKS_SERVICE_INFO_MAX_FIELDS];
 } TasksServiceEntry;
 
 void tasks_model_initialize(void);

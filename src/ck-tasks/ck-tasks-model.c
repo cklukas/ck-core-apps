@@ -536,6 +536,140 @@ static void tasks_model_set_init_info(TasksInitInfo *info, const char *name, con
     info->init_detail[sizeof(info->init_detail) - 1] = '\0';
 }
 
+static void tasks_model_rstrip(char *value)
+{
+    if (!value) return;
+    size_t len = strlen(value);
+    while (len > 0 && isspace((unsigned char)value[len - 1])) {
+        value[len - 1] = '\0';
+        len--;
+    }
+}
+
+static char *tasks_model_lstrip(char *value)
+{
+    if (!value) return value;
+    while (*value && isspace((unsigned char)*value)) {
+        value++;
+    }
+    return value;
+}
+
+static TasksServiceInfoField *tasks_model_add_service_info(TasksServiceEntry *entry,
+                                                           const char *key,
+                                                           const char *value)
+{
+    if (!entry || !key || !key[0]) return NULL;
+    if (entry->info_count >= TASKS_SERVICE_INFO_MAX_FIELDS) return NULL;
+    TasksServiceInfoField *field = &entry->info_fields[entry->info_count++];
+    memset(field, 0, sizeof(*field));
+    snprintf(field->key, sizeof(field->key), "%s", key);
+    if (value && value[0]) {
+        snprintf(field->value, sizeof(field->value), "%s", value);
+    }
+    return field;
+}
+
+static void tasks_model_append_service_info(TasksServiceInfoField *field, const char *value)
+{
+    if (!field || !value || !value[0]) return;
+    size_t current_len = strlen(field->value);
+    size_t remaining = sizeof(field->value) - current_len - 1;
+    if (remaining == 0) return;
+    if (current_len > 0 && remaining > 1) {
+        strncat(field->value, " ", remaining);
+        current_len = strlen(field->value);
+        remaining = sizeof(field->value) - current_len - 1;
+    }
+    strncat(field->value, value, remaining);
+}
+
+static void tasks_model_parse_init_info(const char *path, TasksServiceEntry *entry)
+{
+    if (!path || !path[0] || !entry) return;
+    FILE *fp = fopen(path, "r");
+    if (!fp) return;
+    char line[512];
+    int in_block = 0;
+    TasksServiceInfoField *current = NULL;
+    while (fgets(line, sizeof(line), fp)) {
+        if (!in_block) {
+            if (strstr(line, "### BEGIN INIT INFO")) {
+                in_block = 1;
+            }
+            continue;
+        }
+        if (strstr(line, "### END INIT INFO")) break;
+        char *hash = strchr(line, '#');
+        if (!hash) continue;
+        char *content = hash + 1;
+        content = tasks_model_lstrip(content);
+        tasks_model_rstrip(content);
+        if (!content[0]) continue;
+        char *colon = strchr(content, ':');
+        if (colon) {
+            *colon = '\0';
+            char *key = content;
+            tasks_model_rstrip(key);
+            char *value = tasks_model_lstrip(colon + 1);
+            tasks_model_rstrip(value);
+            current = tasks_model_add_service_info(entry, key, value);
+        } else if (current) {
+            tasks_model_append_service_info(current, content);
+        }
+    }
+    fclose(fp);
+}
+
+static void tasks_model_set_service_path(char *dest, size_t dest_len, const char *path)
+{
+    if (!dest || dest_len == 0) return;
+    if (path && path[0]) {
+        snprintf(dest, dest_len, "%s", path);
+        dest[dest_len - 1] = '\0';
+    } else {
+        dest[0] = '\0';
+    }
+}
+
+static void tasks_model_resolve_symlink_path(const char *dir, const char *link_target,
+                                             char *out_path, size_t out_len)
+{
+    if (!out_path || out_len == 0) return;
+    out_path[0] = '\0';
+    if (!link_target || !link_target[0]) return;
+    char combined[PATH_MAX];
+    if (link_target[0] == '/') {
+        snprintf(combined, sizeof(combined), "%s", link_target);
+    } else if (dir && dir[0]) {
+        snprintf(combined, sizeof(combined), "%s/%s", dir, link_target);
+    } else {
+        snprintf(combined, sizeof(combined), "%s", link_target);
+    }
+    combined[sizeof(combined) - 1] = '\0';
+    char resolved[PATH_MAX];
+    if (realpath(combined, resolved)) {
+        tasks_model_set_service_path(out_path, out_len, resolved);
+    } else {
+        tasks_model_set_service_path(out_path, out_len, combined);
+    }
+}
+
+static void tasks_model_safe_copy(char *dest, size_t dest_len, const char *src)
+{
+    if (!dest || dest_len == 0) return;
+    if (src && src[0]) {
+        size_t max_copy = dest_len - 1;
+        size_t copy_len = strnlen(src, max_copy);
+        if (copy_len > 0) {
+            memcpy(dest, src, copy_len);
+        }
+        dest[copy_len] = '\0';
+    } else {
+        dest[0] = '\0';
+    }
+}
+
 static int tasks_model_read_file_line(const char *path, char *buffer, size_t len)
 {
     if (!path || !buffer || len == 0) return -1;
@@ -754,7 +888,7 @@ static int tasks_model_list_systemd_services(TasksServiceEntry **out_entries, in
     }
     for (int i = 0; i < count; ++i) {
         TasksServiceEntry *entry = &entries[i];
-        snprintf(entry->name, sizeof(entry->name), "%s", items[i].name);
+        tasks_model_safe_copy(entry->name, sizeof(entry->name), items[i].name);
         entry->order[0] = '\0';
         if (items[i].running) {
             snprintf(entry->state, sizeof(entry->state), "running");
@@ -841,8 +975,21 @@ static int tasks_model_list_sysv_services(TasksServiceEntry **out_entries, int *
                 TasksServiceEntry *entry = &entries[count++];
                 memset(entry, 0, sizeof(*entry));
                 snprintf(entry->order, sizeof(entry->order), "%d", order);
-                snprintf(entry->name, sizeof(entry->name), "%s", name);
+                tasks_model_safe_copy(entry->name, sizeof(entry->name), name);
                 snprintf(entry->state, sizeof(entry->state), "enabled");
+                tasks_model_set_service_path(entry->symlink_path, sizeof(entry->symlink_path), rc_path);
+                if (linklen > 0) {
+                    tasks_model_resolve_symlink_path(rc_dir, linkbuf,
+                                                     entry->filename_path, sizeof(entry->filename_path));
+                } else if (fallback_dir) {
+                    char script_path[PATH_MAX];
+                    snprintf(script_path, sizeof(script_path), "%s/%s", fallback_dir, entry->name);
+                    script_path[sizeof(script_path) - 1] = '\0';
+                    tasks_model_set_service_path(entry->filename_path, sizeof(entry->filename_path), script_path);
+                }
+                if (entry->filename_path[0]) {
+                    tasks_model_parse_init_info(entry->filename_path, entry);
+                }
 
                 if (enabled_count >= enabled_cap) {
                     int new_cap = enabled_cap ? enabled_cap * 2 : 64;
@@ -889,8 +1036,11 @@ static int tasks_model_list_sysv_services(TasksServiceEntry **out_entries, int *
                 TasksServiceEntry *entry = &entries[count++];
                 memset(entry, 0, sizeof(*entry));
                 entry->order[0] = '\0';
-                snprintf(entry->name, sizeof(entry->name), "%s", ent->d_name);
+                tasks_model_safe_copy(entry->name, sizeof(entry->name), ent->d_name);
                 snprintf(entry->state, sizeof(entry->state), "disabled");
+                tasks_model_set_service_path(entry->filename_path, sizeof(entry->filename_path), script_path);
+                entry->symlink_path[0] = '\0';
+                tasks_model_parse_init_info(entry->filename_path, entry);
             }
             closedir(dp);
         }
@@ -944,7 +1094,12 @@ static int tasks_model_list_bsd_services(TasksServiceEntry **out_entries, int *o
         memset(entry, 0, sizeof(*entry));
         entry->order[0] = '\0';
         entry->state[0] = '\0';
-        snprintf(entry->name, sizeof(entry->name), "%s", ent->d_name);
+        tasks_model_safe_copy(entry->name, sizeof(entry->name), ent->d_name);
+        char script_path[PATH_MAX];
+        snprintf(script_path, sizeof(script_path), "%s/%s", dir, ent->d_name);
+        script_path[sizeof(script_path) - 1] = '\0';
+        tasks_model_set_service_path(entry->filename_path, sizeof(entry->filename_path), script_path);
+        tasks_model_parse_init_info(entry->filename_path, entry);
     }
     closedir(dp);
 

@@ -674,6 +674,7 @@ static void tasks_ctrl_refresh_users(TasksController *ctrl)
 static void tasks_ctrl_refresh_services(TasksController *ctrl)
 {
     if (!ctrl || !ctrl->ui) return;
+    if (ctrl->ui->services_updates_paused) return;
     TasksServiceEntry *entries = NULL;
     int count = 0;
     TasksInitInfo init_info;

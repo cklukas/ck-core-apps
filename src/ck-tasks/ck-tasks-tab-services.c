@@ -5,6 +5,7 @@
 #include <Xm/Form.h>
 #include <Xm/Frame.h>
 #include <Xm/LabelG.h>
+#include <Xm/PanedW.h>
 #include <Xm/ToggleBG.h>
 
 #include <stdio.h>
@@ -32,6 +33,27 @@ static void services_update_info_panel(TasksUi *ui, const TasksServiceEntry *ent
 static void services_set_selection(TasksUi *ui, Widget row_widget, int index);
 static void services_clear_selection(TasksUi *ui);
 static void on_services_row_press(Widget widget, XtPointer client, XEvent *event, Boolean *continue_to_dispatch);
+
+static void services_update_info_pane_height(TasksUi *ui, Widget row_widget)
+{
+    if (!ui || !ui->services_info_frame || !row_widget) return;
+    Dimension row_height = 0;
+    XtVaGetValues(row_widget, XmNheight, &row_height, NULL);
+    if (row_height < 12) {
+        row_height = 24;
+    }
+    int min_height = (int)row_height * 2;
+    int target_height = (int)row_height * 10;
+    if (target_height < min_height) {
+        target_height = min_height;
+    }
+    XtVaSetValues(ui->services_info_frame,
+                  XmNpaneMinimum, min_height,
+                  XmNpaneMaximum, target_height * 4,
+                  XmNheight, target_height,
+                  XmNallowResize, True,
+                  NULL);
+}
 
 static void on_services_show_disabled_changed(Widget widget, XtPointer client, XtPointer call)
 {
@@ -65,25 +87,10 @@ static void ensure_services_row_capacity(TasksUi *ui, int needed)
 static void services_set_info_visible(TasksUi *ui, Boolean visible)
 {
     if (!ui || !ui->services_table || !ui->services_info_frame) return;
-    Widget table_widget = table_widget_get_widget(ui->services_table);
     if (visible) {
         XtManageChild(ui->services_info_frame);
-        if (table_widget) {
-            XtVaSetValues(table_widget,
-                          XmNbottomAttachment, XmATTACH_WIDGET,
-                          XmNbottomWidget, ui->services_info_frame,
-                          XmNbottomOffset, 6,
-                          NULL);
-        }
     } else {
         XtUnmanageChild(ui->services_info_frame);
-        if (table_widget) {
-            XtVaSetValues(table_widget,
-                          XmNbottomAttachment, XmATTACH_FORM,
-                          XmNbottomWidget, NULL,
-                          XmNbottomOffset, 8,
-                          NULL);
-        }
     }
 }
 
@@ -127,6 +134,7 @@ static void services_set_selection(TasksUi *ui, Widget row_widget, int index)
             snprintf(title, sizeof(title), "Service details: %s", entry->name);
             tasks_ui_set_label_text(ui->services_info_title, title);
         }
+        services_update_info_pane_height(ui, row_widget);
         services_update_info_panel(ui, entry);
         services_set_info_visible(ui, True);
     }
@@ -215,7 +223,23 @@ Widget tasks_ui_create_services_tab(TasksUi *ui)
                                    sizeof(ui->services_info_text),
                                    "Init system: detecting...");
 
-    ui->services_table = table_widget_create(page, "servicesTable", services_columns, SERVICE_COLUMN_COUNT);
+    ui->services_pane = XmCreatePanedWindow(page, "servicesPane", NULL, 0);
+    XtVaSetValues(ui->services_pane,
+                  XmNtopAttachment, XmATTACH_WIDGET,
+                  XmNtopWidget, ui->services_controls_form,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  XmNtopOffset, 8,
+                  XmNbottomOffset, 8,
+                  XmNleftOffset, 6,
+                  XmNrightOffset, 6,
+                  XmNspacing, 6,
+                  NULL);
+    XtManageChild(ui->services_pane);
+
+    ui->services_table = table_widget_create(ui->services_pane, "servicesTable",
+                                             services_columns, SERVICE_COLUMN_COUNT);
     if (!ui->services_table) {
         XmString message = tasks_ui_make_string("Unable to display services.");
         XtVaCreateManagedWidget(
@@ -239,30 +263,19 @@ Widget tasks_ui_create_services_tab(TasksUi *ui)
     Widget table_widget = table_widget_get_widget(ui->services_table);
     if (table_widget) {
         XtVaSetValues(table_widget,
-                      XmNtopAttachment, XmATTACH_WIDGET,
-                      XmNtopWidget, ui->services_controls_form,
-                      XmNleftAttachment, XmATTACH_FORM,
-                      XmNrightAttachment, XmATTACH_FORM,
-                      XmNbottomAttachment, XmATTACH_FORM,
-                      XmNtopOffset, 8,
-                      XmNbottomOffset, 8,
-                      XmNleftOffset, 6,
-                      XmNrightOffset, 6,
+                      XmNpaneMinimum, 120,
+                      XmNallowResize, True,
                       NULL);
     }
     table_widget_set_grid(ui->services_table, True);
     table_widget_set_alternate_row_colors(ui->services_table, True);
 
-    ui->services_info_frame = XmCreateFrame(page, "servicesInfoFrame", NULL, 0);
+    ui->services_info_frame = XmCreateFrame(ui->services_pane, "servicesInfoFrame", NULL, 0);
     XtVaSetValues(ui->services_info_frame,
                   XmNshadowType, XmSHADOW_ETCHED_IN,
-                  XmNleftAttachment, XmATTACH_FORM,
-                  XmNrightAttachment, XmATTACH_FORM,
-                  XmNbottomAttachment, XmATTACH_FORM,
-                  XmNleftOffset, 6,
-                  XmNrightOffset, 6,
-                  XmNbottomOffset, 8,
                   XmNheight, 180,
+                  XmNpaneMinimum, 96,
+                  XmNallowResize, True,
                   NULL);
 
     Widget info_form = XmCreateForm(ui->services_info_frame, "servicesInfoForm", NULL, 0);
@@ -336,6 +349,7 @@ void tasks_ui_destroy_services_tab(TasksUi *ui)
     ui->services_controls_form = NULL;
     ui->services_show_disabled_toggle = NULL;
     ui->services_info_label = NULL;
+    ui->services_pane = NULL;
     ui->services_info_frame = NULL;
     ui->services_info_title = NULL;
     ui->services_selected_row = NULL;

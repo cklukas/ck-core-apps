@@ -66,6 +66,7 @@ typedef struct {
     Widget services_controls_form;
     Widget services_show_disabled_toggle;
     Boolean services_show_disabled;
+    Widget services_pane;
     TableRow **services_rows;
     int services_row_count;
     int services_row_capacity;

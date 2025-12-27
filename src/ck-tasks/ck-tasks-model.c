@@ -15,6 +15,17 @@ static int g_cpu_count = 1;
 static unsigned long long g_prev_cpu_total = 0;
 static unsigned long long g_prev_cpu_idle = 0;
 
+typedef struct {
+    pid_t pid;
+    unsigned long long total_ticks;
+    double last_uptime;
+    int seen;
+} ProcSample;
+
+static ProcSample *g_proc_samples = NULL;
+static int g_proc_samples_count = 0;
+static int g_proc_samples_capacity = 0;
+
 static int is_pid_dir(const char *name)
 {
     if (!name || !name[0]) return 0;
@@ -156,6 +167,29 @@ static int read_cpu_totals(unsigned long long *out_total, unsigned long long *ou
     return 0;
 }
 
+static ProcSample *get_proc_sample(pid_t pid, int create)
+{
+    for (int i = 0; i < g_proc_samples_count; ++i) {
+        if (g_proc_samples[i].pid == pid) {
+            return &g_proc_samples[i];
+        }
+    }
+    if (!create) return NULL;
+    if (g_proc_samples_count >= g_proc_samples_capacity) {
+        int new_capacity = g_proc_samples_capacity ? g_proc_samples_capacity * 2 : 256;
+        ProcSample *resized = (ProcSample *)realloc(g_proc_samples, sizeof(ProcSample) * new_capacity);
+        if (!resized) return NULL;
+        g_proc_samples = resized;
+        g_proc_samples_capacity = new_capacity;
+    }
+    ProcSample *sample = &g_proc_samples[g_proc_samples_count++];
+    sample->pid = pid;
+    sample->total_ticks = 0;
+    sample->last_uptime = 0.0;
+    sample->seen = 0;
+    return sample;
+}
+
 void tasks_model_initialize(void)
 {
     g_clock_ticks = sysconf(_SC_CLK_TCK);
@@ -167,6 +201,10 @@ void tasks_model_initialize(void)
 
 void tasks_model_shutdown(void)
 {
+    free(g_proc_samples);
+    g_proc_samples = NULL;
+    g_proc_samples_count = 0;
+    g_proc_samples_capacity = 0;
 }
 
 int tasks_model_list_processes(TasksProcessEntry **out_entries, int *out_count)
@@ -179,6 +217,9 @@ int tasks_model_list_processes(TasksProcessEntry **out_entries, int *out_count)
     int capacity = 0;
     int count = 0;
     double uptime = read_uptime_seconds();
+    for (int i = 0; i < g_proc_samples_count; ++i) {
+        g_proc_samples[i].seen = 0;
+    }
     struct dirent *ent = NULL;
     while ((ent = readdir(dir)) != NULL) {
         if (!is_pid_dir(ent->d_name)) continue;
@@ -210,10 +251,29 @@ int tasks_model_list_processes(TasksProcessEntry **out_entries, int *out_count)
             snprintf(entry.command, sizeof(entry.command), "%s", entry.name);
         }
         read_proc_rss_mb(pid, &entry.memory_mb);
-        if (uptime > 0.0) {
-            double total_time = (double)(ut + st) / (double)g_clock_ticks;
-            entry.cpu_percent = (total_time / uptime) * 100.0;
+        unsigned long long total_ticks = ut + st;
+        double cpu_percent = 0.0;
+        if (uptime > 0.0 && g_clock_ticks > 0) {
+            ProcSample *sample = get_proc_sample(pid, 1);
+            if (sample && sample->last_uptime > 0.0 && uptime > sample->last_uptime &&
+                total_ticks >= sample->total_ticks) {
+                double delta_ticks = (double)(total_ticks - sample->total_ticks);
+                double delta_seconds = delta_ticks / (double)g_clock_ticks;
+                double interval = uptime - sample->last_uptime;
+                if (interval > 0.0) {
+                    cpu_percent = (delta_seconds / interval) * 100.0;
+                }
+            } else {
+                double total_time = (double)total_ticks / (double)g_clock_ticks;
+                cpu_percent = (total_time / uptime) * 100.0;
+            }
+            if (sample) {
+                sample->total_ticks = total_ticks;
+                sample->last_uptime = uptime;
+                sample->seen = 1;
+            }
         }
+        entry.cpu_percent = cpu_percent;
         if (count >= capacity) {
             int new_capacity = capacity ? capacity * 2 : 256;
             TasksProcessEntry *resized = (TasksProcessEntry *)realloc(entries, sizeof(TasksProcessEntry) * new_capacity);
@@ -228,6 +288,17 @@ int tasks_model_list_processes(TasksProcessEntry **out_entries, int *out_count)
         entries[count++] = entry;
     }
     closedir(dir);
+    if (g_proc_samples_count > 0) {
+        int write_index = 0;
+        for (int i = 0; i < g_proc_samples_count; ++i) {
+            if (!g_proc_samples[i].seen) continue;
+            if (write_index != i) {
+                g_proc_samples[write_index] = g_proc_samples[i];
+            }
+            write_index++;
+        }
+        g_proc_samples_count = write_index;
+    }
 
     *out_entries = entries;
     *out_count = count;

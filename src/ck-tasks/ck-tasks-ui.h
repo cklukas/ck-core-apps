@@ -62,6 +62,17 @@ typedef struct {
     Widget process_scrollbar;
     GridLayout *process_grid;
     TableWidget *apps_table;
+    TableWidget *services_table;
+    Widget services_controls_form;
+    Widget services_show_disabled_toggle;
+    Boolean services_show_disabled;
+    TableRow **services_rows;
+    int services_row_count;
+    int services_row_capacity;
+    const TasksServiceEntry *services_entries;
+    int services_entries_count;
+    Widget services_info_label;
+    char services_info_text[160];
     TableWidget *users_table;
     TableRow **users_rows;
     int users_row_count;
@@ -117,6 +128,8 @@ void tasks_ui_set_process_row_window(int start);
 int tasks_ui_get_process_row_page_size(void);
 void tasks_ui_set_applications_table(TasksUi *ui, const TasksApplicationEntry *entries, int count);
 void tasks_ui_set_users_table(TasksUi *ui, const TasksUserEntry *entries, int count);
+void tasks_ui_set_services_table(TasksUi *ui, const TasksServiceEntry *entries, int count,
+                                 const TasksInitInfo *init_info);
 void tasks_ui_update_process_count(TasksUi *ui, int total_processes);
 void tasks_ui_update_system_stats(TasksUi *ui, const TasksSystemStats *stats);
 void tasks_ui_statusbar_maybe_resize(TasksUi *ui);

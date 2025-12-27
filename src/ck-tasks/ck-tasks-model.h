@@ -34,6 +34,17 @@ typedef struct {
     pid_t pid;
 } TasksUserEntry;
 
+typedef struct {
+    char init_name[64];
+    char init_detail[64];
+} TasksInitInfo;
+
+typedef struct {
+    char order[8];
+    char name[128];
+    char state[32];
+} TasksServiceEntry;
+
 void tasks_model_initialize(void);
 void tasks_model_shutdown(void);
 
@@ -42,5 +53,8 @@ void tasks_model_free_processes(TasksProcessEntry *entries, int count);
 int tasks_model_get_system_stats(TasksSystemStats *out_stats);
 int tasks_model_list_users(TasksUserEntry **out_entries, int *out_count);
 void tasks_model_free_users(TasksUserEntry *entries, int count);
+int tasks_model_list_services(TasksServiceEntry **out_entries, int *out_count, TasksInitInfo *out_info,
+                              int include_disabled_sysv);
+void tasks_model_free_services(TasksServiceEntry *entries, int count);
 
 #endif /* CK_TASKS_MODEL_H */

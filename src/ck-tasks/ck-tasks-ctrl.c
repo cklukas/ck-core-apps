@@ -34,10 +34,14 @@ struct TasksController {
     int selected_application;
     TasksUserEntry *user_sessions;
     int user_session_count;
+    TasksServiceEntry *service_entries;
+    int service_count;
+    TasksInitInfo service_init_info;
     int process_total_count;
     XtIntervalId refresh_timer;
     int refresh_interval_ms;
     Boolean filter_by_user;
+    Boolean show_disabled_services;
     char search_text[128];
     char apps_search_text[128];
     int virtual_row_start;
@@ -58,6 +62,7 @@ static int query_client_list(Display *dpy, Window root, Window **out_list, unsig
 static void tasks_ctrl_schedule_refresh(TasksController *ctrl);
 static void tasks_ctrl_refresh_applications(TasksController *ctrl);
 static void tasks_ctrl_refresh_users(TasksController *ctrl);
+static void tasks_ctrl_refresh_services(TasksController *ctrl);
 static void on_apps_close(Widget widget, XtPointer client, XtPointer call);
 static int tasks_ctrl_filter_processes(TasksController *ctrl, TasksProcessEntry *entries, int count);
 static void tasks_ctrl_apply_filter_state(TasksController *ctrl, Boolean state);
@@ -144,9 +149,10 @@ static void on_view_refresh(Widget widget, XtPointer client, XtPointer call)
         tasks_ui_update_process_count(ctrl->ui, ctrl->process_total_count);
         TasksSystemStats stats;
         if (tasks_model_get_system_stats(&stats) == 0) {
-            tasks_ui_update_system_stats(ctrl->ui, &stats);
+        tasks_ui_update_system_stats(ctrl->ui, &stats);
         }
         tasks_ctrl_refresh_applications(ctrl);
+        tasks_ctrl_refresh_services(ctrl);
         tasks_ctrl_refresh_users(ctrl);
         tasks_ui_update_status(ctrl->ui, "Process list refreshed.");
     } else {
@@ -665,6 +671,22 @@ static void tasks_ctrl_refresh_users(TasksController *ctrl)
     tasks_ui_set_users_table(ctrl->ui, ctrl->user_sessions, ctrl->user_session_count);
 }
 
+static void tasks_ctrl_refresh_services(TasksController *ctrl)
+{
+    if (!ctrl || !ctrl->ui) return;
+    TasksServiceEntry *entries = NULL;
+    int count = 0;
+    TasksInitInfo init_info;
+    if (tasks_model_list_services(&entries, &count, &init_info, ctrl->show_disabled_services ? 1 : 0) != 0) {
+        return;
+    }
+    tasks_model_free_services(ctrl->service_entries, ctrl->service_count);
+    ctrl->service_entries = entries;
+    ctrl->service_count = count;
+    ctrl->service_init_info = init_info;
+    tasks_ui_set_services_table(ctrl->ui, ctrl->service_entries, ctrl->service_count, &ctrl->service_init_info);
+}
+
 static void on_apps_close(Widget widget, XtPointer client, XtPointer call)
 {
     (void)widget;
@@ -878,6 +900,10 @@ TasksController *tasks_ctrl_create(TasksUi *ui, SessionData *session_data)
     ctrl->process_total_count = 0;
     ctrl->user_sessions = NULL;
     ctrl->user_session_count = 0;
+    ctrl->service_entries = NULL;
+    ctrl->service_count = 0;
+    memset(&ctrl->service_init_info, 0, sizeof(ctrl->service_init_info));
+    ctrl->show_disabled_services = False;
 
     XtAddCallback(ui->menu_file_exit, XmNactivateCallback, on_file_exit, ctrl);
     XtAddCallback(ui->menu_file_connect, XmNactivateCallback, on_file_connect, ctrl);
@@ -926,6 +952,14 @@ TasksController *tasks_ctrl_create(TasksUi *ui, SessionData *session_data)
     return ctrl;
 }
 
+void tasks_ctrl_set_show_disabled_services(TasksController *ctrl, Boolean show_disabled)
+{
+    if (!ctrl) return;
+    if (ctrl->show_disabled_services == show_disabled) return;
+    ctrl->show_disabled_services = show_disabled;
+    tasks_ctrl_refresh_services(ctrl);
+}
+
 void tasks_ctrl_destroy(TasksController *ctrl)
 {
     if (!ctrl) return;
@@ -938,6 +972,7 @@ void tasks_ctrl_destroy(TasksController *ctrl)
     }
     tasks_model_free_processes(ctrl->process_entries, ctrl->process_count);
     tasks_model_free_users(ctrl->user_sessions, ctrl->user_session_count);
+    tasks_model_free_services(ctrl->service_entries, ctrl->service_count);
     free(ctrl->applications);
     if (ctrl->ui) {
         ctrl->ui->controller = NULL;

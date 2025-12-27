@@ -497,3 +497,484 @@ void tasks_model_free_users(TasksUserEntry *entries, int count)
     (void)count;
     free(entries);
 }
+
+static int tasks_model_path_exists(const char *path)
+{
+    if (!path || path[0] == '\0') return 0;
+    struct stat st;
+    return stat(path, &st) == 0;
+}
+
+static int tasks_model_is_dir(const char *path)
+{
+    if (!path || path[0] == '\0') return 0;
+    struct stat st;
+    if (stat(path, &st) != 0) return 0;
+    return S_ISDIR(st.st_mode);
+}
+
+static void tasks_model_set_init_info(TasksInitInfo *info, const char *name, const char *detail)
+{
+    if (!info) return;
+    char name_buf[sizeof(info->init_name)];
+    char detail_buf[sizeof(info->init_detail)];
+    name_buf[0] = '\0';
+    detail_buf[0] = '\0';
+
+    if (name) {
+        strncpy(name_buf, name, sizeof(name_buf) - 1);
+        name_buf[sizeof(name_buf) - 1] = '\0';
+    }
+    if (detail) {
+        strncpy(detail_buf, detail, sizeof(detail_buf) - 1);
+        detail_buf[sizeof(detail_buf) - 1] = '\0';
+    }
+
+    strncpy(info->init_name, name_buf, sizeof(info->init_name) - 1);
+    info->init_name[sizeof(info->init_name) - 1] = '\0';
+    strncpy(info->init_detail, detail_buf, sizeof(info->init_detail) - 1);
+    info->init_detail[sizeof(info->init_detail) - 1] = '\0';
+}
+
+static int tasks_model_read_file_line(const char *path, char *buffer, size_t len)
+{
+    if (!path || !buffer || len == 0) return -1;
+    FILE *fp = fopen(path, "r");
+    if (!fp) return -1;
+    if (!fgets(buffer, len, fp)) {
+        fclose(fp);
+        return -1;
+    }
+    fclose(fp);
+    buffer[len - 1] = '\0';
+    size_t l = strlen(buffer);
+    while (l > 0 && (buffer[l - 1] == '\n' || buffer[l - 1] == '\r')) {
+        buffer[l - 1] = '\0';
+        l--;
+    }
+    return 0;
+}
+
+static int tasks_model_get_runlevel(char *out_level, size_t out_len)
+{
+    if (!out_level || out_len == 0) return -1;
+    out_level[0] = '\0';
+#ifndef RUN_LVL
+    return -1;
+#else
+    setutent();
+    struct utmp *ut = NULL;
+    while ((ut = getutent()) != NULL) {
+        if (ut->ut_type != RUN_LVL) continue;
+        unsigned int raw = (unsigned int)ut->ut_pid;
+        unsigned int lvl = raw & 0xffU;
+        if (lvl <= 6U) {
+            snprintf(out_level, out_len, "%u", lvl);
+        } else if (lvl >= (unsigned int)'0' && lvl <= (unsigned int)'6') {
+            snprintf(out_level, out_len, "%c", (int)lvl);
+        } else {
+            snprintf(out_level, out_len, "%u", lvl);
+        }
+        break;
+    }
+    endutent();
+    return out_level[0] ? 0 : -1;
+#endif
+}
+
+static int tasks_model_is_systemd(void)
+{
+    if (tasks_model_path_exists("/run/systemd/system")) return 1;
+    char comm[64] = {0};
+    if (tasks_model_read_file_line("/proc/1/comm", comm, sizeof(comm)) == 0) {
+        if (strcmp(comm, "systemd") == 0) return 1;
+    }
+    return 0;
+}
+
+static void tasks_model_detect_systemd_target(TasksInitInfo *info)
+{
+    if (!info) return;
+    const char *paths[] = {
+        "/run/systemd/system/default.target",
+        "/etc/systemd/system/default.target",
+        "/usr/lib/systemd/system/default.target",
+        "/lib/systemd/system/default.target",
+    };
+    char linkbuf[PATH_MAX] = {0};
+    const char *base = NULL;
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i) {
+        ssize_t len = readlink(paths[i], linkbuf, sizeof(linkbuf) - 1);
+        if (len <= 0) continue;
+        linkbuf[len] = '\0';
+        base = strrchr(linkbuf, '/');
+        base = base ? base + 1 : linkbuf;
+        break;
+    }
+    if (base && base[0]) {
+        char detail[128];
+        snprintf(detail, sizeof(detail), "target: %s", base);
+        tasks_model_set_init_info(info, info->init_name, detail);
+    }
+}
+
+typedef struct {
+    char name[128];
+    int running;
+    int enabled;
+} SystemdServiceInfo;
+
+static int tasks_model_service_index(SystemdServiceInfo *items, int count, const char *name)
+{
+    for (int i = 0; i < count; ++i) {
+        if (strcmp(items[i].name, name) == 0) return i;
+    }
+    return -1;
+}
+
+static void tasks_model_add_systemd_service(SystemdServiceInfo **items, int *count, int *cap,
+                                            const char *name, int running, int enabled)
+{
+    if (!items || !count || !cap || !name || !name[0]) return;
+    int idx = tasks_model_service_index(*items, *count, name);
+    if (idx >= 0) {
+        if (running) (*items)[idx].running = 1;
+        if (enabled) (*items)[idx].enabled = 1;
+        return;
+    }
+    if (*count >= *cap) {
+        int new_cap = *cap ? (*cap * 2) : 64;
+        SystemdServiceInfo *resized = (SystemdServiceInfo *)realloc(*items, sizeof(SystemdServiceInfo) * new_cap);
+        if (!resized) return;
+        *items = resized;
+        *cap = new_cap;
+    }
+    SystemdServiceInfo *item = &(*items)[(*count)++];
+    memset(item, 0, sizeof(*item));
+    snprintf(item->name, sizeof(item->name), "%s", name);
+    item->running = running ? 1 : 0;
+    item->enabled = enabled ? 1 : 0;
+}
+
+static int tasks_model_is_service_file(const char *name)
+{
+    if (!name) return 0;
+    size_t len = strlen(name);
+    return len > 8 && strcmp(name + (len - 8), ".service") == 0;
+}
+
+static void tasks_model_collect_systemd_dir(const char *dir, int running,
+                                            SystemdServiceInfo **items, int *count, int *cap)
+{
+    if (!dir || !items || !count || !cap) return;
+    DIR *dp = opendir(dir);
+    if (!dp) return;
+    struct dirent *ent = NULL;
+    while ((ent = readdir(dp)) != NULL) {
+        if (ent->d_name[0] == '.') continue;
+        if (!tasks_model_is_service_file(ent->d_name)) continue;
+        char name[128];
+        snprintf(name, sizeof(name), "%s", ent->d_name);
+        char *suffix = strstr(name, ".service");
+        if (suffix) *suffix = '\0';
+        tasks_model_add_systemd_service(items, count, cap, name, running, 0);
+    }
+    closedir(dp);
+}
+
+static void tasks_model_collect_systemd_enabled(SystemdServiceInfo **items, int *count, int *cap)
+{
+    const char *base = "/etc/systemd/system";
+    DIR *dp = opendir(base);
+    if (!dp) return;
+    struct dirent *ent = NULL;
+    while ((ent = readdir(dp)) != NULL) {
+        if (ent->d_name[0] == '.') continue;
+        size_t len = strlen(ent->d_name);
+        if (len < 6 || strcmp(ent->d_name + (len - 6), ".wants") != 0) continue;
+        char wants_dir[PATH_MAX];
+        snprintf(wants_dir, sizeof(wants_dir), "%s/%s", base, ent->d_name);
+        DIR *wdp = opendir(wants_dir);
+        if (!wdp) continue;
+        struct dirent *went = NULL;
+        while ((went = readdir(wdp)) != NULL) {
+            if (went->d_name[0] == '.') continue;
+            if (!tasks_model_is_service_file(went->d_name)) continue;
+            char name[128];
+            snprintf(name, sizeof(name), "%s", went->d_name);
+            char *suffix = strstr(name, ".service");
+            if (suffix) *suffix = '\0';
+            tasks_model_add_systemd_service(items, count, cap, name, 0, 1);
+        }
+        closedir(wdp);
+    }
+    closedir(dp);
+}
+
+static int tasks_model_compare_service_name(const void *a, const void *b)
+{
+    const SystemdServiceInfo *sa = (const SystemdServiceInfo *)a;
+    const SystemdServiceInfo *sb = (const SystemdServiceInfo *)b;
+    return strcoll(sa->name, sb->name);
+}
+
+static int tasks_model_compare_service_entries(const void *a, const void *b)
+{
+    const TasksServiceEntry *sa = (const TasksServiceEntry *)a;
+    const TasksServiceEntry *sb = (const TasksServiceEntry *)b;
+    if (sa->order[0] && !sb->order[0]) return -1;
+    if (!sa->order[0] && sb->order[0]) return 1;
+    if (sa->order[0] && sb->order[0]) {
+        int oa = atoi(sa->order);
+        int ob = atoi(sb->order);
+        if (oa != ob) return oa - ob;
+    }
+    return strcoll(sa->name, sb->name);
+}
+
+static int tasks_model_list_systemd_services(TasksServiceEntry **out_entries, int *out_count, TasksInitInfo *info)
+{
+    if (!out_entries || !out_count) return -1;
+    SystemdServiceInfo *items = NULL;
+    int count = 0;
+    int cap = 0;
+    tasks_model_collect_systemd_dir("/run/systemd/system", 1, &items, &count, &cap);
+    tasks_model_collect_systemd_dir("/etc/systemd/system", 0, &items, &count, &cap);
+    tasks_model_collect_systemd_dir("/usr/lib/systemd/system", 0, &items, &count, &cap);
+    tasks_model_collect_systemd_dir("/lib/systemd/system", 0, &items, &count, &cap);
+    tasks_model_collect_systemd_enabled(&items, &count, &cap);
+
+    if (count > 1) {
+        qsort(items, count, sizeof(SystemdServiceInfo), tasks_model_compare_service_name);
+    }
+
+    TasksServiceEntry *entries = NULL;
+    if (count > 0) {
+        entries = (TasksServiceEntry *)calloc((size_t)count, sizeof(TasksServiceEntry));
+    }
+    for (int i = 0; i < count; ++i) {
+        TasksServiceEntry *entry = &entries[i];
+        snprintf(entry->name, sizeof(entry->name), "%s", items[i].name);
+        entry->order[0] = '\0';
+        if (items[i].running) {
+            snprintf(entry->state, sizeof(entry->state), "running");
+        } else if (items[i].enabled) {
+            snprintf(entry->state, sizeof(entry->state), "enabled");
+        } else {
+            entry->state[0] = '\0';
+        }
+    }
+    free(items);
+
+    tasks_model_set_init_info(info, "systemd", NULL);
+    tasks_model_detect_systemd_target(info);
+
+    *out_entries = entries;
+    *out_count = count;
+    return 0;
+}
+
+static int tasks_model_list_sysv_services(TasksServiceEntry **out_entries, int *out_count, TasksInitInfo *info,
+                                         int include_disabled)
+{
+    if (!out_entries || !out_count) return -1;
+    char runlevel[8] = {0};
+    char detail[64] = {0};
+    const char *init_name = "sysv";
+    if (tasks_model_get_runlevel(runlevel, sizeof(runlevel)) == 0) {
+        snprintf(detail, sizeof(detail), "runlevel %s", runlevel);
+    }
+    tasks_model_set_init_info(info, init_name, detail[0] ? detail : NULL);
+
+    char rc_dir[PATH_MAX] = {0};
+    if (runlevel[0]) {
+        snprintf(rc_dir, sizeof(rc_dir), "/etc/rc%s.d", runlevel);
+        if (!tasks_model_is_dir(rc_dir)) {
+            snprintf(rc_dir, sizeof(rc_dir), "/etc/rc.d/rc%s.d", runlevel);
+        }
+    }
+    int have_rc = runlevel[0] && tasks_model_is_dir(rc_dir);
+    const char *fallback_dir = tasks_model_is_dir("/etc/init.d") ? "/etc/init.d" : NULL;
+
+    TasksServiceEntry *entries = NULL;
+    int count = 0;
+    int cap = 0;
+    char **enabled_names = NULL;
+    int enabled_count = 0;
+    int enabled_cap = 0;
+    DIR *dp = NULL;
+    if (have_rc) {
+        dp = opendir(rc_dir);
+        if (dp) {
+            struct dirent *ent = NULL;
+            while ((ent = readdir(dp)) != NULL) {
+                if (ent->d_name[0] == '.') continue;
+                if (ent->d_name[0] != 'S') continue;
+                if (!isdigit((unsigned char)ent->d_name[1])) continue;
+                char rc_path[PATH_MAX];
+                snprintf(rc_path, sizeof(rc_path), "%s/%s", rc_dir, ent->d_name);
+                rc_path[sizeof(rc_path) - 1] = '\0';
+
+                char linkbuf[PATH_MAX] = {0};
+                ssize_t linklen = readlink(rc_path, linkbuf, sizeof(linkbuf) - 1);
+                const char *name = NULL;
+                if (linklen > 0) {
+                    linkbuf[linklen] = '\0';
+                    const char *base = strrchr(linkbuf, '/');
+                    name = base ? base + 1 : linkbuf;
+                }
+                if (!name || !name[0]) {
+                    const char *fallback_name = ent->d_name + 1;
+                    while (*fallback_name && isdigit((unsigned char)*fallback_name)) ++fallback_name;
+                    if (*fallback_name) name = fallback_name;
+                }
+                if (!name || !name[0]) continue;
+
+                int order = atoi(ent->d_name + 1);
+                if (count >= cap) {
+                    int new_cap = cap ? cap * 2 : 64;
+                    TasksServiceEntry *resized = (TasksServiceEntry *)realloc(entries, sizeof(TasksServiceEntry) * new_cap);
+                    if (!resized) break;
+                    entries = resized;
+                    cap = new_cap;
+                }
+                TasksServiceEntry *entry = &entries[count++];
+                memset(entry, 0, sizeof(*entry));
+                snprintf(entry->order, sizeof(entry->order), "%d", order);
+                snprintf(entry->name, sizeof(entry->name), "%s", name);
+                snprintf(entry->state, sizeof(entry->state), "enabled");
+
+                if (enabled_count >= enabled_cap) {
+                    int new_cap = enabled_cap ? enabled_cap * 2 : 64;
+                    char **resized = (char **)realloc(enabled_names, sizeof(char *) * new_cap);
+                    if (!resized) break;
+                    enabled_names = resized;
+                    enabled_cap = new_cap;
+                }
+                enabled_names[enabled_count++] = strdup(entry->name);
+            }
+            closedir(dp);
+        }
+    }
+
+    if (include_disabled && fallback_dir) {
+        dp = opendir(fallback_dir);
+        if (dp) {
+            struct dirent *ent = NULL;
+            while ((ent = readdir(dp)) != NULL) {
+                if (ent->d_name[0] == '.') continue;
+                char script_path[PATH_MAX];
+                snprintf(script_path, sizeof(script_path), "%s/%s", fallback_dir, ent->d_name);
+                script_path[sizeof(script_path) - 1] = '\0';
+
+                struct stat st = {0};
+                if (stat(script_path, &st) != 0) continue;
+                if (!S_ISREG(st.st_mode)) continue;
+                if (access(script_path, X_OK) != 0) continue;
+                int already_enabled = 0;
+                for (int i = 0; i < enabled_count; ++i) {
+                    if (enabled_names[i] && strcmp(enabled_names[i], ent->d_name) == 0) {
+                        already_enabled = 1;
+                        break;
+                    }
+                }
+                if (already_enabled) continue;
+                if (count >= cap) {
+                    int new_cap = cap ? cap * 2 : 64;
+                    TasksServiceEntry *resized = (TasksServiceEntry *)realloc(entries, sizeof(TasksServiceEntry) * new_cap);
+                    if (!resized) break;
+                    entries = resized;
+                    cap = new_cap;
+                }
+                TasksServiceEntry *entry = &entries[count++];
+                memset(entry, 0, sizeof(*entry));
+                entry->order[0] = '\0';
+                snprintf(entry->name, sizeof(entry->name), "%s", ent->d_name);
+                snprintf(entry->state, sizeof(entry->state), "disabled");
+            }
+            closedir(dp);
+        }
+    }
+
+    if (count > 1) {
+        qsort(entries, count, sizeof(TasksServiceEntry), tasks_model_compare_service_entries);
+    }
+
+    for (int i = 0; i < enabled_count; ++i) {
+        free(enabled_names[i]);
+    }
+    free(enabled_names);
+
+    *out_entries = entries;
+    *out_count = count;
+    return 0;
+}
+
+static int tasks_model_list_bsd_services(TasksServiceEntry **out_entries, int *out_count, TasksInitInfo *info)
+{
+    if (!out_entries || !out_count) return -1;
+    tasks_model_set_init_info(info, "bsd rc", NULL);
+
+    const char *dir = "/etc/rc.d";
+    if (!tasks_model_is_dir(dir)) {
+        *out_entries = NULL;
+        *out_count = 0;
+        return 0;
+    }
+    DIR *dp = opendir(dir);
+    if (!dp) {
+        *out_entries = NULL;
+        *out_count = 0;
+        return 0;
+    }
+    TasksServiceEntry *entries = NULL;
+    int count = 0;
+    int cap = 0;
+    struct dirent *ent = NULL;
+    while ((ent = readdir(dp)) != NULL) {
+        if (ent->d_name[0] == '.') continue;
+        if (count >= cap) {
+            int new_cap = cap ? cap * 2 : 64;
+            TasksServiceEntry *resized = (TasksServiceEntry *)realloc(entries, sizeof(TasksServiceEntry) * new_cap);
+            if (!resized) break;
+            entries = resized;
+            cap = new_cap;
+        }
+        TasksServiceEntry *entry = &entries[count++];
+        memset(entry, 0, sizeof(*entry));
+        entry->order[0] = '\0';
+        entry->state[0] = '\0';
+        snprintf(entry->name, sizeof(entry->name), "%s", ent->d_name);
+    }
+    closedir(dp);
+
+    if (count > 1) {
+        qsort(entries, count, sizeof(TasksServiceEntry), tasks_model_compare_service_entries);
+    }
+    *out_entries = entries;
+    *out_count = count;
+    return 0;
+}
+
+int tasks_model_list_services(TasksServiceEntry **out_entries, int *out_count, TasksInitInfo *out_info,
+                              int include_disabled_sysv)
+{
+    if (!out_entries || !out_count) return -1;
+    if (out_info) {
+        out_info->init_name[0] = '\0';
+        out_info->init_detail[0] = '\0';
+    }
+    if (tasks_model_is_systemd()) {
+        return tasks_model_list_systemd_services(out_entries, out_count, out_info);
+    }
+    if (tasks_model_is_dir("/etc/rc.d") && tasks_model_path_exists("/etc/rc.conf")) {
+        return tasks_model_list_bsd_services(out_entries, out_count, out_info);
+    }
+    return tasks_model_list_sysv_services(out_entries, out_count, out_info, include_disabled_sysv);
+}
+
+void tasks_model_free_services(TasksServiceEntry *entries, int count)
+{
+    (void)count;
+    free(entries);
+}

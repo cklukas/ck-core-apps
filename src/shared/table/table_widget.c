@@ -57,6 +57,8 @@ struct TableWidget {
     Pixel *column_colors;
     Boolean updates_suspended;
     Boolean sort_pending;
+    Dimension last_rows_width;
+    Dimension last_header_offset;
 };
 
 static void table_widget_refresh_layout(TableWidget *table);
@@ -108,6 +110,8 @@ static void table_widget_update_header_offset(TableWidget *table)
     if (vscroll && XtIsManaged(vscroll)) {
         XtVaGetValues(vscroll, XmNwidth, &offset, NULL);
     }
+    if (table->last_header_offset == offset) return;
+    table->last_header_offset = offset;
     XtVaSetValues(table->header_row, XmNrightOffset, (int)offset, NULL);
 }
 
@@ -117,28 +121,49 @@ static void table_widget_update_row_width(TableWidget *table)
     Widget clip = NULL;
     XtVaGetValues(table->scroll_window, XmNclipWindow, &clip, NULL);
     Dimension width = 0;
-    XtVaGetValues(table->scroll_window, XmNwidth, &width, NULL);
-
-    Dimension reserved = 0;
-    Widget vscroll = NULL;
-    XtVaGetValues(table->scroll_window, XmNverticalScrollBar, &vscroll, NULL);
-    if (vscroll && XtIsManaged(vscroll)) {
-        XtVaGetValues(vscroll, XmNwidth, &reserved, NULL);
-    }
-    if (reserved > 0 && width > reserved) {
-        width = (Dimension)(width - reserved);
-    }
-
     if (clip) {
-        Dimension clip_width = 0;
-        XtVaGetValues(clip, XmNwidth, &clip_width, NULL);
-        if (clip_width > 0 && clip_width < width) {
-            width = clip_width;
+        XtVaGetValues(clip, XmNwidth, &width, NULL);
+    }
+    if (width <= 0) {
+        XtVaGetValues(table->scroll_window, XmNwidth, &width, NULL);
+
+        Dimension reserved = 0;
+        Widget vscroll = NULL;
+        XtVaGetValues(table->scroll_window, XmNverticalScrollBar, &vscroll, NULL);
+        if (vscroll && XtIsManaged(vscroll)) {
+            XtVaGetValues(vscroll, XmNwidth, &reserved, NULL);
+        }
+        if (reserved > 0 && width > reserved) {
+            width = (Dimension)(width - reserved);
         }
     }
     if (width <= 0) return;
+
+    Boolean needs_update = (table->last_rows_width != width);
+    if (!needs_update) {
+        Dimension current_width = 0;
+        XtVaGetValues(table->rows_column, XmNwidth, &current_width, NULL);
+        if (current_width != width) {
+            needs_update = True;
+        }
+    }
+    if (!needs_update) {
+        for (int i = 0; i < table->row_count; ++i) {
+            if (!table->rows[i] || !table->rows[i]->row_form) continue;
+            Dimension row_width = 0;
+            XtVaGetValues(table->rows[i]->row_form, XmNwidth, &row_width, NULL);
+            if (row_width != width) {
+                needs_update = True;
+                break;
+            }
+        }
+    }
+    if (!needs_update) return;
+
+    table->last_rows_width = width;
     XtVaSetValues(table->rows_column, XmNwidth, width, NULL);
     for (int i = 0; i < table->row_count; ++i) {
+        if (!table->rows[i] || !table->rows[i]->row_form) continue;
         XtVaSetValues(table->rows[i]->row_form, XmNwidth, width, NULL);
     }
 }
@@ -148,7 +173,7 @@ static void table_widget_scrollbar_structure_event(Widget widget, XtPointer clie
     (void)widget;
     (void)continue_to_dispatch;
     if (!event) return;
-    if (event->type != MapNotify && event->type != UnmapNotify && event->type != ConfigureNotify) return;
+    if (event->type != MapNotify && event->type != UnmapNotify) return;
     TableWidget *table = (TableWidget *)client;
     table_widget_refresh_layout(table);
 }
@@ -472,7 +497,7 @@ static void header_activate_cb(Widget widget, XtPointer client, XtPointer call)
     TableWidget *table = (TableWidget *)client;
     XtPointer index_ptr = NULL;
     XtVaGetValues(widget, XmNuserData, &index_ptr, NULL);
-    int index = index_ptr ? (int)(intptr_t)index_ptr : -1;
+    int index = (int)(intptr_t)index_ptr - 1;
     if (index < 0) return;
     log_table_event(table, "header_activate", widget, index);
     table_widget_toggle_sorting(table, index);
@@ -561,7 +586,7 @@ TableWidget *table_widget_create(Widget parent, const char *name,
             XmNrightPosition, 80,
             XmNtopAttachment, XmATTACH_FORM,
             XmNbottomAttachment, XmATTACH_FORM,
-            XmNuserData, (XtPointer)(intptr_t)i,
+            XmNuserData, (XtPointer)(intptr_t)(i + 1),
             NULL);
 
         Widget indicator_form = XmCreateForm(header_cell, "headerIndicatorForm", NULL, 0);
@@ -594,7 +619,7 @@ TableWidget *table_widget_create(Widget parent, const char *name,
             XmNmarginHeight, 0,
             XmNshadowThickness, 0,
             XmNtraversalOn, False,
-            XmNuserData, (XtPointer)(intptr_t)i,
+            XmNuserData, (XtPointer)(intptr_t)(i + 1),
             NULL);
         XtAddCallback(indicator, XmNactivateCallback, header_activate_cb, table);
         XtUnmanageChild(indicator);

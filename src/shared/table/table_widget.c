@@ -26,6 +26,7 @@ typedef struct TableRow {
 struct TableWidget {
     Widget container;
     Widget header_row;
+    Widget scroll_window;
     Widget rows_column;
     TableColumnDef *columns;
     int column_count;
@@ -73,6 +74,26 @@ static void log_table_event(TableWidget *table, const char *event, Widget widget
             table->sort_column,
             sort_direction_label(table->sort_direction),
             table->row_count);
+}
+
+static void table_widget_update_header_offset(TableWidget *table)
+{
+    if (!table || !table->header_row || !table->scroll_window) return;
+    Widget vscroll = NULL;
+    XtVaGetValues(table->scroll_window, XmNverticalScrollBar, &vscroll, NULL);
+    Dimension offset = 0;
+    if (vscroll && XtIsManaged(vscroll)) {
+        XtVaGetValues(vscroll, XmNwidth, &offset, NULL);
+    }
+    XtVaSetValues(table->header_row, XmNrightOffset, (int)offset, NULL);
+}
+
+static void table_widget_scrollbar_visibility_cb(Widget widget, XtPointer client, XtPointer call)
+{
+    (void)widget;
+    (void)call;
+    TableWidget *table = (TableWidget *)client;
+    table_widget_update_header_offset(table);
 }
 
 static XmString make_string(const char *text)
@@ -135,6 +156,8 @@ static TableRow *table_row_create(TableWidget *table, const char *const values[]
                   XmNshadowThickness, table->grid ? 1 : 0,
                   XmNshadowType, table->grid ? XmSHADOW_ETCHED_IN : XmSHADOW_OUT,
                   XmNnavigationType, XmTAB_GROUP,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
                   NULL);
 
     for (int col = 0; col < table->column_count; ++col) {
@@ -444,6 +467,14 @@ TableWidget *table_widget_create(Widget parent, const char *name,
     XtSetArg(scroll_args[sn], XmNscrollingPolicy, XmAUTOMATIC); sn++;
     Widget scroll = XmCreateScrolledWindow(form, "tableScroll", scroll_args, sn);
     XtManageChild(scroll);
+    table->scroll_window = scroll;
+    Widget vscroll = NULL;
+    XtVaGetValues(scroll, XmNverticalScrollBar, &vscroll, NULL);
+    if (vscroll) {
+        XtAddCallback(vscroll, XmNmapCallback, table_widget_scrollbar_visibility_cb, table);
+        XtAddCallback(vscroll, XmNunmapCallback, table_widget_scrollbar_visibility_cb, table);
+    }
+    table_widget_update_header_offset(table);
 
     table->rows_column = XmCreateRowColumn(scroll, "tableRows", NULL, 0);
     XtVaSetValues(table->rows_column,

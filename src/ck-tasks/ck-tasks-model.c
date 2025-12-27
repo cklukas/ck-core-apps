@@ -9,6 +9,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <utmp.h>
 
 static long g_clock_ticks = 0;
 static int g_cpu_count = 1;
@@ -364,4 +367,132 @@ int tasks_model_get_system_stats(TasksSystemStats *out_stats)
     out_stats->mem_total_kb = mem_total;
     out_stats->mem_used_kb = mem_used;
     return 0;
+}
+
+#define TASKS_USER_UNKNOWN_TEXT "(unknown)"
+#define TASKS_USER_LOCAL_TEXT "(local)"
+#define TASKS_USER_IDLE_NA_TEXT "n/a"
+
+static void tasks_model_format_login_time(char *buffer, size_t len, time_t seconds)
+{
+    if (!buffer || len == 0) return;
+    if (seconds <= 0) {
+        snprintf(buffer, len, "%s", TASKS_USER_UNKNOWN_TEXT);
+        buffer[len - 1] = '\0';
+        return;
+    }
+    struct tm tm_storage;
+    struct tm *tm_info = localtime_r(&seconds, &tm_storage);
+    if (!tm_info) {
+        snprintf(buffer, len, "%s", TASKS_USER_UNKNOWN_TEXT);
+        buffer[len - 1] = '\0';
+        return;
+    }
+    strftime(buffer, len, "%Y-%m-%d %H:%M:%S", tm_info);
+}
+
+static long long tasks_model_get_idle_seconds(const char *line)
+{
+    if (!line || line[0] == '\0') return -1;
+    char path[128] = {0};
+    if (line[0] == '/') {
+        snprintf(path, sizeof(path), "%s", line);
+    } else {
+        snprintf(path, sizeof(path), "/dev/%s", line);
+    }
+    struct stat st = {0};
+    if (stat(path, &st) != 0) return -1;
+    time_t now = time(NULL);
+    if (now < st.st_atime) return 0;
+    return (long long)(now - st.st_atime);
+}
+
+static void tasks_model_format_idle_time(char *buffer, size_t len, long long seconds)
+{
+    if (!buffer || len == 0) return;
+    if (seconds < 0) {
+        snprintf(buffer, len, "%s", TASKS_USER_IDLE_NA_TEXT);
+        buffer[len - 1] = '\0';
+        return;
+    }
+    long long hours = seconds / 3600;
+    long long minutes = (seconds % 3600) / 60;
+    long long secs = seconds % 60;
+    if (hours > 0) {
+        snprintf(buffer, len, "%lluh %02llum", hours, minutes);
+    } else if (minutes > 0) {
+        snprintf(buffer, len, "%llum %02llus", minutes, secs);
+    } else {
+        snprintf(buffer, len, "%llus", secs);
+    }
+    buffer[len - 1] = '\0';
+}
+
+static void tasks_model_copy_string(char *dst, const char *src, size_t len, const char *fallback)
+{
+    if (!dst || len == 0) return;
+    if (src && src[0]) {
+        strncpy(dst, src, len - 1);
+        dst[len - 1] = '\0';
+        return;
+    }
+    if (fallback) {
+        strncpy(dst, fallback, len - 1);
+        dst[len - 1] = '\0';
+    } else {
+        dst[0] = '\0';
+    }
+}
+
+int tasks_model_list_users(TasksUserEntry **out_entries, int *out_count)
+{
+    if (!out_entries || !out_count) return -1;
+    TasksUserEntry *entries = NULL;
+    int capacity = 0;
+    int count = 0;
+    int result = 0;
+
+    setutent();
+    struct utmp *ut = NULL;
+    while ((ut = getutent()) != NULL) {
+        if (ut->ut_type != USER_PROCESS) continue;
+        if (count >= capacity) {
+            int new_capacity = capacity ? capacity * 2 : 32;
+            TasksUserEntry *resized = (TasksUserEntry *)realloc(entries, sizeof(TasksUserEntry) * new_capacity);
+            if (!resized) {
+                result = -1;
+                break;
+            }
+            entries = resized;
+            capacity = new_capacity;
+        }
+        TasksUserEntry *entry = &entries[count];
+        memset(entry, 0, sizeof(*entry));
+        tasks_model_copy_string(entry->user, ut->ut_user, sizeof(entry->user), TASKS_USER_UNKNOWN_TEXT);
+        tasks_model_copy_string(entry->tty, ut->ut_line, sizeof(entry->tty), TASKS_USER_UNKNOWN_TEXT);
+        tasks_model_copy_string(entry->host, ut->ut_host, sizeof(entry->host), TASKS_USER_LOCAL_TEXT);
+        time_t login_seconds = ut->ut_time;
+        tasks_model_format_login_time(entry->login_time, sizeof(entry->login_time), login_seconds);
+        long long idle_seconds = tasks_model_get_idle_seconds(ut->ut_line);
+        tasks_model_format_idle_time(entry->idle_time, sizeof(entry->idle_time), idle_seconds);
+        entry->pid = ut->ut_pid;
+        count++;
+    }
+    endutent();
+
+    if (result != 0) {
+        free(entries);
+        entries = NULL;
+        count = 0;
+    }
+
+    *out_entries = entries;
+    *out_count = count;
+    return result;
+}
+
+void tasks_model_free_users(TasksUserEntry *entries, int count)
+{
+    (void)count;
+    free(entries);
 }

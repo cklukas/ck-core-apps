@@ -58,6 +58,7 @@ typedef struct {
     Widget process_scrollbar;
     GridLayout *process_grid;
     TableWidget *apps_table;
+    TableWidget *users_table;
     Widget apps_search_field;
     Widget apps_selected_row;
     Widget apps_close_button;
@@ -100,6 +101,7 @@ void tasks_ui_set_processes(TasksUi *ui, const TasksProcessEntry *entries, int c
 void tasks_ui_set_process_row_window(int start);
 int tasks_ui_get_process_row_page_size(void);
 void tasks_ui_set_applications_table(TasksUi *ui, const TasksApplicationEntry *entries, int count);
+void tasks_ui_set_users_table(TasksUi *ui, const TasksUserEntry *entries, int count);
 void tasks_ui_update_process_count(TasksUi *ui, int total_processes);
 void tasks_ui_update_system_stats(TasksUi *ui, const TasksSystemStats *stats);
 

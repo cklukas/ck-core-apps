@@ -251,8 +251,7 @@ TasksUi *tasks_ui_create(XtAppContext app, Widget toplevel)
                                                   "Services", "Service status, start/stop controls, and dependencies.");
     ui->tab_performance = tasks_ui_create_performance_tab(ui);
     ui->tab_networking = tasks_ui_create_networking_tab(ui);
-    ui->tab_users = tasks_ui_create_simple_tab(ui, TASKS_TAB_USERS, "usersPage",
-                                               "Users", "User sessions and resource consumption.");
+    ui->tab_users = tasks_ui_create_users_tab(ui);
 
     Widget initial_tab = tasks_ui_get_tab_widget(ui, TASKS_TAB_PROCESSES);
     if (initial_tab) {
@@ -266,6 +265,7 @@ void tasks_ui_destroy(TasksUi *ui)
 {
     tasks_ui_destroy_applications_tab(ui);
     tasks_ui_destroy_process_tab(ui);
+    tasks_ui_destroy_users_tab(ui);
     free(ui);
 }
 

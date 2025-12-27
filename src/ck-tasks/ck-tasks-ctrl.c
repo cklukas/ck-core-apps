@@ -32,6 +32,8 @@ struct TasksController {
     TasksApplicationEntry *applications;
     int applications_count;
     int selected_application;
+    TasksUserEntry *user_sessions;
+    int user_session_count;
     int process_total_count;
     XtIntervalId refresh_timer;
     int refresh_interval_ms;
@@ -55,6 +57,7 @@ static int query_client_list(Display *dpy, Window root, Window **out_list, unsig
 
 static void tasks_ctrl_schedule_refresh(TasksController *ctrl);
 static void tasks_ctrl_refresh_applications(TasksController *ctrl);
+static void tasks_ctrl_refresh_users(TasksController *ctrl);
 static void on_apps_close(Widget widget, XtPointer client, XtPointer call);
 static int tasks_ctrl_filter_processes(TasksController *ctrl, TasksProcessEntry *entries, int count);
 static void tasks_ctrl_apply_filter_state(TasksController *ctrl, Boolean state);
@@ -144,6 +147,7 @@ static void on_view_refresh(Widget widget, XtPointer client, XtPointer call)
             tasks_ui_update_system_stats(ctrl->ui, &stats);
         }
         tasks_ctrl_refresh_applications(ctrl);
+        tasks_ctrl_refresh_users(ctrl);
         tasks_ui_update_status(ctrl->ui, "Process list refreshed.");
     } else {
         tasks_ui_update_status(ctrl->ui, "Unable to refresh process list.");
@@ -646,6 +650,20 @@ static void tasks_ctrl_refresh_applications(TasksController *ctrl)
     tasks_ui_set_applications_table(ctrl->ui, ctrl->applications, ctrl->applications_count);
 }
 
+static void tasks_ctrl_refresh_users(TasksController *ctrl)
+{
+    if (!ctrl || !ctrl->ui) return;
+    TasksUserEntry *entries = NULL;
+    int count = 0;
+    if (tasks_model_list_users(&entries, &count) != 0) {
+        return;
+    }
+    tasks_model_free_users(ctrl->user_sessions, ctrl->user_session_count);
+    ctrl->user_sessions = entries;
+    ctrl->user_session_count = count;
+    tasks_ui_set_users_table(ctrl->ui, ctrl->user_sessions, ctrl->user_session_count);
+}
+
 static void on_apps_close(Widget widget, XtPointer client, XtPointer call)
 {
     (void)widget;
@@ -857,6 +875,8 @@ TasksController *tasks_ctrl_create(TasksUi *ui, SessionData *session_data)
     ctrl->virtual_row_start = 0;
     ctrl->selected_application = -1;
     ctrl->process_total_count = 0;
+    ctrl->user_sessions = NULL;
+    ctrl->user_session_count = 0;
 
     XtAddCallback(ui->menu_file_exit, XmNactivateCallback, on_file_exit, ctrl);
     XtAddCallback(ui->menu_file_connect, XmNactivateCallback, on_file_connect, ctrl);
@@ -916,6 +936,7 @@ void tasks_ctrl_destroy(TasksController *ctrl)
         XtDestroyWidget(ctrl->about_shell);
     }
     tasks_model_free_processes(ctrl->process_entries, ctrl->process_count);
+    tasks_model_free_users(ctrl->user_sessions, ctrl->user_session_count);
     free(ctrl->applications);
     if (ctrl->ui) {
         ctrl->ui->controller = NULL;

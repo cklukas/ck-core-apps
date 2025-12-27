@@ -895,7 +895,7 @@ static int tasks_model_list_systemd_services(TasksServiceEntry **out_entries, in
         } else if (items[i].enabled) {
             snprintf(entry->state, sizeof(entry->state), "enabled");
         } else {
-            entry->state[0] = '\0';
+            snprintf(entry->state, sizeof(entry->state), "disabled");
         }
     }
     free(items);

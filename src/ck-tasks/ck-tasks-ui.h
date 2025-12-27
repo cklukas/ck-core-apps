@@ -77,6 +77,10 @@ typedef struct {
     Widget services_info_frame;
     Widget services_info_title;
     TableWidget *services_info_table;
+    Dimension services_info_height;
+    Boolean services_info_height_set;
+    Boolean services_info_visible;
+    int services_info_ignore_configure;
     Widget services_selected_row;
     int services_selected_index;
     Boolean services_updates_paused;

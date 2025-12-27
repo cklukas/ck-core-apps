@@ -685,6 +685,21 @@ static void tasks_ctrl_refresh_services(TasksController *ctrl)
     ctrl->service_entries = entries;
     ctrl->service_count = count;
     ctrl->service_init_info = init_info;
+
+    if (!ctrl->show_disabled_services && ctrl->service_init_info.init_name[0] &&
+        strcmp(ctrl->service_init_info.init_name, "systemd") == 0) {
+        int keep = 0;
+        for (int i = 0; i < ctrl->service_count; ++i) {
+            if (strcmp(ctrl->service_entries[i].state, "disabled") == 0) {
+                continue;
+            }
+            if (keep != i) {
+                ctrl->service_entries[keep] = ctrl->service_entries[i];
+            }
+            keep++;
+        }
+        ctrl->service_count = keep;
+    }
     tasks_ui_set_services_table(ctrl->ui, ctrl->service_entries, ctrl->service_count, &ctrl->service_init_info);
 }
 

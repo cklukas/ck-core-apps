@@ -65,7 +65,7 @@ static Dimension services_clamp_info_height(TasksUi *ui, Dimension desired, Dime
         XtVaGetValues(ui->services_split_line, XmNheight, &split_height, NULL);
     }
     if (ui->services_table) {
-        Widget table_widget = table_widget_get_widget(ui->services_table);
+        Widget table_widget = ck_table_get_widget(ui->services_table);
         if (table_widget) {
             XtVaGetValues(table_widget, XmNpaneMinimum, &table_min, NULL);
         }
@@ -155,7 +155,7 @@ static void services_set_info_visible(TasksUi *ui, Boolean visible)
         Dimension spacing = 0;
         Dimension available = services_get_pane_available_height(ui, &pane_height, &spacing);
         if (ui->services_table && available > 0) {
-            Widget table_widget = table_widget_get_widget(ui->services_table);
+            Widget table_widget = ck_table_get_widget(ui->services_table);
             if (table_widget) {
                 XtVaSetValues(table_widget, XmNheight, available, NULL);
             }
@@ -166,21 +166,21 @@ static void services_set_info_visible(TasksUi *ui, Boolean visible)
 static void services_update_info_panel(TasksUi *ui, const TasksServiceEntry *entry)
 {
     if (!ui || !ui->services_info_table || !entry) return;
-    table_widget_clear(ui->services_info_table);
+    ck_table_clear(ui->services_info_table);
 
     const char *file_path = entry->filename_path[0] ? entry->filename_path : "(none)";
     const char *link_path = entry->symlink_path[0] ? entry->symlink_path : "(none)";
     const char *values_path[] = {"File path", file_path};
-    table_widget_add_row(ui->services_info_table, values_path);
+    ck_table_add_row(ui->services_info_table, values_path);
     const char *values_link[] = {"Symlink path", link_path};
-    table_widget_add_row(ui->services_info_table, values_link);
+    ck_table_add_row(ui->services_info_table, values_link);
 
     for (int i = 0; i < entry->info_count; ++i) {
         const char *field_values[] = {
             entry->info_fields[i].key,
             entry->info_fields[i].value,
         };
-        table_widget_add_row(ui->services_info_table, field_values);
+        ck_table_add_row(ui->services_info_table, field_values);
     }
 }
 
@@ -227,7 +227,7 @@ static void services_apply_info_pane_height(TasksUi *ui)
                   XmNallowResize, True,
                   NULL);
     if (ui->services_table && table_height > 0) {
-        Widget table_widget = table_widget_get_widget(ui->services_table);
+        Widget table_widget = ck_table_get_widget(ui->services_table);
         if (table_widget) {
             XtVaSetValues(table_widget,
                           XmNheight, table_height,
@@ -268,7 +268,7 @@ static void on_services_info_frame_configure(Widget widget, XtPointer client, XE
         table_height = available - height;
     }
     if (ui->services_table && table_height > 0) {
-        Widget table_widget = table_widget_get_widget(ui->services_table);
+        Widget table_widget = ck_table_get_widget(ui->services_table);
         if (table_widget) {
             XtVaSetValues(table_widget, XmNheight, table_height, NULL);
         }
@@ -420,8 +420,8 @@ Widget tasks_ui_create_services_tab(TasksUi *ui)
                   NULL);
     XtManageChild(ui->services_pane);
 
-    ui->services_table = table_widget_create(ui->services_pane, "servicesTable",
-                                             services_columns, SERVICE_COLUMN_COUNT);
+    ui->services_table = ck_table_create_standard(ui->services_pane, "servicesTable",
+                                                  services_columns, SERVICE_COLUMN_COUNT);
     if (!ui->services_table) {
         XmString message = tasks_ui_make_string("Unable to display services.");
         XtVaCreateManagedWidget(
@@ -442,7 +442,7 @@ Widget tasks_ui_create_services_tab(TasksUi *ui)
         return page;
     }
 
-    Widget table_widget = table_widget_get_widget(ui->services_table);
+    Widget table_widget = ck_table_get_widget(ui->services_table);
     if (table_widget) {
         XtVaSetValues(table_widget,
                       XmNpaneMinimum, 120,
@@ -451,8 +451,8 @@ Widget tasks_ui_create_services_tab(TasksUi *ui)
                       XmNallowResize, True,
                       NULL);
     }
-    table_widget_set_grid(ui->services_table, True);
-    table_widget_set_alternate_row_colors(ui->services_table, True);
+    ck_table_set_grid(ui->services_table, True);
+    ck_table_set_alternate_row_colors(ui->services_table, True);
 
     ui->services_split_line = XtVaCreateManagedWidget(
         "servicesSplitLine",
@@ -500,10 +500,10 @@ Widget tasks_ui_create_services_tab(TasksUi *ui)
         NULL);
     tasks_ui_set_label_text(ui->services_info_title, "Service details");
 
-    ui->services_info_table = table_widget_create(info_form, "servicesInfoTable",
-                                                  services_info_columns, SERVICE_INFO_COLUMN_COUNT);
+    ui->services_info_table = ck_table_create_standard(info_form, "servicesInfoTable",
+                                                       services_info_columns, SERVICE_INFO_COLUMN_COUNT);
     if (ui->services_info_table) {
-        Widget info_table_widget = table_widget_get_widget(ui->services_info_table);
+        Widget info_table_widget = ck_table_get_widget(ui->services_info_table);
         if (info_table_widget) {
             XtVaSetValues(info_table_widget,
                           XmNtopAttachment, XmATTACH_WIDGET,
@@ -514,8 +514,8 @@ Widget tasks_ui_create_services_tab(TasksUi *ui)
                           XmNtopOffset, 6,
                           NULL);
         }
-        table_widget_set_grid(ui->services_info_table, True);
-        table_widget_set_alternate_row_colors(ui->services_info_table, True);
+        ck_table_set_grid(ui->services_info_table, True);
+        ck_table_set_alternate_row_colors(ui->services_info_table, True);
     }
 
     ui->services_row_count = 0;
@@ -537,11 +537,11 @@ void tasks_ui_destroy_services_tab(TasksUi *ui)
 {
     if (!ui) return;
     if (ui->services_table) {
-        table_widget_destroy(ui->services_table);
+        ck_table_destroy(ui->services_table);
         ui->services_table = NULL;
     }
     if (ui->services_info_table) {
-        table_widget_destroy(ui->services_info_table);
+        ck_table_destroy(ui->services_info_table);
         ui->services_info_table = NULL;
     }
     free(ui->services_rows);
@@ -603,7 +603,7 @@ void tasks_ui_set_services_table(TasksUi *ui, const TasksServiceEntry *entries, 
             NULL,
         };
         if (ui->services_rows && ui->services_rows[i]) {
-            table_widget_update_row_with_sort_values(ui->services_rows[i], values, sort_values);
+            ck_table_update_row_with_sort_values(ui->services_rows[i], values, sort_values);
             Widget row_widget = table_row_get_widget(ui->services_rows[i]);
             if (row_widget) {
                 XtVaSetValues(row_widget, XmNuserData, (XtPointer)(intptr_t)(i + 1), NULL);
@@ -622,11 +622,11 @@ void tasks_ui_set_services_table(TasksUi *ui, const TasksServiceEntry *entries, 
             NULL,
             NULL,
         };
-        TableRow *row = table_widget_add_row_with_sort_values(ui->services_table, values, sort_values);
+        TableRow *row = ck_table_add_row_with_sort_values(ui->services_table, values, sort_values);
         if (ui->services_rows) {
             ui->services_rows[i] = row;
         }
-        Widget row_widget = table_row_get_widget(row);
+        Widget row_widget = ck_table_row_get_widget(row);
         if (row_widget) {
             XtVaSetValues(row_widget, XmNuserData, (XtPointer)(intptr_t)(i + 1), NULL);
             XtAddEventHandler(row_widget, ButtonPressMask, False, on_services_row_press, (XtPointer)ui);
@@ -635,7 +635,7 @@ void tasks_ui_set_services_table(TasksUi *ui, const TasksServiceEntry *entries, 
 
     for (int i = desired; i < old_count; ++i) {
         if (ui->services_rows && ui->services_rows[i]) {
-            table_widget_remove_row(ui->services_table, ui->services_rows[i]);
+            ck_table_remove_row(ui->services_table, ui->services_rows[i]);
             ui->services_rows[i] = NULL;
         }
     }

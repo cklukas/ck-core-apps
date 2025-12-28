@@ -4,8 +4,7 @@
 #include <Xm/Xm.h>
 #include <X11/Xlib.h>
 
-#include "../shared/gridlayout/gridlayout.h"
-#include "../shared/table/table_widget.h"
+#include "../shared/ck-table/ck_table.h"
 #include "ck-tasks-model.h"
 
 typedef struct TasksController TasksController;
@@ -60,9 +59,9 @@ typedef struct {
     Widget process_filter_toggle;
     Widget process_search_field;
     Widget process_scrollbar;
-    GridLayout *process_grid;
-    TableWidget *apps_table;
-    TableWidget *services_table;
+    CkTable *process_table;
+    CkTable *apps_table;
+    CkTable *services_table;
     Widget services_controls_form;
     Widget services_show_disabled_toggle;
     Boolean services_show_disabled;
@@ -77,7 +76,7 @@ typedef struct {
     Widget services_split_line;
     Widget services_info_frame;
     Widget services_info_title;
-    TableWidget *services_info_table;
+    CkTable *services_info_table;
     Dimension services_info_height;
     Boolean services_info_height_set;
     Boolean services_info_visible;
@@ -85,7 +84,7 @@ typedef struct {
     Widget services_selected_row;
     int services_selected_index;
     Boolean services_updates_paused;
-    TableWidget *users_table;
+    CkTable *users_table;
     TableRow **users_rows;
     int users_row_count;
     int users_row_capacity;

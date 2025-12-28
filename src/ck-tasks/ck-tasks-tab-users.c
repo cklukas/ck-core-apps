@@ -446,7 +446,7 @@ Widget tasks_ui_create_users_tab(TasksUi *ui)
                                        "Users", "Logged-in user sessions and their resource footprints.");
     if (!page) return NULL;
 
-    ui->users_table = table_widget_create(page, "usersTable", users_columns, USER_COLUMN_COUNT);
+    ui->users_table = ck_table_create_standard(page, "usersTable", users_columns, USER_COLUMN_COUNT);
     if (!ui->users_table) {
         XmString message = tasks_ui_make_string("Unable to display user sessions.");
         XtVaCreateManagedWidget(
@@ -507,7 +507,7 @@ Widget tasks_ui_create_users_tab(TasksUi *ui)
         NULL);
     tasks_ui_set_label_text(ui->users_logout_status_label, "");
 
-    Widget table_widget = table_widget_get_widget(ui->users_table);
+    Widget table_widget = ck_table_get_widget(ui->users_table);
     if (table_widget) {
         XtVaSetValues(table_widget,
                       XmNtopAttachment, XmATTACH_FORM,
@@ -521,8 +521,8 @@ Widget tasks_ui_create_users_tab(TasksUi *ui)
                       XmNrightOffset, 6,
                       NULL);
     }
-    table_widget_set_grid(ui->users_table, True);
-    table_widget_set_alternate_row_colors(ui->users_table, True);
+    ck_table_set_grid(ui->users_table, True);
+    ck_table_set_alternate_row_colors(ui->users_table, True);
     ui->users_selected_index = -1;
     ui->users_updates_paused = False;
     return page;
@@ -532,7 +532,7 @@ void tasks_ui_destroy_users_tab(TasksUi *ui)
 {
     if (!ui) return;
     if (ui->users_table) {
-        table_widget_destroy(ui->users_table);
+        ck_table_destroy(ui->users_table);
         ui->users_table = NULL;
     }
     free(ui->users_rows);
@@ -586,7 +586,7 @@ void tasks_ui_set_users_table(TasksUi *ui, const TasksUserEntry *entries, int co
             NULL,
         };
         if (ui->users_rows && ui->users_rows[i]) {
-            table_widget_update_row_with_sort_values(ui->users_rows[i], values, sort_values);
+            ck_table_update_row_with_sort_values(ui->users_rows[i], values, sort_values);
             Widget row_widget = table_row_get_widget(ui->users_rows[i]);
             if (row_widget) {
                 XtVaSetValues(row_widget, XmNuserData, (XtPointer)(intptr_t)(i + 1), NULL);
@@ -619,11 +619,11 @@ void tasks_ui_set_users_table(TasksUi *ui, const TasksUserEntry *entries, int co
             NULL,
             NULL,
         };
-        TableRow *row = table_widget_add_row_with_sort_values(ui->users_table, values, sort_values);
+        TableRow *row = ck_table_add_row_with_sort_values(ui->users_table, values, sort_values);
         if (ui->users_rows) {
             ui->users_rows[i] = row;
         }
-        Widget row_widget = table_row_get_widget(row);
+        Widget row_widget = ck_table_row_get_widget(row);
         if (row_widget) {
             XtVaSetValues(row_widget, XmNuserData, (XtPointer)(intptr_t)(i + 1), NULL);
             XtAddEventHandler(row_widget, ButtonPressMask, False, on_users_row_press, (XtPointer)ui);
@@ -632,7 +632,7 @@ void tasks_ui_set_users_table(TasksUi *ui, const TasksUserEntry *entries, int co
 
     for (int i = desired; i < old_count; ++i) {
         if (ui->users_rows && ui->users_rows[i]) {
-            table_widget_remove_row(ui->users_table, ui->users_rows[i]);
+            ck_table_remove_row(ui->users_table, ui->users_rows[i]);
             ui->users_rows[i] = NULL;
         }
     }

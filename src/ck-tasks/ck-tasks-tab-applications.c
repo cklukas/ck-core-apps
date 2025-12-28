@@ -114,7 +114,7 @@ Widget tasks_ui_create_applications_tab(TasksUi *ui)
 void tasks_ui_destroy_applications_tab(TasksUi *ui)
 {
     if (ui && ui->apps_table) {
-        table_widget_destroy(ui->apps_table);
+        ck_table_destroy(ui->apps_table);
         ui->apps_table = NULL;
     }
     ui->apps_selected_row = NULL;
@@ -123,7 +123,7 @@ void tasks_ui_destroy_applications_tab(TasksUi *ui)
 void tasks_ui_set_applications_table(TasksUi *ui, const TasksApplicationEntry *entries, int count)
 {
     if (!ui || !ui->apps_table) return;
-    table_widget_clear(ui->apps_table);
+    ck_table_clear(ui->apps_table);
     ui->apps_selected_row = NULL;
     if (!entries || count <= 0) return;
 
@@ -144,8 +144,8 @@ void tasks_ui_set_applications_table(TasksUi *ui, const TasksApplicationEntry *e
             entry->command,
             entry->wm_class,
         };
-        TableRow *row = table_widget_add_row(ui->apps_table, values);
-        Widget row_widget = table_row_get_widget(row);
+        TableRow *row = ck_table_add_row(ui->apps_table, values);
+        Widget row_widget = ck_table_row_get_widget(row);
         if (row_widget) {
             XtVaSetValues(row_widget, XmNuserData, (XtPointer)(intptr_t)i, NULL);
             XtAddEventHandler(row_widget, ButtonPressMask, False, on_apps_row_press, (XtPointer)ui);

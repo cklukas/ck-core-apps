@@ -21,11 +21,12 @@ PROGRAMS := $(BIN_DIR)/ck-about \
             $(BIN_DIR)/ck-clock \
             $(BIN_DIR)/ck-calc \
             $(BIN_DIR)/ck-character-map \
+            $(BIN_DIR)/ck-browser \
             $(BIN_DIR)/ck-nibbles \
             $(BIN_DIR)/ck-mines \
             $(BIN_DIR)/ck-plasma-1
 
-.PHONY: all clean ck-about ck-load ck-tasks ck-mixer ck-clock ck-calc ck-character-map ck-nibbles ck-mines ck-plasma-1
+.PHONY: all clean ck-about ck-load ck-tasks ck-mixer ck-clock ck-calc ck-character-map ck-browser ck-nibbles ck-mines ck-plasma-1
 
 all: $(PROGRAMS)
 
@@ -35,6 +36,7 @@ ck-mixer: $(BIN_DIR)/ck-mixer
 ck-clock: $(BIN_DIR)/ck-clock
 ck-calc: $(BIN_DIR)/ck-calc
 ck-character-map: $(BIN_DIR)/ck-character-map
+ck-browser: $(BIN_DIR)/ck-browser
 ck-nibbles: $(BIN_DIR)/ck-nibbles
 ck-mines: $(BIN_DIR)/ck-mines
 ck-plasma-1: $(BIN_DIR)/ck-plasma-1
@@ -69,6 +71,10 @@ $(BIN_DIR)/ck-calc: src/ck-calc/ck-calc.c src/ck-calc/app_state_utils.c src/ck-c
 # ck-character-map
 $(BIN_DIR)/ck-character-map: src/ck-character-map/ck-character-map.c src/shared/session_utils.c src/shared/session_utils.h src/shared/about_dialog.c src/shared/about_dialog.h | $(BIN_DIR)
 	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-character-map/ck-character-map.c src/shared/session_utils.c src/shared/about_dialog.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
+
+# ck-browser
+$(BIN_DIR)/ck-browser: src/ck-browser/ck-browser.c src/shared/about_dialog.c src/shared/about_dialog.h | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-browser/ck-browser.c src/shared/about_dialog.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
 
 # ck-nibbles (Motif/X11 game, with CDE session dependency)
 $(BIN_DIR)/ck-nibbles: src/games/ck-nibbles/ck-nibbles.c src/shared/about_dialog.c src/shared/about_dialog.h src/shared/session_utils.c src/shared/session_utils.h | $(BIN_DIR)

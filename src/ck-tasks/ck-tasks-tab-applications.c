@@ -25,10 +25,27 @@ static const TableColumnDef apps_columns[] = {
 
 Widget tasks_ui_create_applications_tab(TasksUi *ui)
 {
-    (void)apps_columns;
-    (void)APPS_COLUMN_COUNT;
     Widget page = tasks_ui_create_page(ui, "applicationsPage", TASKS_TAB_APPLICATIONS,
                                        "Applications", "Windows grouped by process.");
+
+    ui->apps_table = ck_table_create_standard(page, "appsTable", apps_columns, APPS_COLUMN_COUNT);
+    if (!ui->apps_table) {
+        XmString message = tasks_ui_make_string("Unable to display applications.");
+        XtVaCreateManagedWidget(
+            "appsTableFallbackLabel",
+            xmLabelGadgetClass, page,
+            XmNlabelString, message,
+            XmNalignment, XmALIGNMENT_CENTER,
+            XmNtopAttachment, XmATTACH_FORM,
+            XmNbottomAttachment, XmATTACH_FORM,
+            XmNleftAttachment, XmATTACH_FORM,
+            XmNrightAttachment, XmATTACH_FORM,
+            XmNmarginWidth, 8,
+            XmNmarginHeight, 8,
+            NULL);
+        XmStringFree(message);
+        return page;
+    }
 
     Widget controls = XmCreateForm(page, "appsControlsForm", NULL, 0);
     XtVaSetValues(controls,
@@ -89,24 +106,22 @@ Widget tasks_ui_create_applications_tab(TasksUi *ui)
     XmStringFree(close_label);
     ui->apps_close_button = close_button;
 
-    /* Disabled temporarily: apps table triggers redraw hang when window is exposed. */
-    XmString disabled_text = tasks_ui_make_string("Applications table temporarily disabled.");
-    XtVaCreateManagedWidget(
-        "appsTableDisabled",
-        xmLabelGadgetClass, page,
-        XmNlabelString, disabled_text,
-        XmNalignment, XmALIGNMENT_CENTER,
-        XmNtopAttachment, XmATTACH_FORM,
-        XmNtopOffset, 10,
-        XmNleftAttachment, XmATTACH_FORM,
-        XmNrightAttachment, XmATTACH_FORM,
-        XmNleftOffset, 8,
-        XmNrightOffset, 8,
-        XmNbottomAttachment, XmATTACH_WIDGET,
-        XmNbottomWidget, controls,
-        XmNbottomOffset, 8,
-        NULL);
-    XmStringFree(disabled_text);
+    Widget table_widget = ck_table_get_widget(ui->apps_table);
+    if (table_widget) {
+        XtVaSetValues(table_widget,
+                      XmNtopAttachment, XmATTACH_FORM,
+                      XmNleftAttachment, XmATTACH_FORM,
+                      XmNrightAttachment, XmATTACH_FORM,
+                      XmNbottomAttachment, XmATTACH_WIDGET,
+                      XmNbottomWidget, controls,
+                      XmNtopOffset, 6,
+                      XmNbottomOffset, 8,
+                      XmNleftOffset, 6,
+                      XmNrightOffset, 6,
+                      NULL);
+    }
+    ck_table_set_grid(ui->apps_table, True);
+    ck_table_set_alternate_row_colors(ui->apps_table, True);
 
     return page;
 }
@@ -131,12 +146,17 @@ void tasks_ui_set_applications_table(TasksUi *ui, const TasksApplicationEntry *e
         const TasksApplicationEntry *entry = &entries[i];
         char pid_buffer[16] = {0};
         char windows_buffer[16] = {0};
+        char pid_sort_buffer[16] = {0};
+        char windows_sort_buffer[16] = {0};
         if (entry->pid_known) {
             snprintf(pid_buffer, sizeof(pid_buffer), "%d", (int)entry->pid);
+            snprintf(pid_sort_buffer, sizeof(pid_sort_buffer), "%d", (int)entry->pid);
         } else {
             pid_buffer[0] = '\0';
+            pid_sort_buffer[0] = '\0';
         }
         snprintf(windows_buffer, sizeof(windows_buffer), "%d", entry->window_count);
+        snprintf(windows_sort_buffer, sizeof(windows_sort_buffer), "%d", entry->window_count);
         const char *values[] = {
             entry->title,
             pid_buffer,
@@ -144,7 +164,14 @@ void tasks_ui_set_applications_table(TasksUi *ui, const TasksApplicationEntry *e
             entry->command,
             entry->wm_class,
         };
-        TableRow *row = ck_table_add_row(ui->apps_table, values);
+        const char *sort_values[] = {
+            NULL,
+            pid_sort_buffer,
+            windows_sort_buffer,
+            NULL,
+            NULL,
+        };
+        TableRow *row = ck_table_add_row_with_sort_values(ui->apps_table, values, sort_values);
         Widget row_widget = ck_table_row_get_widget(row);
         if (row_widget) {
             XtVaSetValues(row_widget, XmNuserData, (XtPointer)(intptr_t)i, NULL);

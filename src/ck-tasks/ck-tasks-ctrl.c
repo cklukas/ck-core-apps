@@ -549,7 +549,6 @@ static int query_client_list(Display *dpy, Window root, Window **out_list, unsig
 
     window_collection_add_from_atom(dpy, root, "_NET_CLIENT_LIST_STACKING", &collection);
     window_collection_add_from_atom(dpy, root, "_NET_CLIENT_LIST", &collection);
-    window_collection_add_recursive(dpy, root, &collection);
 
     if (collection.count == 0) {
         Window root_ret = 0;
@@ -558,6 +557,13 @@ static int query_client_list(Display *dpy, Window root, Window **out_list, unsig
         unsigned int count = 0;
         if (XQueryTree(dpy, root, &root_ret, &parent_ret, &children, &count) && children) {
             for (unsigned int i = 0; i < count; ++i) {
+                XWindowAttributes attrs;
+                if (XGetWindowAttributes(dpy, children[i], &attrs) == 0) {
+                    continue;
+                }
+                if (attrs.class != InputOutput || attrs.override_redirect) {
+                    continue;
+                }
                 window_collection_add_unique(&collection, children[i]);
             }
         }

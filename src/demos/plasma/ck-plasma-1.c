@@ -15,6 +15,7 @@
 #include <X11/Xutil.h>
 
 #include <errno.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -131,16 +132,33 @@ static int write_full(int fd, const void *buf, size_t len)
     return 1;
 }
 
-static void render_checker(unsigned char *dst, int w, int h, int frame)
+static void render_plasma(unsigned char *dst, int w, int h, int frame)
 {
-    const int cell = 60;
+    static int16_t sin_table[256];
+    static int sin_ready = 0;
+    if (!sin_ready) {
+        for (int i = 0; i < 256; ++i) {
+            double angle = ((double)i * 2.0 * M_PI) / 256.0;
+            sin_table[i] = (int16_t)lrint(sin(angle) * 127.0);
+        }
+        sin_ready = 1;
+    }
+
     uint32_t *out = (uint32_t *)dst;
     for (int y = 0; y < h; ++y) {
+        int y_phase = (y + frame * 2) & 0xFF;
         for (int x = 0; x < w; ++x) {
-            int block = ((x + frame) / cell + (y + frame) / cell) % 2;
-            uint8_t r = block ? 0xFF : 0x00;
-            uint8_t g = 0x00;
-            uint8_t b = 0x00;
+            int x_phase = (x + frame) & 0xFF;
+            int xy_phase = (x + y + frame * 3) & 0xFF;
+            int warp_phase = (x * 2 + y * 3 + frame * 4) & 0xFF;
+            int sum = sin_table[x_phase]
+                + sin_table[y_phase]
+                + sin_table[xy_phase]
+                + sin_table[warp_phase];
+            int v = (sum + 508) * 255 / 1016;
+            uint8_t r = (uint8_t)(sin_table[(v + frame) & 0xFF] + 128);
+            uint8_t g = (uint8_t)(sin_table[(v + 85 + frame) & 0xFF] + 128);
+            uint8_t b = (uint8_t)(sin_table[(v + 170 + frame) & 0xFF] + 128);
             out[y * w + x] = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
         }
     }
@@ -158,7 +176,7 @@ static void worker_loop(int read_fd, int write_fd)
         unsigned char *buffer = (unsigned char *)malloc(data_size);
         if (!buffer) continue;
 
-        render_checker(buffer, task.width, task.height, task.frame_index);
+        render_plasma(buffer, task.width, task.height, task.frame_index);
 
         CkPlasmaResultHeader header;
         header.generation = task.generation;
@@ -408,7 +426,13 @@ static void ck_plasma_schedule_tasks(CkPlasmaApp *app)
     if (!app || app->num_workers <= 0) return;
     if (app->target_w <= 0 || app->target_h <= 0) return;
 
-    while (app->outstanding < app->num_workers) {
+    /* Cap the queue to the configured FPS target so we don't build up work we can't display. */
+    int max_outstanding = CK_PLASMA_MAX_FPS;
+    if (max_outstanding <= 0) max_outstanding = 1;
+    if (app->num_workers > 0 && max_outstanding > app->num_workers) {
+        max_outstanding = app->num_workers;
+    }
+    while (app->outstanding < max_outstanding) {
         CkPlasmaTask task;
         task.generation = app->generation;
         task.frame_index = app->next_request_frame;
@@ -439,11 +463,30 @@ static void ck_plasma_timer_cb(XtPointer client_data, XtIntervalId *id)
         app->next_request_frame = 0;
         app->next_display_frame = 0;
         ck_plasma_clear_frames(app);
+        if (app->iconified) {
+            app->target_w = app->icon_w;
+            app->target_h = app->icon_h;
+        }
     }
 
     if (app->iconified) {
         app->target_w = app->icon_w;
         app->target_h = app->icon_h;
+    } else if (app->drawing_area) {
+        Dimension width = 0;
+        Dimension height = 0;
+        XtVaGetValues(app->drawing_area, XmNwidth, &width, XmNheight, &height, NULL);
+        int new_w = (int)width;
+        int new_h = (int)height;
+        if (new_w > 0 && new_h > 0 &&
+            (new_w != app->target_w || new_h != app->target_h)) {
+            app->target_w = new_w;
+            app->target_h = new_h;
+            app->generation++;
+            app->next_request_frame = 0;
+            app->next_display_frame = 0;
+            ck_plasma_clear_frames(app);
+        }
     }
 
     CkPlasmaFrame *frame = ck_plasma_pop_frame(app, app->next_display_frame);

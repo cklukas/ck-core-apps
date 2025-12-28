@@ -22,9 +22,10 @@ PROGRAMS := $(BIN_DIR)/ck-about \
             $(BIN_DIR)/ck-calc \
             $(BIN_DIR)/ck-character-map \
             $(BIN_DIR)/ck-nibbles \
-            $(BIN_DIR)/ck-mines
+            $(BIN_DIR)/ck-mines \
+            $(BIN_DIR)/ck-plasma-1
 
-.PHONY: all clean ck-about ck-load ck-tasks ck-mixer ck-clock ck-calc ck-character-map ck-nibbles ck-mines
+.PHONY: all clean ck-about ck-load ck-tasks ck-mixer ck-clock ck-calc ck-character-map ck-nibbles ck-mines ck-plasma-1
 
 all: $(PROGRAMS)
 
@@ -36,6 +37,7 @@ ck-calc: $(BIN_DIR)/ck-calc
 ck-character-map: $(BIN_DIR)/ck-character-map
 ck-nibbles: $(BIN_DIR)/ck-nibbles
 ck-mines: $(BIN_DIR)/ck-mines
+ck-plasma-1: $(BIN_DIR)/ck-plasma-1
 
 $(BIN_DIR):
 	@mkdir -p $@
@@ -75,6 +77,10 @@ $(BIN_DIR)/ck-nibbles: src/games/ck-nibbles/ck-nibbles.c src/shared/about_dialog
 # ck-mines (Motif/X11 game, with CDE session dependency)
 $(BIN_DIR)/ck-mines: src/games/ck-mines/ck-mines.c src/shared/session_utils.c src/shared/session_utils.h src/shared/about_dialog.c src/shared/about_dialog.h | $(BIN_DIR)
 	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/games/ck-mines/ck-mines.c src/shared/session_utils.c src/shared/about_dialog.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
+
+# ck-plasma-1 (Motif/X11 demo, multi-process animation)
+$(BIN_DIR)/ck-plasma-1: src/demos/plasma/ck-plasma-1.c | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/demos/plasma/ck-plasma-1.c -o $@ $(CDE_LDFLAGS) -lXm -lXt -lX11
 
 clean:
 	rm -rf $(BUILD_DIR)

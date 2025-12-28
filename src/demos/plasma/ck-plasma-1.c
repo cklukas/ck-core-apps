@@ -14,7 +14,9 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 
+#include <Dt/Dt.h>
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -24,8 +26,12 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include "../../shared/session_utils.h"
+#include "plasma_renderer.h"
+
 #define CK_PLASMA_TITLE "Plasma Animation"
 #define CK_PLASMA_MAX_FPS 30
+#define CK_PLASMA_MAX_PENDING 2
 #define CK_PLASMA_ICON_SIZE 96
 
 typedef enum {
@@ -96,6 +102,9 @@ typedef struct {
     int num_workers;
     CkPlasmaWorker *workers;
     CkPlasmaFrame *frames;
+    int queued_frames;
+    SessionData *session_data;
+    char exec_path[PATH_MAX];
 } CkPlasmaApp;
 
 static void ck_plasma_schedule_tasks(CkPlasmaApp *app);
@@ -132,38 +141,6 @@ static int write_full(int fd, const void *buf, size_t len)
     return 1;
 }
 
-static void render_plasma(unsigned char *dst, int w, int h, int frame)
-{
-    static int16_t sin_table[256];
-    static int sin_ready = 0;
-    if (!sin_ready) {
-        for (int i = 0; i < 256; ++i) {
-            double angle = ((double)i * 2.0 * M_PI) / 256.0;
-            sin_table[i] = (int16_t)lrint(sin(angle) * 127.0);
-        }
-        sin_ready = 1;
-    }
-
-    uint32_t *out = (uint32_t *)dst;
-    for (int y = 0; y < h; ++y) {
-        int y_phase = (y + frame * 2) & 0xFF;
-        for (int x = 0; x < w; ++x) {
-            int x_phase = (x + frame) & 0xFF;
-            int xy_phase = (x + y + frame * 3) & 0xFF;
-            int warp_phase = (x * 2 + y * 3 + frame * 4) & 0xFF;
-            int sum = sin_table[x_phase]
-                + sin_table[y_phase]
-                + sin_table[xy_phase]
-                + sin_table[warp_phase];
-            int v = (sum + 508) * 255 / 1016;
-            uint8_t r = (uint8_t)(sin_table[(v + frame) & 0xFF] + 128);
-            uint8_t g = (uint8_t)(sin_table[(v + 85 + frame) & 0xFF] + 128);
-            uint8_t b = (uint8_t)(sin_table[(v + 170 + frame) & 0xFF] + 128);
-            out[y * w + x] = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
-        }
-    }
-}
-
 static void worker_loop(int read_fd, int write_fd)
 {
     for (;;) {
@@ -176,7 +153,8 @@ static void worker_loop(int read_fd, int write_fd)
         unsigned char *buffer = (unsigned char *)malloc(data_size);
         if (!buffer) continue;
 
-        render_plasma(buffer, task.width, task.height, task.frame_index);
+        int sequence_id = task.frame_index / CK_PLASMA_RENDERER_TIME_STEPS;
+        ck_plasma_render_frame(buffer, task.width, task.height, task.frame_index, sequence_id);
 
         CkPlasmaResultHeader header;
         header.generation = task.generation;
@@ -266,22 +244,19 @@ static void ck_plasma_store_frame_sorted(CkPlasmaApp *app, CkPlasmaFrame *frame)
     }
     frame->next = *cursor;
     *cursor = frame;
+    app->queued_frames++;
 }
 
-static CkPlasmaFrame *ck_plasma_pop_frame(CkPlasmaApp *app, int frame_index)
+static CkPlasmaFrame *ck_plasma_pop_oldest_frame(CkPlasmaApp *app)
 {
-    if (!app) return NULL;
-    CkPlasmaFrame **cursor = &app->frames;
-    while (*cursor) {
-        if ((*cursor)->frame_index == frame_index) {
-            CkPlasmaFrame *out = *cursor;
-            *cursor = out->next;
-            out->next = NULL;
-            return out;
-        }
-        cursor = &(*cursor)->next;
+    if (!app || !app->frames) return NULL;
+    CkPlasmaFrame *out = app->frames;
+    app->frames = out->next;
+    out->next = NULL;
+    if (app->queued_frames > 0) {
+        app->queued_frames--;
     }
-    return NULL;
+    return out;
 }
 
 static void ck_plasma_clear_frames(CkPlasmaApp *app)
@@ -295,6 +270,7 @@ static void ck_plasma_clear_frames(CkPlasmaApp *app)
         frame = next;
     }
     app->frames = NULL;
+    app->queued_frames = 0;
 }
 
 static void ck_plasma_consume_frame(CkPlasmaApp *app, CkPlasmaFrame *frame)
@@ -432,7 +408,10 @@ static void ck_plasma_schedule_tasks(CkPlasmaApp *app)
     if (app->num_workers > 0 && max_outstanding > app->num_workers) {
         max_outstanding = app->num_workers;
     }
-    while (app->outstanding < max_outstanding) {
+    int max_pending = CK_PLASMA_MAX_PENDING;
+    if (max_pending <= 0) max_pending = 1;
+    while (app->outstanding < max_outstanding &&
+           app->outstanding + app->queued_frames < max_pending) {
         CkPlasmaTask task;
         task.generation = app->generation;
         task.frame_index = app->next_request_frame;
@@ -489,10 +468,16 @@ static void ck_plasma_timer_cb(XtPointer client_data, XtIntervalId *id)
         }
     }
 
-    CkPlasmaFrame *frame = ck_plasma_pop_frame(app, app->next_display_frame);
+    CkPlasmaFrame *frame = app->frames;
     if (frame) {
-        ck_plasma_consume_frame(app, frame);
-        app->next_display_frame++;
+        if (frame->frame_index > app->next_display_frame) {
+            app->next_display_frame = frame->frame_index;
+        }
+        frame = ck_plasma_pop_oldest_frame(app);
+        if (frame) {
+            ck_plasma_consume_frame(app, frame);
+            app->next_display_frame++;
+        }
     }
 
     ck_plasma_schedule_tasks(app);
@@ -545,6 +530,16 @@ static void ck_plasma_wm_delete_cb(Widget w, XtPointer client_data, XtPointer ca
     if (app->app_ctx) {
         XtAppSetExitFlag(app->app_ctx);
     }
+}
+
+static void ck_plasma_session_save_cb(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)call_data;
+    CkPlasmaApp *app = (CkPlasmaApp *)client_data;
+    if (!app || !app->session_data) return;
+    session_capture_geometry(w, app->session_data, "x", "y", "w", "h");
+    const char *exec_path = app->exec_path[0] ? app->exec_path : NULL;
+    session_save(w, app->session_data, exec_path);
 }
 
 static int ck_plasma_spawn_workers(CkPlasmaApp *app)
@@ -606,12 +601,63 @@ static void ck_plasma_shutdown(CkPlasmaApp *app)
     if (app->icon_pixmap != None && app->display) {
         XFreePixmap(app->display, app->icon_pixmap);
     }
+    if (app->session_data) {
+        session_data_free(app->session_data);
+        app->session_data = NULL;
+    }
+}
+
+static void ck_plasma_init_exec_path(CkPlasmaApp *app, const char *argv0)
+{
+    if (!app) return;
+
+    ssize_t len = readlink("/proc/self/exe", app->exec_path, sizeof(app->exec_path) - 1);
+    if (len > 0) {
+        if (len >= (ssize_t)sizeof(app->exec_path)) {
+            len = (ssize_t)sizeof(app->exec_path) - 1;
+        }
+        app->exec_path[len] = '\0';
+        return;
+    }
+
+    if (!argv0 || !argv0[0]) {
+        app->exec_path[0] = '\0';
+        return;
+    }
+
+    if (argv0[0] == '/') {
+        strncpy(app->exec_path, argv0, sizeof(app->exec_path) - 1);
+        app->exec_path[sizeof(app->exec_path) - 1] = '\0';
+        return;
+    }
+
+    if (strchr(argv0, '/')) {
+        char cwd[PATH_MAX];
+        if (getcwd(cwd, sizeof(cwd))) {
+            size_t cwd_len = strlen(cwd);
+            size_t argv_len = strlen(argv0);
+            if (cwd_len + 1 + argv_len < sizeof(app->exec_path)) {
+                memcpy(app->exec_path, cwd, cwd_len);
+                app->exec_path[cwd_len] = '/';
+                memcpy(app->exec_path + cwd_len + 1, argv0, argv_len);
+                app->exec_path[cwd_len + 1 + argv_len] = '\0';
+                return;
+            }
+        }
+    }
+
+    strncpy(app->exec_path, argv0, sizeof(app->exec_path) - 1);
+    app->exec_path[sizeof(app->exec_path) - 1] = '\0';
 }
 
 int main(int argc, char **argv)
 {
     CkPlasmaApp app;
     memset(&app, 0, sizeof(app));
+    char *session_id = session_parse_argument(&argc, argv);
+    app.session_data = session_data_create(session_id);
+    free(session_id);
+    ck_plasma_init_exec_path(&app, argv[0]);
     app.icon_w = CK_PLASMA_ICON_SIZE;
     app.icon_h = CK_PLASMA_ICON_SIZE;
     app.generation = 1;
@@ -623,18 +669,35 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    DtInitialize(XtDisplay(app.toplevel), app.toplevel, "CkPlasma", "CkPlasma");
+
     XtVaSetValues(app.toplevel,
                   XmNtitle, CK_PLASMA_TITLE,
                   XmNiconName, CK_PLASMA_TITLE,
+                  XmNwidth, 640,
+                  XmNheight, 480,
                   NULL);
 
     app.drawing_area = XmCreateDrawingArea(app.toplevel, "drawing", NULL, 0);
+    XtVaSetValues(app.drawing_area,
+                  XmNwidth, 640,
+                  XmNheight, 480,
+                  NULL);
     XtAddCallback(app.drawing_area, XmNexposeCallback, ck_plasma_expose_cb, &app);
     XtAddCallback(app.drawing_area, XmNresizeCallback, ck_plasma_resize_cb, &app);
     XtManageChild(app.drawing_area);
 
+    if (app.session_data && session_load(app.toplevel, app.session_data)) {
+        session_apply_geometry(app.toplevel, app.session_data, "x", "y", "w", "h");
+    }
+
     Atom wm_delete = XmInternAtom(XtDisplay(app.toplevel), "WM_DELETE_WINDOW", False);
     XmAddWMProtocolCallback(app.toplevel, wm_delete, ck_plasma_wm_delete_cb, &app);
+    XmActivateWMProtocol(app.toplevel, wm_delete);
+
+    Atom wm_save = XmInternAtom(XtDisplay(app.toplevel), "WM_SAVE_YOURSELF", False);
+    XmAddWMProtocolCallback(app.toplevel, wm_save, ck_plasma_session_save_cb, &app);
+    XmActivateWMProtocol(app.toplevel, wm_save);
 
     XtRealizeWidget(app.toplevel);
 

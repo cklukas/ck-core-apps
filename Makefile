@@ -79,8 +79,8 @@ $(BIN_DIR)/ck-mines: src/games/ck-mines/ck-mines.c src/shared/session_utils.c sr
 	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/games/ck-mines/ck-mines.c src/shared/session_utils.c src/shared/about_dialog.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
 
 # ck-plasma-1 (Motif/X11 demo, multi-process animation)
-$(BIN_DIR)/ck-plasma-1: src/demos/plasma/ck-plasma-1.c | $(BIN_DIR)
-	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/demos/plasma/ck-plasma-1.c -o $@ $(CDE_LDFLAGS) -lXm -lXt -lX11 -lm
+$(BIN_DIR)/ck-plasma-1: src/demos/plasma/ck-plasma-1.c src/demos/plasma/plasma_renderer.c src/shared/session_utils.c | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/demos/plasma/ck-plasma-1.c src/demos/plasma/plasma_renderer.c src/shared/session_utils.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS) -lXm -lXt -lX11 -lm
 
 clean:
 	rm -rf $(BUILD_DIR)

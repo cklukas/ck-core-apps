@@ -26,7 +26,7 @@ static const TableColumnDef apps_columns[] = {
 Widget tasks_ui_create_applications_tab(TasksUi *ui)
 {
     Widget page = tasks_ui_create_page(ui, "applicationsPage", TASKS_TAB_APPLICATIONS,
-                                       "Applications", "Windows grouped by process.");
+                                       "Applications", "Open application windows.");
 
     ui->apps_table = ck_table_create_standard(page, "appsTable", apps_columns, APPS_COLUMN_COUNT);
     if (!ui->apps_table) {
@@ -138,9 +138,13 @@ void tasks_ui_destroy_applications_tab(TasksUi *ui)
 void tasks_ui_set_applications_table(TasksUi *ui, const TasksApplicationEntry *entries, int count)
 {
     if (!ui || !ui->apps_table) return;
+    Boolean suspended = ck_table_suspend_updates(ui->apps_table);
     ck_table_clear(ui->apps_table);
     ui->apps_selected_row = NULL;
-    if (!entries || count <= 0) return;
+    if (!entries || count <= 0) {
+        ck_table_resume_updates(ui->apps_table, suspended);
+        return;
+    }
 
     for (int i = 0; i < count; ++i) {
         const TasksApplicationEntry *entry = &entries[i];
@@ -178,6 +182,7 @@ void tasks_ui_set_applications_table(TasksUi *ui, const TasksApplicationEntry *e
             XtAddEventHandler(row_widget, ButtonPressMask, False, on_apps_row_press, (XtPointer)ui);
         }
     }
+    ck_table_resume_updates(ui->apps_table, suspended);
 }
 
 static void on_apps_row_press(Widget widget, XtPointer client, XEvent *event, Boolean *continue_to_dispatch)

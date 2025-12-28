@@ -58,6 +58,12 @@ static int window_collection_add_unique(WindowCollection *collection, Window win
 static void window_collection_add_from_atom(Display *dpy, Window root, const char *atom_name, WindowCollection *collection);
 static void window_collection_add_recursive(Display *dpy, Window window, WindowCollection *collection);
 static int query_client_list(Display *dpy, Window root, Window **out_list, unsigned long *out_count);
+static int window_property_contains_atom(Display *dpy, Window window, Atom property, Atom value);
+static int get_window_wm_state(Display *dpy, Window window, long *state_out);
+static int window_is_task_list_window(Display *dpy, Window window);
+static int window_get_net_wm_types(Display *dpy, Window window, Atom **out_types, unsigned long *out_count);
+static int atom_list_contains_any(const Atom *atoms, unsigned long atom_count, const Atom *needles, size_t needle_count);
+static int window_has_net_wm_state(Display *dpy, Window window, const char *state_name);
 
 static void tasks_ctrl_schedule_refresh(TasksController *ctrl);
 static void tasks_ctrl_refresh_applications(TasksController *ctrl);
@@ -154,7 +160,7 @@ static void on_view_refresh(Widget widget, XtPointer client, XtPointer call)
         tasks_ctrl_refresh_applications(ctrl);
         tasks_ctrl_refresh_services(ctrl);
         tasks_ctrl_refresh_users(ctrl);
-        tasks_ui_update_status(ctrl->ui, "Process list refreshed.");
+        // tasks_ui_update_status(ctrl->ui, "Process list refreshed.");
     } else {
         tasks_ui_update_status(ctrl->ui, "Unable to refresh process list.");
     }
@@ -332,22 +338,50 @@ static void get_window_title(Display *dpy, Window window, char *buffer, size_t l
 {
     if (!buffer || len == 0) return;
     buffer[0] = '\0';
-    Atom net_name = XInternAtom(dpy, "_NET_WM_NAME", True);
     Atom utf8 = XInternAtom(dpy, "UTF8_STRING", True);
-    if (net_name != None && utf8 != None) {
+    const char *net_names[] = {
+        "_NET_WM_VISIBLE_NAME",
+        "_NET_WM_NAME"
+    };
+    for (size_t i = 0; i < sizeof(net_names) / sizeof(net_names[0]); ++i) {
+        Atom net_name = XInternAtom(dpy, net_names[i], True);
+        if (net_name == None) continue;
         Atom type = None;
         int format = 0;
         unsigned long nitems = 0;
         unsigned long bytes_after = 0;
         unsigned char *data = NULL;
-        int status = XGetWindowProperty(dpy, window, net_name, 0, 128, False, utf8,
+        int status = XGetWindowProperty(dpy, window, net_name, 0, 128, False, AnyPropertyType,
                                         &type, &format, &nitems, &bytes_after, &data);
-        if (status == Success && data) {
-            snprintf(buffer, len, "%s", (char *)data);
-            XFree(data);
-            return;
+        if (status == Success && data && nitems > 0) {
+            if (type == utf8 || type == XA_STRING) {
+                snprintf(buffer, len, "%s", (char *)data);
+                XFree(data);
+                if (buffer[0]) return;
+            }
         }
+        if (data) XFree(data);
     }
+
+    Atom wm_name = XInternAtom(dpy, "WM_NAME", True);
+    if (wm_name != None) {
+        Atom type = None;
+        int format = 0;
+        unsigned long nitems = 0;
+        unsigned long bytes_after = 0;
+        unsigned char *data = NULL;
+        int status = XGetWindowProperty(dpy, window, wm_name, 0, 128, False, AnyPropertyType,
+                                        &type, &format, &nitems, &bytes_after, &data);
+        if (status == Success && data && nitems > 0) {
+            if (type == utf8 || type == XA_STRING) {
+                snprintf(buffer, len, "%s", (char *)data);
+                XFree(data);
+                if (buffer[0]) return;
+            }
+        }
+        if (data) XFree(data);
+    }
+
     char *name = NULL;
     if (XFetchName(dpy, window, &name) > 0 && name) {
         snprintf(buffer, len, "%s", name);
@@ -541,6 +575,169 @@ static void window_collection_add_recursive(Display *dpy, Window window, WindowC
     if (children) XFree(children);
 }
 
+static int window_property_contains_atom(Display *dpy, Window window, Atom property, Atom value)
+{
+    if (!dpy || property == None || value == None) return 0;
+    Atom actual_type = None;
+    int format = 0;
+    unsigned long nitems = 0;
+    unsigned long bytes_after = 0;
+    unsigned char *data = NULL;
+    int status = XGetWindowProperty(dpy, window, property, 0, 32, False, XA_ATOM,
+                                    &actual_type, &format, &nitems, &bytes_after, &data);
+    if (status != Success || !data || actual_type != XA_ATOM || format != 32) {
+        if (data) XFree(data);
+        return 0;
+    }
+    Atom *atoms = (Atom *)data;
+    int found = 0;
+    for (unsigned long i = 0; i < nitems; ++i) {
+        if (atoms[i] == value) {
+            found = 1;
+            break;
+        }
+    }
+    XFree(data);
+    return found;
+}
+
+static int get_window_wm_state(Display *dpy, Window window, long *state_out)
+{
+    if (!dpy || !state_out) return -1;
+    Atom wm_state = XInternAtom(dpy, "WM_STATE", True);
+    if (wm_state == None) return -1;
+    Atom actual_type = None;
+    int format = 0;
+    unsigned long nitems = 0;
+    unsigned long bytes_after = 0;
+    unsigned char *data = NULL;
+    int status = XGetWindowProperty(dpy, window, wm_state, 0, 2, False, AnyPropertyType,
+                                    &actual_type, &format, &nitems, &bytes_after, &data);
+    if (status != Success || !data || format != 32 || nitems < 1) {
+        if (data) XFree(data);
+        return -1;
+    }
+    long *state = (long *)data;
+    *state_out = state[0];
+    XFree(data);
+    return 0;
+}
+
+static int window_has_net_wm_state(Display *dpy, Window window, const char *state_name)
+{
+    if (!dpy || !state_name) return 0;
+    Atom net_state = XInternAtom(dpy, "_NET_WM_STATE", True);
+    if (net_state == None) return 0;
+    Atom state = XInternAtom(dpy, state_name, True);
+    if (state == None) return 0;
+    return window_property_contains_atom(dpy, window, net_state, state);
+}
+
+static int window_get_net_wm_types(Display *dpy, Window window, Atom **out_types, unsigned long *out_count)
+{
+    if (out_types) *out_types = NULL;
+    if (out_count) *out_count = 0;
+    if (!dpy || window == None || !out_types || !out_count) return 0;
+    Atom net_type = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE", True);
+    if (net_type == None) return 0;
+    Atom actual_type = None;
+    int format = 0;
+    unsigned long nitems = 0;
+    unsigned long bytes_after = 0;
+    unsigned char *data = NULL;
+    int status = XGetWindowProperty(dpy, window, net_type, 0, 32, False, XA_ATOM,
+                                    &actual_type, &format, &nitems, &bytes_after, &data);
+    if (status != Success || !data || actual_type != XA_ATOM || format != 32 || nitems == 0) {
+        if (data) XFree(data);
+        return 0;
+    }
+    *out_types = (Atom *)data;
+    *out_count = nitems;
+    return 1;
+}
+
+static int atom_list_contains_any(const Atom *atoms, unsigned long atom_count, const Atom *needles, size_t needle_count)
+{
+    if (!atoms || atom_count == 0 || !needles || needle_count == 0) return 0;
+    for (unsigned long i = 0; i < atom_count; ++i) {
+        for (size_t j = 0; j < needle_count; ++j) {
+            if (needles[j] != None && atoms[i] == needles[j]) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int window_is_task_list_window(Display *dpy, Window window)
+{
+    if (!dpy || window == None) return 0;
+    XWindowAttributes attrs;
+    if (XGetWindowAttributes(dpy, window, &attrs) == 0) return 0;
+    if (attrs.class != InputOutput || attrs.override_redirect) return 0;
+
+    if (window_has_net_wm_state(dpy, window, "_NET_WM_STATE_SKIP_TASKBAR") ||
+        window_has_net_wm_state(dpy, window, "_NET_WM_STATE_SKIP_PAGER")) {
+        return 0;
+    }
+
+    if (attrs.map_state != IsViewable &&
+        !window_has_net_wm_state(dpy, window, "_NET_WM_STATE_HIDDEN")) {
+        return 0;
+    }
+
+    long state = 0;
+    if (get_window_wm_state(dpy, window, &state) == 0 && state == WithdrawnState) {
+        return 0;
+    }
+
+    Atom type_normal = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_NORMAL", True);
+    Atom type_dialog = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DIALOG", True);
+    Atom type_utility = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_UTILITY", True);
+    Atom type_toolbar = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_TOOLBAR", True);
+    Atom type_menu = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_MENU", True);
+    Atom type_splash = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_SPLASH", True);
+    Atom type_dock = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DOCK", True);
+    Atom type_desktop = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DESKTOP", True);
+    Atom type_notification = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_NOTIFICATION", True);
+    Atom type_dropdown = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DROPDOWN_MENU", True);
+    Atom type_popup = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_POPUP_MENU", True);
+    Atom type_tooltip = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_TOOLTIP", True);
+    Atom type_combo = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_COMBO", True);
+    Atom type_dnd = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DND", True);
+
+    Atom *types = NULL;
+    unsigned long type_count = 0;
+    if (window_get_net_wm_types(dpy, window, &types, &type_count)) {
+        Atom skip_types[] = {
+            type_utility,
+            type_toolbar,
+            type_menu,
+            type_splash,
+            type_dock,
+            type_desktop,
+            type_notification,
+            type_dropdown,
+            type_popup,
+            type_tooltip,
+            type_combo,
+            type_dnd
+        };
+        if (atom_list_contains_any(types, type_count, skip_types, sizeof(skip_types) / sizeof(skip_types[0]))) {
+            XFree(types);
+            return 0;
+        }
+        if (atom_list_contains_any(types, type_count, &type_normal, 1) ||
+            atom_list_contains_any(types, type_count, &type_dialog, 1)) {
+            XFree(types);
+            return 1;
+        }
+        XFree(types);
+    }
+
+    return 1;
+}
+
 static int query_client_list(Display *dpy, Window root, Window **out_list, unsigned long *out_count)
 {
     if (!dpy || !out_list || !out_count) return -1;
@@ -549,6 +746,8 @@ static int query_client_list(Display *dpy, Window root, Window **out_list, unsig
 
     window_collection_add_from_atom(dpy, root, "_NET_CLIENT_LIST_STACKING", &collection);
     window_collection_add_from_atom(dpy, root, "_NET_CLIENT_LIST", &collection);
+    window_collection_add_from_atom(dpy, root, "_DT_WM_CLIENT_LIST", &collection);
+    window_collection_add_from_atom(dpy, root, "_DT_WM_WINDOW_LIST", &collection);
 
     if (collection.count == 0) {
         Window root_ret = 0;
@@ -594,13 +793,15 @@ static void tasks_ctrl_refresh_applications(TasksController *ctrl)
     int entry_capacity = 0;
 
     for (unsigned long i = 0; i < count; ++i) {
+        if (!window_is_task_list_window(dpy, windows[i])) {
+            continue;
+        }
         char title[128] = {0};
         char command[256] = {0};
         char wm_class[128] = {0};
         get_window_title(dpy, windows[i], title, sizeof(title));
         get_window_command(dpy, windows[i], command, sizeof(command));
         get_window_wm_class(dpy, windows[i], wm_class, sizeof(wm_class));
-
         pid_t pid = 0;
         int pid_known = (get_window_pid(dpy, windows[i], &pid) == 0) ? 1 : 0;
         if (!pid_known && command[0]) {
@@ -609,20 +810,6 @@ static void tasks_ctrl_refresh_applications(TasksController *ctrl)
                 pid = matched;
                 pid_known = 1;
             }
-        }
-
-        pid_t key = pid_known ? pid : (pid_t)(-((int)i + 1));
-        int idx = -1;
-        for (int j = 0; j < entry_count; ++j) {
-            if (entries[j].pid == key) {
-                idx = j;
-                break;
-            }
-        }
-
-        if (idx >= 0) {
-            entries[idx].window_count += 1;
-            continue;
         }
 
         if (entry_count >= entry_capacity) {
@@ -636,10 +823,18 @@ static void tasks_ctrl_refresh_applications(TasksController *ctrl)
         TasksApplicationEntry *entry = &entries[entry_count];
         memset(entry, 0, sizeof(*entry));
         entry->window = windows[i];
-        entry->pid = key;
+        entry->pid = pid_known ? pid : -1;
         entry->pid_known = pid_known;
         entry->window_count = 1;
-        snprintf(entry->title, sizeof(entry->title), "%s", title[0] ? title : "(unnamed)");
+        if (title[0]) {
+            snprintf(entry->title, sizeof(entry->title), "%s", title);
+        } else if (wm_class[0]) {
+            snprintf(entry->title, sizeof(entry->title), "%s", wm_class);
+        } else if (command[0]) {
+            snprintf(entry->title, sizeof(entry->title), "%s", command);
+        } else {
+            snprintf(entry->title, sizeof(entry->title), "(untitled)");
+        }
         snprintf(entry->command, sizeof(entry->command), "%s", command);
         snprintf(entry->wm_class, sizeof(entry->wm_class), "%s", wm_class);
         entry_count++;

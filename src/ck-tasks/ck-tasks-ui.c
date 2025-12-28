@@ -115,6 +115,53 @@ static Dimension compute_status_segment_width(Widget frame, Widget label, const 
                        + padding);
 }
 
+static Dimension compute_status_segment_height(Widget frame, Widget label, const char *text)
+{
+    Dimension frame_margin = 0;
+    Dimension shadow = 0;
+    Dimension frame_border = 0;
+    Dimension frame_highlight = 0;
+    Dimension label_margin = 0;
+    Dimension label_highlight = 0;
+    Dimension ml = 0;
+    Dimension mr = 0;
+    Dimension text_h = 0;
+    XtVaGetValues(frame,
+                  XmNmarginHeight, &frame_margin,
+                  XmNshadowThickness, &shadow,
+                  XmNborderWidth, &frame_border,
+                  XmNhighlightThickness, &frame_highlight,
+                  NULL);
+    XtVaGetValues(label,
+                  XmNmarginLeft, &ml,
+                  XmNmarginRight, &mr,
+                  XmNmarginWidth, &label_margin,
+                  XmNhighlightThickness, &label_highlight,
+                  NULL);
+    XmFontList font_list = NULL;
+    XtVaGetValues(label, XmNfontList, &font_list, NULL);
+    if (font_list) {
+        XmString xm = XmStringCreateLocalized((String)(text ? text : "Ag"));
+        Dimension w = 0;
+        Dimension h = 0;
+        XmStringExtent(font_list, xm, &w, &h);
+        XmStringFree(xm);
+        text_h = h;
+    } else {
+        text_h = 16;
+    }
+    Dimension padding = 0;
+    return (Dimension)(text_h
+                       + (2 * frame_margin)
+                       + (2 * shadow)
+                       + (2 * frame_border)
+                       + (2 * frame_highlight)
+                       + ml + mr
+                       + (2 * label_margin)
+                       + (2 * label_highlight)
+                       + padding);
+}
+
 static void autosize_status_bar(TasksUi *ui)
 {
     if (!ui) return;
@@ -168,6 +215,18 @@ static void autosize_status_bar(TasksUi *ui)
     Dimension w_mem = compute_status_segment_width(ui->status_frame_memory,
                                                    ui->status_memory_label,
                                                    ui->status_memory_text);
+    Dimension h_processes = compute_status_segment_height(ui->status_frame_processes,
+                                                          ui->status_processes_label,
+                                                          ui->status_processes_text);
+    Dimension h_cpu = compute_status_segment_height(ui->status_frame_cpu,
+                                                    ui->status_cpu_label,
+                                                    ui->status_cpu_text);
+    Dimension h_mem = compute_status_segment_height(ui->status_frame_memory,
+                                                    ui->status_memory_label,
+                                                    ui->status_memory_text);
+    Dimension target_h = h_processes;
+    if (h_cpu > target_h) target_h = h_cpu;
+    if (h_mem > target_h) target_h = h_mem;
 
     Boolean changed = False;
     if (w_processes > ui->status_bar_width_processes) {
@@ -186,6 +245,13 @@ static void autosize_status_bar(TasksUi *ui)
         changed = True;
     }
 
+    if (target_h > 0) {
+        XtVaSetValues(ui->status_frame_processes, XmNheight, target_h, NULL);
+        XtVaSetValues(ui->status_frame_cpu, XmNheight, target_h, NULL);
+        XtVaSetValues(ui->status_frame_memory, XmNheight, target_h, NULL);
+        XtVaSetValues(ui->status_frame_message, XmNheight, target_h, NULL);
+    }
+
     (void)changed;
 }
 
@@ -201,7 +267,7 @@ static Widget create_status_segment(Widget parent, const char *name, Widget *out
     XtManageChild(frame);
 
     Widget label = XtVaCreateManagedWidget(
-        "statusSegmentLabel",
+        "",
         xmLabelGadgetClass, frame,
         XmNalignment, XmALIGNMENT_BEGINNING,
         XmNmarginLeft, 4,
@@ -276,7 +342,7 @@ static Widget create_status_bar(TasksUi *ui, Widget parent)
     tasks_ui_status_set_label_text(ui->status_memory_label, ui->status_memory_text,
                                    sizeof(ui->status_memory_text), "Physical Memory: 0% (0 GB/0 GB)");
     tasks_ui_status_set_label_text(ui->status_message_label, ui->status_message_text,
-                                   sizeof(ui->status_message_text), "Status: idle");
+                                   sizeof(ui->status_message_text), " ");
 
     autosize_status_bar(ui);
     return status_form;

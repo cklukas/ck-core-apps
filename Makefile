@@ -1,9 +1,20 @@
 CC ?= cc
+CXX ?= c++
+AR ?= ar
 CFLAGS ?= -O2 -Wall -Isrc -Ilib
+CXXFLAGS ?= -O2 -Wall -Isrc -Ilib -std=c++17
+
+.DEFAULT_GOAL := all
 
 # Where to place build artifacts
 BUILD_DIR ?= build
 BIN_DIR := $(BUILD_DIR)/bin
+
+CEF_WRAPPER_SRC_DIR := third_party/cef/libcef_dll
+CEF_WRAPPER_SRCS := $(shell find $(CEF_WRAPPER_SRC_DIR) -name '*.cc' | sort)
+CEF_WRAPPER_OBJS := $(patsubst $(CEF_WRAPPER_SRC_DIR)/%.cc,$(BUILD_DIR)/cef-wrapper/%.o,$(CEF_WRAPPER_SRCS))
+CEF_WRAPPER_LIB := $(BUILD_DIR)/libcef_dll_wrapper.a
+CEF_WRAPPER_CFLAGS := -I$(CEF_WRAPPER_SRC_DIR) -Ithird_party/cef
 
 # CDE include/lib paths (override on CLI if different on your system)
 CDE_PREFIX ?= /usr/local/CDE
@@ -13,6 +24,17 @@ CDE_LIB ?= $(CDE_PREFIX)/lib
 CDE_CFLAGS := -I$(CDE_INC)
 CDE_LDFLAGS := -L$(CDE_LIB)
 CDE_LIBS := -lDtSvc -lDtXinerama -lDtWidget -ltt -lXm -lXt -lSM -lICE -lXinerama -lX11 -lXpm
+CEF_CFLAGS := -Ithird_party/cef/include
+CEF_LDFLAGS := -Lthird_party/cef/lib
+CEF_LIBS := -lcef -ldl -lpthread
+CEF_RPATH := -Wl,-rpath,$(abspath third_party/cef/lib)
+
+$(CEF_WRAPPER_LIB): $(CEF_WRAPPER_OBJS)
+	$(AR) rcs $@ $^
+
+$(BUILD_DIR)/cef-wrapper/%.o: $(CEF_WRAPPER_SRC_DIR)/%.cc
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(CEF_CFLAGS) $(CEF_WRAPPER_CFLAGS) -DWRAPPING_CEF_SHARED -c $< -o $@
 
 PROGRAMS := $(BIN_DIR)/ck-about \
             $(BIN_DIR)/ck-load \
@@ -73,8 +95,15 @@ $(BIN_DIR)/ck-character-map: src/ck-character-map/ck-character-map.c src/shared/
 	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-character-map/ck-character-map.c src/shared/session_utils.c src/shared/about_dialog.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
 
 # ck-browser
-$(BIN_DIR)/ck-browser: src/ck-browser/ck-browser.c src/shared/about_dialog.c src/shared/about_dialog.h | $(BIN_DIR)
-	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-browser/ck-browser.c src/shared/about_dialog.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
+$(BIN_DIR)/ck-browser: src/ck-browser/ck-browser.cpp \
+    src/shared/about_dialog.c src/shared/about_dialog.h \
+    src/shared/session_utils.c src/shared/session_utils.h \
+    src/shared/config_utils.c src/shared/config_utils.h \
+    $(CEF_WRAPPER_LIB) | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) -c src/shared/about_dialog.c -o $(BUILD_DIR)/ck-browser-about_dialog.o
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) -c src/shared/session_utils.c -o $(BUILD_DIR)/ck-browser-session_utils.o
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) -c src/shared/config_utils.c -o $(BUILD_DIR)/ck-browser-config_utils.o
+	$(CXX) $(CXXFLAGS) $(CDE_CFLAGS) $(CEF_CFLAGS) $(CEF_WRAPPER_CFLAGS) src/ck-browser/ck-browser.cpp $(BUILD_DIR)/ck-browser-about_dialog.o $(BUILD_DIR)/ck-browser-session_utils.o $(BUILD_DIR)/ck-browser-config_utils.o $(CEF_WRAPPER_LIB) -o $@ $(CDE_LDFLAGS) $(CEF_LDFLAGS) $(CEF_RPATH) $(CDE_LIBS) $(CEF_LIBS)
 
 # ck-nibbles (Motif/X11 game, with CDE session dependency)
 $(BIN_DIR)/ck-nibbles: src/games/ck-nibbles/ck-nibbles.c src/shared/about_dialog.c src/shared/about_dialog.h src/shared/session_utils.c src/shared/session_utils.h | $(BIN_DIR)

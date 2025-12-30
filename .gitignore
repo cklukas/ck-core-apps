@@ -11,3 +11,5 @@ src/ck-clock/ck-clock
 # Misc
 src/ck-clock/log.txt
 screenshots/test*.png
+restore/
+third_party/cef/

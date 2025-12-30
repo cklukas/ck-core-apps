@@ -70,6 +70,7 @@ extern "C" {
 #include <include/cef_ssl_status.h>
 #include <include/cef_image.h>
 #include <include/cef_values.h>
+#include <include/cef_parser.h>
 #include <include/internal/cef_linux.h>
 #include <include/wrapper/cef_helpers.h>
 
@@ -108,6 +109,7 @@ static bool g_tab_handlers_attached = false;
 static SessionData *g_session_data = NULL;
 static bool g_session_loaded = false;
 static bool g_force_disable_gpu = false;
+static bool g_cef_initialized = false;
 
 struct BrowserTab {
     Widget page = NULL;
@@ -219,7 +221,9 @@ static bool g_bookmarks_path_ready = false;
 static time_t g_bookmarks_file_mtime = 0;
 static std::string normalize_url(const char *input);
 static const char *display_url_for_tab(const BrowserTab *tab);
+static void update_url_field_for_tab(BrowserTab *tab);
 static bool is_devtools_url(const std::string &url);
+static bool is_url_parseable(const std::string &url);
 static void show_devtools_for_tab(BrowserTab *tab, int inspect_x, int inspect_y);
 static void start_devtools_browser_cb(XtPointer client_data, XtIntervalId *id);
 static char *xm_name(const char *name);
@@ -551,6 +555,28 @@ class BrowserClient : public CefClient,
     }
   }
 
+  void OnLoadStart(CefRefPtr<CefBrowser> browser,
+                   CefRefPtr<CefFrame> frame,
+                   TransitionType transition_type) override {
+    CEF_REQUIRE_UI_THREAD();
+    (void)browser;
+    (void)transition_type;
+    if (!tab_ || !frame || !frame->IsMain()) return;
+    std::string url = frame->GetURL().ToString();
+    if (url.empty()) return;
+    tab_->pending_url = url;
+    std::string host = extract_host_from_url(url);
+    if (host != tab_->current_host) {
+      tab_->current_host = host;
+      clear_tab_favicon(tab_);
+    }
+    tab_->loading = true;
+    if (tab_ == g_current_tab) {
+      update_url_field_for_tab(tab_);
+      update_reload_button_for_tab(tab_);
+    }
+  }
+
   void OnLoadEnd(CefRefPtr<CefBrowser> browser,
                  CefRefPtr<CefFrame> frame,
                  int httpStatusCode) override {
@@ -813,10 +839,10 @@ class BrowserClient : public CefClient,
                             bool canGoForward) override {
     CEF_REQUIRE_UI_THREAD();
     (void)browser;
-    (void)isLoading;
     if (!tab_) return;
     tab_->can_go_back = canGoBack;
     tab_->can_go_forward = canGoForward;
+    tab_->loading = isLoading;
     if (!isLoading) {
       update_tab_security_status(tab_);
       if (tab_ == g_current_tab) {
@@ -825,6 +851,7 @@ class BrowserClient : public CefClient,
     }
     if (tab_ == g_current_tab) {
       update_navigation_buttons(tab_);
+      update_reload_button_for_tab(tab_);
     }
   }
 
@@ -1344,6 +1371,14 @@ static std::string normalize_url(const char *input)
         normalized.insert(0, "https://");
     }
     return normalized;
+}
+
+static bool is_url_parseable(const std::string &url)
+{
+    if (url.empty()) return false;
+    CefURLParts parts;
+    CefString cef_url(url);
+    return CefParseURL(cef_url, parts);
 }
 
 static const char *window_disposition_name(cef_window_open_disposition_t disposition)
@@ -2500,6 +2535,17 @@ static void request_favicon_download(BrowserTab *tab, const char *reason)
 
 static void update_favicon_controls(BrowserTab *tab)
 {
+    const char *tab_label = tab ? (tab->base_title.empty() ? "Tab" : tab->base_title.c_str()) : "(none)";
+    const char *host = tab ? tab->current_host.c_str() : "(none)";
+    const char *url = tab ? (tab->favicon_url.empty() ? "(none)" : tab->favicon_url.c_str()) : "(none)";
+    fprintf(stderr,
+            "[ck-browser] update_favicon_controls tab=%s (%p) host=%s url=%s pixmap=%s window=%s\n",
+            tab_label,
+            (void *)tab,
+            host,
+            url,
+            tab && tab->favicon_toolbar_pixmap != None ? "toolbar" : "no-toolbar",
+            tab && tab->favicon_window_pixmap != None ? "window" : "no-window");
     if (g_favicon_label) {
         Pixmap pix = (tab && tab->favicon_toolbar_pixmap != None) ? tab->favicon_toolbar_pixmap : XmUNSPECIFIED_PIXMAP;
         int size = desired_favicon_size();
@@ -2546,6 +2592,11 @@ update_reload_button_for_tab(BrowserTab *tab)
 static void
 clear_tab_favicon(BrowserTab *tab)
 {
+    fprintf(stderr,
+            "[ck-browser] clear_tab_favicon tab=%p host=%s url=%s\n",
+            (void *)tab,
+            tab ? (tab->current_host.empty() ? "(none)" : tab->current_host.c_str()) : "(none)",
+            tab ? (tab->favicon_url.empty() ? "(none)" : tab->favicon_url.c_str()) : "(none)");
     if (!tab) return;
     Display *display = g_toplevel ? XtDisplay(g_toplevel) : NULL;
     if (tab->favicon_toolbar_pixmap != None && display) {
@@ -2741,7 +2792,7 @@ static void on_url_activate(Widget w, XtPointer client_data, XtPointer call_data
     }
     if (normalized.find("://") != std::string::npos) {
         std::string host = extract_host_from_url(normalized);
-        if (host.empty()) {
+        if (host.empty() || !is_url_parseable(normalized)) {
             show_invalid_url_dialog(typed.c_str());
             set_status_label_text("Invalid URL");
             return;
@@ -2807,7 +2858,15 @@ static void on_reload(Widget w, XtPointer client_data, XtPointer call_data)
         log_widget_size("main window (reload)", g_toplevel);
     }
     resize_cef_browser_to_area(tab, "reload");
-    tab->browser->Reload();
+    if (tab->loading) {
+        tab->browser->StopLoad();
+        tab->loading = false;
+        if (tab == g_current_tab) {
+            update_reload_button_for_tab(tab);
+        }
+    } else {
+        tab->browser->Reload();
+    }
 }
 
 static void on_home(Widget w, XtPointer client_data, XtPointer call_data)
@@ -3776,6 +3835,7 @@ static void set_current_tab(BrowserTab *tab)
         set_status_label_text(NULL);
     }
     update_navigation_buttons(tab);
+    update_reload_button_for_tab(tab);
     update_security_controls(tab);
     update_favicon_controls(tab);
     if (tab && tab->browser) {
@@ -4445,7 +4505,17 @@ bookmark_entry_copy_icon_from_cache(BookmarkEntry *entry, const char *url)
 static Pixmap
 create_bookmark_icon_pixmap(BookmarkEntry *entry, int target_size, Pixel bg_pixel)
 {
-    if (!entry || entry->icon_raw.empty() || entry->icon_width <= 0 || entry->icon_height <= 0 || target_size <= 0) {
+    if (!entry || target_size <= 0) {
+        return None;
+    }
+    if (entry->icon_raw.empty() && g_cef_initialized && !entry->icon_png.empty()) {
+        if (bookmark_entry_set_icon_png(entry, entry->icon_png.data(), entry->icon_png.size())) {
+            fprintf(stderr,
+                    "[ck-browser] bookmark icon converted post-CEF for entry='%s'\n",
+                    entry->name.empty() ? "(none)" : entry->name.c_str());
+        }
+    }
+    if (entry->icon_raw.empty() || entry->icon_width <= 0 || entry->icon_height <= 0) {
         return None;
     }
     if (!g_toplevel) return None;
@@ -4639,7 +4709,14 @@ find_or_create_child_group(BookmarkGroup *parent, const std::string &name)
 static void
 parse_netscape_bookmarks(const std::string &content, BookmarkGroup *root)
 {
-    if (!root) return;
+    if (!root) {
+        fprintf(stderr, "[ck-browser] parse_netscape_bookmarks called with null root\n");
+        return;
+    }
+    fprintf(stderr,
+            "[ck-browser] parse_netscape_bookmarks start len=%zu root=%p\n",
+            content.size(),
+            (void *)root);
     std::vector<BookmarkGroup *> stack;
     stack.push_back(root);
     size_t pos = 0;
@@ -4649,6 +4726,14 @@ parse_netscape_bookmarks(const std::string &content, BookmarkGroup *root)
         size_t gt = content.find('>', lt);
         if (gt == std::string::npos) break;
         std::string tag = content.substr(lt + 1, gt - lt - 1);
+        std::string tag_preview = tag.substr(0, std::min(tag.size(), (size_t)128));
+        fprintf(stderr,
+                "[ck-browser] parse loop pos=%zu lt=%zu gt=%zu stack=%zu tag_preview='%s'\n",
+                pos,
+                lt,
+                gt,
+                stack.size(),
+                tag_preview.c_str());
         size_t name_start = 0;
         while (name_start < tag.size() && isspace((unsigned char)tag[name_start])) {
             name_start++;
@@ -4689,6 +4774,11 @@ parse_netscape_bookmarks(const std::string &content, BookmarkGroup *root)
                 std::string trimmed = trim_whitespace(folder_name);
                 BookmarkGroup *child = find_or_create_child_group(parent, trimmed);
                 if (child) {
+                    fprintf(stderr,
+                            "[ck-browser] parse bookmark folder='%s' parent='%s' child='%s'\n",
+                            trimmed.c_str(),
+                            parent ? parent->name.c_str() : "(null)",
+                            child->name.c_str());
                     stack.push_back(child);
                 }
                 pos = end_pos;
@@ -4714,10 +4804,17 @@ parse_netscape_bookmarks(const std::string &content, BookmarkGroup *root)
                     if (extract_base64_payload(icon_value, payload)) {
                         std::vector<unsigned char> icon_bytes;
                         if (base64_decode(payload, icon_bytes)) {
-                            bookmark_entry_set_icon_png(entry.get(), icon_bytes.data(), icon_bytes.size());
+                            entry->icon_png = icon_bytes;
+                            entry->icon_width = 0;
+                            entry->icon_height = 0;
                         }
                     }
                 }
+                fprintf(stderr,
+                        "[ck-browser] parse bookmark entry name='%s' url='%s' show=%s\n",
+                        entry->name.c_str(),
+                        entry->url.c_str(),
+                        show_in_menu.c_str());
                 current->entries.emplace_back(std::move(entry));
                 pos = end_pos;
                 continue;
@@ -4733,6 +4830,7 @@ save_bookmarks_to_file()
     if (!g_bookmark_root) return;
     const char *path = get_bookmarks_file_path();
     if (!path || path[0] == '\0') return;
+    fprintf(stderr, "[ck-browser] saving bookmarks to %s\n", path);
     ensure_path_directory(path);
     FILE *f = fopen(path, "wb");
     if (!f) return;
@@ -4746,9 +4844,11 @@ load_bookmarks_from_file()
 {
     const char *path = get_bookmarks_file_path();
     if (!path || path[0] == '\0') return nullptr;
+    fprintf(stderr, "[ck-browser] loading bookmarks from %s\n", path);
     time_t new_mtime = get_file_mtime(path);
     FILE *f = fopen(path, "rb");
     if (!f) {
+        fprintf(stderr, "[ck-browser] load_bookmarks_from_file failed to open %s\n", path);
         g_bookmarks_file_mtime = new_mtime;
         return nullptr;
     }
@@ -4763,6 +4863,10 @@ load_bookmarks_from_file()
     root->name = "Bookmarks Menu";
     parse_netscape_bookmarks(content, root.get());
     g_bookmarks_file_mtime = new_mtime;
+    fprintf(stderr,
+            "[ck-browser] bookmarks loaded, groups=%zu entries=%zu\n",
+            root->children.size(),
+            root->entries.size());
     return root;
 }
 
@@ -4780,6 +4884,8 @@ bookmark_file_monitor_timer_cb(XtPointer client_data, XtIntervalId *id)
                 current = get_file_mtime(path);
             }
             if (current != g_bookmarks_file_mtime) {
+                fprintf(stderr, "[ck-browser] bookmark monitor detected change (current=%ld prior=%ld)\n",
+                        (long)current, (long)g_bookmarks_file_mtime);
                 std::unique_ptr<BookmarkGroup> loaded = load_bookmarks_from_file();
                 if (loaded) {
                     g_bookmark_root = std::move(loaded);
@@ -4859,6 +4965,9 @@ rebuild_bookmarks_menu_items()
     if (!root) return;
     std::vector<BookmarkEntry *> favorites;
     collect_bookmark_menu_entries(root, favorites);
+    fprintf(stderr,
+            "[ck-browser] rebuild_bookmarks_menu_items found %zu favorites\n",
+            favorites.size());
     static const char *kFavoriteAccelerators[] = {
         "Ctrl<Key>1", "Ctrl<Key>2", "Ctrl<Key>3", "Ctrl<Key>4", "Ctrl<Key>5",
         "Ctrl<Key>6", "Ctrl<Key>7", "Ctrl<Key>8", "Ctrl<Key>9"};
@@ -4874,6 +4983,11 @@ rebuild_bookmarks_menu_items()
     for (size_t i = 0; i < favorites.size(); ++i) {
         BookmarkEntry *entry = favorites[i];
         if (!entry) continue;
+        fprintf(stderr,
+                "[ck-browser] bookmark menu entry %zu: name='%s' url='%s'\n",
+                i,
+                entry->name.empty() ? "(no name)" : entry->name.c_str(),
+                entry->url.empty() ? "(no url)" : entry->url.c_str());
         char name_buf[64];
         snprintf(name_buf, sizeof(name_buf), "bookmarkFavorite%p", (void *)entry);
         std::string label = entry->name.empty() ? entry->url : entry->name;
@@ -5089,33 +5203,43 @@ show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry, BookmarkGroup *e
                   XmNautoUnmanage, False,
                   XmNmarginWidth, 10,
                   XmNmarginHeight, 10,
-                  XmNwidth, 420,
-                  XmNheight, 380,
+                  XmNwidth, 440,
+                  XmNheight, 420,
                   XmNtitle, dialog_title,
                   NULL);
     ctx->dialog = dialog;
 
-    Widget name_label = XmCreateLabelGadget(dialog, xm_name("bookmarkNameLabel"), NULL, 0);
+    Widget column = XmCreateRowColumn(dialog, xm_name("bookmarkDialogColumn"), NULL, 0);
+    XtVaSetValues(column,
+                  XmNorientation, XmVERTICAL,
+                  XmNpacking, XmPACK_COLUMN,
+                  XmNspacing, 8,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNtopOffset, 4,
+                  XmNbottomOffset, 4,
+                  XmNleftOffset, 4,
+                  XmNrightOffset, 4,
+                  NULL);
+    XtManageChild(column);
+
+    Widget name_label = XmCreateLabelGadget(column, xm_name("bookmarkNameLabel"), NULL, 0);
     XmString name_label_text = make_string("Name:");
     XtVaSetValues(name_label,
                   XmNlabelString, name_label_text,
                   XmNalignment, XmALIGNMENT_BEGINNING,
-                  XmNtopAttachment, XmATTACH_FORM,
-                  XmNleftAttachment, XmATTACH_FORM,
-                  XmNtopOffset, 2,
                   NULL);
     XmStringFree(name_label_text);
     XtManageChild(name_label);
 
-    Widget name_field = XmCreateTextField(dialog, xm_name("bookmarkNameField"), NULL, 0);
+    Widget name_field = XmCreateTextField(column, xm_name("bookmarkNameField"), NULL, 0);
     XtVaSetValues(name_field,
-                  XmNtopAttachment, XmATTACH_WIDGET,
-                  XmNtopWidget, name_label,
-                  XmNleftAttachment, XmATTACH_FORM,
-                  XmNrightAttachment, XmATTACH_FORM,
-                  XmNleftOffset, 0,
-                  XmNrightOffset, 0,
-                  XmNtopOffset, 4,
+                  XmNcolumns, 60,
+                  XmNeditable, True,
+                  XmNresizable, True,
+                  XmNvalue, "",
                   NULL);
     XtManageChild(name_field);
     const char *prefill = NULL;
@@ -5133,17 +5257,13 @@ show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry, BookmarkGroup *e
     }
     ctx->name_field = name_field;
 
-    Widget tree_frame = XmCreateFrame(dialog, xm_name("bookmarkTargetFrame"), NULL, 0);
+    Widget tree_frame = XmCreateFrame(column, xm_name("bookmarkTargetFrame"), NULL, 0);
     XtVaSetValues(tree_frame,
-                  XmNtopAttachment, XmATTACH_WIDGET,
-                  XmNtopWidget, name_field,
-                  XmNleftAttachment, XmATTACH_FORM,
-                  XmNrightAttachment, XmATTACH_FORM,
-                  XmNtopOffset, 10,
-                  XmNbottomOffset, 10,
-                  XmNleftOffset, 0,
-                  XmNrightOffset, 0,
-                  XmNheight, 220,
+                  XmNshadowType, XmSHADOW_ETCHED_IN,
+                  XmNshadowThickness, 2,
+                  XmNwidth, 420,
+                  XmNheight, 240,
+                  XmNresizePolicy, XmRESIZE_ANY,
                   NULL);
     XtManageChild(tree_frame);
 
@@ -5159,34 +5279,23 @@ show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry, BookmarkGroup *e
     XtManageChild(outline);
     ctx->group_outline = outline;
 
-    Widget button_row = XmCreateRowColumn(dialog, xm_name("bookmarkButtonRow"), NULL, 0);
-    XtVaSetValues(button_row,
-                  XmNorientation, XmHORIZONTAL,
+    Widget bottom_column = XmCreateRowColumn(column, xm_name("bookmarkBottomColumn"), NULL, 0);
+    XtVaSetValues(bottom_column,
+                  XmNorientation, XmVERTICAL,
                   XmNpacking, XmPACK_TIGHT,
-                  XmNbottomAttachment, XmATTACH_FORM,
-                  XmNleftAttachment, XmATTACH_FORM,
-                  XmNrightAttachment, XmATTACH_FORM,
-                  XmNbottomOffset, 10,
-                  XmNleftOffset, 0,
-                  XmNrightOffset, 0,
-                  XmNspacing, 10,
+                  XmNspacing, 8,
+                  XmNwidth, 420,
+                  XmNalignment, XmALIGNMENT_BEGINNING,
                   NULL);
-    XtManageChild(button_row);
+    XtManageChild(bottom_column);
 
     XmString toggle_label = make_string("Add to Bookmarks Menu");
     Widget add_to_menu_toggle = XtVaCreateManagedWidget(
         "bookmarkDialogAddToMenu",
         xmToggleButtonWidgetClass,
-        dialog,
+        bottom_column,
         XmNlabelString, toggle_label,
-        XmNtopAttachment, XmATTACH_WIDGET,
-        XmNtopWidget, tree_frame,
-        XmNbottomAttachment, XmATTACH_WIDGET,
-        XmNbottomWidget, button_row,
-        XmNleftAttachment, XmATTACH_FORM,
-        XmNrightAttachment, XmATTACH_FORM,
-        XmNtopOffset, 8,
-        XmNbottomOffset, 6,
+        XmNalignment, XmALIGNMENT_BEGINNING,
         NULL);
     XmStringFree(toggle_label);
     Boolean toggle_state = False;
@@ -5195,16 +5304,14 @@ show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry, BookmarkGroup *e
     }
     XmToggleButtonSetState(add_to_menu_toggle, toggle_state, False);
     ctx->add_to_menu_checkbox = add_to_menu_toggle;
+    Widget button_row = XmCreateRowColumn(bottom_column, xm_name("bookmarkButtonRow"), NULL, 0);
     XtVaSetValues(button_row,
-                  XmNtopAttachment, XmATTACH_WIDGET,
-                  XmNtopWidget, add_to_menu_toggle,
-                  XmNtopOffset, 8,
+                  XmNorientation, XmHORIZONTAL,
+                  XmNpacking, XmPACK_TIGHT,
+                  XmNspacing, 10,
+                  XmNalignment, XmALIGNMENT_CENTER,
                   NULL);
-    XtVaSetValues(tree_frame,
-                  XmNbottomAttachment, XmATTACH_WIDGET,
-                  XmNbottomWidget, add_to_menu_toggle,
-                  XmNbottomOffset, 6,
-                  NULL);
+    XtManageChild(button_row);
 
     ctx->group_entries.clear();
     ctx->group_nodes.clear();
@@ -5799,6 +5906,8 @@ int main(int argc, char *argv[])
     if (g_homepage_url.empty()) {
         g_homepage_url = kInitialBrowserUrl;
     }
+    fprintf(stderr, "[ck-browser] homepage URL=%s\n",
+            g_homepage_url.empty() ? "(empty)" : g_homepage_url.c_str());
 
     build_cwd_path(g_resources_path, sizeof(g_resources_path), "third_party/cef/resources");
     build_cwd_path(g_locales_path, sizeof(g_locales_path), "third_party/cef/locales");
@@ -5806,6 +5915,10 @@ int main(int argc, char *argv[])
         build_cwd_path(g_locales_path, sizeof(g_locales_path), "third_party/cef/resources/locales");
     }
     get_exe_path(g_subprocess_path, sizeof(g_subprocess_path));
+    fprintf(stderr, "[ck-browser] resource_path=%s locales_path=%s subprocess=%s\n",
+            g_resources_path[0] ? g_resources_path : "(none)",
+            g_locales_path[0] ? g_locales_path : "(none)",
+            g_subprocess_path[0] ? g_subprocess_path : "(none)");
 
     g_force_disable_gpu = !has_opengl_support();
     if (g_force_disable_gpu) {
@@ -5826,6 +5939,11 @@ int main(int argc, char *argv[])
 
     std::vector<char *> cef_argv;
     build_cef_argv(argc, argv, &cef_argv);
+    fprintf(stderr, "[ck-browser] cef args:");
+    for (int i = 0; i < (int)cef_argv.size(); ++i) {
+        fprintf(stderr, " %s", cef_argv[i] ? cef_argv[i] : "(null)");
+    }
+    fprintf(stderr, "\n");
     CefMainArgs main_args((int)cef_argv.size(), cef_argv.data());
     if (g_force_disable_gpu) {
         apply_gpu_switches();
@@ -5848,6 +5966,7 @@ int main(int argc, char *argv[])
     XtAppContext app;
     Widget toplevel = XtVaAppInitialize(&app, "CkBrowser", NULL, 0,
                                         &argc, argv, NULL, NULL);
+    fprintf(stderr, "[ck-browser] XtAppInitialize returned with toplevel=%p\n", (void *)toplevel);
     g_app = app;
     g_toplevel = toplevel;
     DtInitialize(XtDisplay(toplevel), toplevel, xm_name("CkBrowser"), xm_name("CkBrowser"));
@@ -5922,6 +6041,7 @@ int main(int argc, char *argv[])
     XtAddCallback(toplevel, XmNresizeCallback, on_main_window_resize, NULL);
 
     XtRealizeWidget(toplevel);
+    fprintf(stderr, "[ck-browser] XtRealizeWidget completed\n");
     XtAppAddTimeOut(app, 0, attach_tab_handlers_cb, NULL);
     XtAppAddTimeOut(app, 1000, bookmark_file_monitor_timer_cb, NULL);
 
@@ -5983,6 +6103,9 @@ int main(int argc, char *argv[])
     if (!cef_ok) {
         return 1;
     }
+    g_cef_initialized = true;
+    fprintf(stderr, "[ck-browser] CEF initialized, refreshing bookmark icons\n");
+    rebuild_bookmarks_menu_items();
 
     XtAppMainLoop(app);
     save_last_session_file("main loop exit");

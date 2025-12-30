@@ -11,9 +11,12 @@
 #include <Xm/PushB.h>
 #include <Xm/RowColumn.h>
 #include <Xm/SeparatoG.h>
+#include <Xm/ScrolledW.h>
+#include <Xm/List.h>
 #include <Xm/TabBox.h>
 #include <Xm/TabStack.h>
 #include <Xm/TextF.h>
+#include <Xm/ToggleB.h>
 #include <X11/Intrinsic.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -133,9 +136,47 @@ struct BrowserTab {
     bool devtools_show_scheduled = false;
 };
 
+struct BookmarkEntry {
+    std::string name;
+    std::string url;
+    bool show_in_menu = false;
+};
+
+struct BookmarkGroup {
+    std::string name;
+    std::vector<std::unique_ptr<BookmarkEntry>> entries;
+    std::vector<std::unique_ptr<BookmarkGroup>> children;
+};
+
+struct BookmarkDialogContext {
+    Widget dialog = NULL;
+    Widget name_field = NULL;
+    Widget group_list = NULL;
+    Widget add_to_menu_checkbox = NULL;
+    std::vector<BookmarkGroup *> group_entries;
+    BookmarkEntry *editing_entry = NULL;
+    BookmarkGroup *editing_group = NULL;
+};
+
+struct BookmarkManagerContext {
+    Widget dialog = NULL;
+    Widget group_list = NULL;
+    Widget bookmark_list = NULL;
+    Widget open_button = NULL;
+    Widget edit_button = NULL;
+    std::vector<BookmarkGroup *> group_entries;
+    std::vector<BookmarkEntry *> entry_items;
+    BookmarkGroup *selected_group = NULL;
+    BookmarkEntry *selected_entry = NULL;
+};
+
 static std::vector<std::unique_ptr<BrowserTab>> g_browser_tabs;
 static BrowserTab *g_current_tab = NULL;
 static bool g_cef_message_pump_started = false;
+static std::unique_ptr<BookmarkGroup> g_bookmark_root;
+static BookmarkGroup *g_selected_bookmark_group = NULL;
+static Widget g_bookmarks_menu = NULL;
+static std::vector<Widget> g_bookmark_menu_items;
 static const char *kInitialBrowserUrl = "https://www.wikipedia.org";
 static std::string normalize_url(const char *input);
 static const char *display_url_for_tab(const BrowserTab *tab);
@@ -171,6 +212,28 @@ static void poll_zoom_levels();
 static void on_zoom_reset(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_zoom_in(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_zoom_out(Widget w, XtPointer client_data, XtPointer call_data);
+static BookmarkGroup *ensure_bookmark_groups();
+static BookmarkGroup *add_bookmark_group(BookmarkGroup *parent, const char *name);
+static void collect_bookmark_groups(BookmarkGroup *group,
+                                    std::vector<BookmarkGroup *> &entries,
+                                    std::vector<std::string> &labels,
+                                    int depth);
+static void collect_bookmark_menu_entries(BookmarkGroup *group,
+                                          std::vector<BookmarkEntry *> &entries);
+static void rebuild_bookmarks_menu_items();
+static void on_bookmark_menu_activate(Widget w, XtPointer client_data, XtPointer call_data);
+static void bookmark_group_selection_cb(Widget w, XtPointer client_data, XtPointer call_data);
+static void on_bookmark_dialog_save(Widget w, XtPointer client_data, XtPointer call_data);
+static void on_bookmark_dialog_cancel(Widget w, XtPointer client_data, XtPointer call_data);
+static void show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry = NULL, BookmarkGroup *group = NULL);
+static void close_bookmark_manager_dialog(BookmarkManagerContext *ctx);
+static void bookmark_manager_update_entry_list(BookmarkManagerContext *ctx);
+static void bookmark_manager_group_selection_cb(Widget w, XtPointer client_data, XtPointer call_data);
+static void bookmark_manager_entry_selection_cb(Widget w, XtPointer client_data, XtPointer call_data);
+static void on_bookmark_manager_open(Widget w, XtPointer client_data, XtPointer call_data);
+static void on_bookmark_manager_edit(Widget w, XtPointer client_data, XtPointer call_data);
+static void on_bookmark_manager_cancel(Widget w, XtPointer client_data, XtPointer call_data);
+static void show_bookmark_manager_dialog();
 static void set_security_label_text(const char *text);
 static void update_security_controls(BrowserTab *tab);
 static void update_tab_security_status(BrowserTab *tab);
@@ -3535,26 +3598,13 @@ static void on_help_view(Widget w, XtPointer client_data, XtPointer call_data)
     XtManageChild(dialog);
 }
 
-static void show_bookmark_placeholder_dialog(const char *name, const char *message)
-{
-    if (!g_toplevel || !name || !message) return;
-    Widget dialog = XmCreateInformationDialog(g_toplevel, xm_name(name), NULL, 0);
-    XmString msg = make_string(message);
-    XtVaSetValues(dialog, XmNmessageString, msg, NULL);
-    XmStringFree(msg);
-    XtAddCallback(dialog, XmNokCallback, (XtCallbackProc)XtDestroyWidget, dialog);
-    XtUnmanageChild(XmMessageBoxGetChild(dialog, XmDIALOG_HELP_BUTTON));
-    XtManageChild(dialog);
-}
-
 static void on_add_bookmark_menu(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
     (void)client_data;
     (void)call_data;
-    fprintf(stderr, "[ck-browser] Add Page menu selected (bookmarks TODO)\n");
-    show_bookmark_placeholder_dialog("bookmarkAddDialog",
-                                     "Bookmark creation is not implemented yet.");
+    fprintf(stderr, "[ck-browser] Add Page menu selected\n");
+    show_add_bookmark_dialog(get_selected_tab());
 }
 
 static void on_open_bookmark_manager_menu(Widget w, XtPointer client_data, XtPointer call_data)
@@ -3563,8 +3613,622 @@ static void on_open_bookmark_manager_menu(Widget w, XtPointer client_data, XtPoi
     (void)client_data;
     (void)call_data;
     fprintf(stderr, "[ck-browser] Open Bookmark Manager menu selected (bookmarks TODO)\n");
-    show_bookmark_placeholder_dialog("bookmarkOpenManagerDialog",
-                                     "Bookmark manager UI is not implemented yet.");
+    show_bookmark_manager_dialog();
+}
+
+static void
+close_bookmark_manager_dialog(BookmarkManagerContext *ctx)
+{
+    if (!ctx) return;
+    if (ctx->dialog) {
+        XtDestroyWidget(ctx->dialog);
+    }
+    delete ctx;
+}
+
+static void
+bookmark_manager_update_entry_list(BookmarkManagerContext *ctx)
+{
+    if (!ctx || !ctx->bookmark_list) return;
+    XmListDeleteAllItems(ctx->bookmark_list);
+    ctx->entry_items.clear();
+    ctx->selected_entry = NULL;
+    if (ctx->open_button) {
+        XtSetSensitive(ctx->open_button, False);
+    }
+    if (ctx->edit_button) {
+        XtSetSensitive(ctx->edit_button, False);
+    }
+    if (!ctx->selected_group) return;
+    for (const auto &entry : ctx->selected_group->entries) {
+        if (!entry) continue;
+        std::string label;
+        if (!entry->name.empty()) {
+            label = entry->name;
+        } else if (!entry->url.empty()) {
+            label = entry->url;
+        }
+        if (label.empty()) {
+            label = "Bookmark";
+        }
+        XmString xm_label = make_string(label.c_str());
+        XmListAddItemUnselected(ctx->bookmark_list, xm_label, (int)ctx->entry_items.size() + 1);
+        XmStringFree(xm_label);
+        ctx->entry_items.push_back(entry.get());
+    }
+}
+
+static void
+bookmark_manager_group_selection_cb(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    BookmarkManagerContext *ctx = (BookmarkManagerContext *)client_data;
+    if (!ctx || !call_data) return;
+    XmListCallbackStruct *cbs = (XmListCallbackStruct *)call_data;
+    if (cbs->item_position <= 0 ||
+        cbs->item_position > (int)ctx->group_entries.size()) {
+        return;
+    }
+    ctx->selected_group = ctx->group_entries[cbs->item_position - 1];
+    bookmark_manager_update_entry_list(ctx);
+}
+
+static void
+bookmark_manager_entry_selection_cb(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    BookmarkManagerContext *ctx = (BookmarkManagerContext *)client_data;
+    if (!ctx || !call_data) return;
+    XmListCallbackStruct *cbs = (XmListCallbackStruct *)call_data;
+    if (cbs->item_position <= 0 ||
+        cbs->item_position > (int)ctx->entry_items.size()) {
+        ctx->selected_entry = NULL;
+    } else {
+        ctx->selected_entry = ctx->entry_items[cbs->item_position - 1];
+    }
+    Boolean enabled = ctx->selected_entry ? True : False;
+    if (ctx->open_button) {
+        XtSetSensitive(ctx->open_button, enabled);
+    }
+    if (ctx->edit_button) {
+        XtSetSensitive(ctx->edit_button, enabled);
+    }
+}
+
+static void
+on_bookmark_manager_open(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)call_data;
+    BookmarkManagerContext *ctx = (BookmarkManagerContext *)client_data;
+    if (!ctx || !ctx->selected_entry || ctx->selected_entry->url.empty()) return;
+    BrowserTab *tab = get_selected_tab();
+    if (!tab) {
+        spawn_new_browser_window(ctx->selected_entry->url.c_str());
+        close_bookmark_manager_dialog(ctx);
+        return;
+    }
+    set_current_tab(tab);
+    load_url_for_tab(tab, ctx->selected_entry->url);
+    close_bookmark_manager_dialog(ctx);
+}
+
+static void
+on_bookmark_manager_edit(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)call_data;
+    BookmarkManagerContext *ctx = (BookmarkManagerContext *)client_data;
+    if (!ctx || !ctx->selected_entry) return;
+    BookmarkEntry *entry = ctx->selected_entry;
+    BookmarkGroup *group = ctx->selected_group ? ctx->selected_group : ensure_bookmark_groups();
+    close_bookmark_manager_dialog(ctx);
+    show_add_bookmark_dialog(get_selected_tab(), entry, group);
+}
+
+static void
+on_bookmark_manager_cancel(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)call_data;
+    BookmarkManagerContext *ctx = (BookmarkManagerContext *)client_data;
+    close_bookmark_manager_dialog(ctx);
+}
+
+static void
+show_bookmark_manager_dialog()
+{
+    if (!g_toplevel) return;
+    BookmarkGroup *root = ensure_bookmark_groups();
+    if (!root) return;
+    BookmarkManagerContext *ctx = new BookmarkManagerContext();
+    Widget dialog = XmCreateFormDialog(g_toplevel, xm_name("bookmarkManagerDialog"), NULL, 0);
+    XtVaSetValues(dialog,
+                  XmNautoUnmanage, False,
+                  XmNmarginWidth, 8,
+                  XmNmarginHeight, 8,
+                  NULL);
+    ctx->dialog = dialog;
+
+    Widget button_row = XmCreateRowColumn(dialog, xm_name("bookmarkManagerButtons"), NULL, 0);
+    XtVaSetValues(button_row,
+                  XmNorientation, XmHORIZONTAL,
+                  XmNpacking, XmPACK_TIGHT,
+                  XmNspacing, 10,
+                  XmNtopAttachment, XmATTACH_NONE,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNbottomOffset, 10,
+                  XmNleftOffset, 0,
+                  XmNrightOffset, 0,
+                  NULL);
+    XtManageChild(button_row);
+
+    XmString open_label = make_string("Open");
+    Widget open_button = XmCreatePushButtonGadget(button_row, xm_name("bookmarkManagerOpen"), NULL, 0);
+    XtVaSetValues(open_button, XmNlabelString, open_label, NULL);
+    XmStringFree(open_label);
+    XtSetSensitive(open_button, False);
+    XtAddCallback(open_button, XmNactivateCallback, on_bookmark_manager_open, ctx);
+    ctx->open_button = open_button;
+    XtManageChild(open_button);
+
+    XmString edit_label = make_string("Edit");
+    Widget edit_button = XmCreatePushButtonGadget(button_row, xm_name("bookmarkManagerEdit"), NULL, 0);
+    XtVaSetValues(edit_button, XmNlabelString, edit_label, NULL);
+    XmStringFree(edit_label);
+    XtSetSensitive(edit_button, False);
+    XtAddCallback(edit_button, XmNactivateCallback, on_bookmark_manager_edit, ctx);
+    ctx->edit_button = edit_button;
+    XtManageChild(edit_button);
+
+    XmString cancel_label = make_string("Cancel");
+    Widget cancel_button = XmCreatePushButtonGadget(button_row, xm_name("bookmarkManagerCancel"), NULL, 0);
+    XtVaSetValues(cancel_button, XmNlabelString, cancel_label, NULL);
+    XmStringFree(cancel_label);
+    XtAddCallback(cancel_button, XmNactivateCallback, on_bookmark_manager_cancel, ctx);
+    XtManageChild(cancel_button);
+
+    Widget lists_area = XmCreateRowColumn(dialog, xm_name("bookmarkManagerLists"), NULL, 0);
+    XtVaSetValues(lists_area,
+                  XmNorientation, XmHORIZONTAL,
+                  XmNpacking, XmPACK_TIGHT,
+                  XmNspacing, 12,
+                  XmNmarginWidth, 4,
+                  XmNmarginHeight, 4,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_WIDGET,
+                  XmNbottomWidget, button_row,
+                  NULL);
+    XtManageChild(lists_area);
+
+    Widget group_frame = XmCreateFrame(lists_area, xm_name("bookmarkManagerGroupFrame"), NULL, 0);
+    XtManageChild(group_frame);
+    Widget group_list = XmCreateScrolledList(group_frame, xm_name("bookmarkManagerGroupList"), NULL, 0);
+    XtVaSetValues(group_list,
+                  XmNscrollingPolicy, XmAUTOMATIC,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  XmNwidth, 260,
+                  XmNheight, 240,
+                  NULL);
+    XtAddCallback(group_list, XmNbrowseSelectionCallback, bookmark_manager_group_selection_cb, ctx);
+    XtManageChild(group_list);
+    ctx->group_list = group_list;
+
+    Widget bookmark_frame = XmCreateFrame(lists_area, xm_name("bookmarkManagerBookmarkFrame"), NULL, 0);
+    XtManageChild(bookmark_frame);
+    Widget bookmark_list = XmCreateScrolledList(bookmark_frame, xm_name("bookmarkManagerBookmarkList"), NULL, 0);
+    XtVaSetValues(bookmark_list,
+                  XmNscrollingPolicy, XmAUTOMATIC,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  XmNwidth, 360,
+                  XmNheight, 240,
+                  NULL);
+    XtAddCallback(bookmark_list, XmNbrowseSelectionCallback, bookmark_manager_entry_selection_cb, ctx);
+    XtManageChild(bookmark_list);
+    ctx->bookmark_list = bookmark_list;
+
+    std::vector<std::string> labels;
+    collect_bookmark_groups(root, ctx->group_entries, labels, 0);
+    for (size_t i = 0; i < ctx->group_entries.size(); ++i) {
+        XmString xm_label = make_string(labels[i].c_str());
+        XmListAddItemUnselected(group_list, xm_label, (int)i + 1);
+        XmStringFree(xm_label);
+    }
+    if (!ctx->group_entries.empty()) {
+        ctx->selected_group = ctx->group_entries[0];
+        XmListSelectPos(group_list, 1, False);
+    }
+    bookmark_manager_update_entry_list(ctx);
+
+    XtManageChild(dialog);
+}
+
+static BookmarkGroup *
+add_bookmark_group(BookmarkGroup *parent, const char *name)
+{
+    if (!parent) return NULL;
+    parent->children.emplace_back(std::make_unique<BookmarkGroup>());
+    BookmarkGroup *child = parent->children.back().get();
+    child->name = name ? name : "";
+    return child;
+}
+
+static BookmarkGroup *
+ensure_bookmark_groups()
+{
+    if (g_bookmark_root) return g_bookmark_root.get();
+    g_bookmark_root = std::make_unique<BookmarkGroup>();
+    g_bookmark_root->name = "Bookmarks Menu";
+    BookmarkGroup *favorites = add_bookmark_group(g_bookmark_root.get(), "Favorites");
+    add_bookmark_group(favorites, "Work");
+    add_bookmark_group(favorites, "Personal");
+    BookmarkGroup *other = add_bookmark_group(g_bookmark_root.get(), "Other Bookmarks");
+    add_bookmark_group(other, "Research");
+    add_bookmark_group(other, "Snippets");
+    g_selected_bookmark_group = favorites ? favorites : g_bookmark_root.get();
+    return g_bookmark_root.get();
+}
+
+static void
+collect_bookmark_groups(BookmarkGroup *group,
+                        std::vector<BookmarkGroup *> &entries,
+                        std::vector<std::string> &labels,
+                        int depth)
+{
+    if (!group) return;
+    std::string indent(depth * 2, ' ');
+    entries.push_back(group);
+    labels.emplace_back(indent + group->name);
+    for (const auto &child : group->children) {
+        collect_bookmark_groups(child.get(), entries, labels, depth + 1);
+    }
+}
+
+static void
+collect_bookmark_menu_entries(BookmarkGroup *group,
+                              std::vector<BookmarkEntry *> &entries)
+{
+    if (!group) return;
+    for (const auto &entry : group->entries) {
+        if (entry && entry->show_in_menu) {
+            entries.push_back(entry.get());
+        }
+    }
+    for (const auto &child : group->children) {
+        collect_bookmark_menu_entries(child.get(), entries);
+    }
+}
+
+static void
+rebuild_bookmarks_menu_items()
+{
+    if (!g_bookmarks_menu) return;
+    for (Widget item : g_bookmark_menu_items) {
+        if (item) {
+            XtDestroyWidget(item);
+        }
+    }
+    g_bookmark_menu_items.clear();
+    BookmarkGroup *root = ensure_bookmark_groups();
+    if (!root) return;
+    std::vector<BookmarkEntry *> favorites;
+    collect_bookmark_menu_entries(root, favorites);
+    for (size_t i = 0; i < favorites.size(); ++i) {
+        BookmarkEntry *entry = favorites[i];
+        if (!entry) continue;
+        char name_buf[64];
+        snprintf(name_buf, sizeof(name_buf), "bookmarkFavorite%p", (void *)entry);
+        std::string label = entry->name.empty() ? entry->url : entry->name;
+        if (label.empty()) {
+            label = "Bookmark";
+        }
+        Widget item = create_menu_item(g_bookmarks_menu, name_buf, label.c_str());
+        XtAddCallback(item, XmNactivateCallback, on_bookmark_menu_activate, entry);
+        g_bookmark_menu_items.push_back(item);
+    }
+}
+
+static void
+on_bookmark_menu_activate(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)call_data;
+    BookmarkEntry *entry = (BookmarkEntry *)client_data;
+    if (!entry || entry->url.empty()) {
+        return;
+    }
+    BrowserTab *tab = get_selected_tab();
+    if (!tab) {
+        spawn_new_browser_window(entry->url.c_str());
+        return;
+    }
+    set_current_tab(tab);
+    load_url_for_tab(tab, entry->url);
+}
+
+static void
+bookmark_group_selection_cb(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    BookmarkDialogContext *ctx = (BookmarkDialogContext *)client_data;
+    if (!ctx || !call_data) return;
+    XmListCallbackStruct *cbs = (XmListCallbackStruct *)call_data;
+    if (cbs->item_position <= 0 ||
+        cbs->item_position > (int)ctx->group_entries.size()) {
+        return;
+    }
+    g_selected_bookmark_group = ctx->group_entries[cbs->item_position - 1];
+}
+
+static void
+on_bookmark_dialog_cancel(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)call_data;
+    BookmarkDialogContext *ctx = (BookmarkDialogContext *)client_data;
+    if (!ctx) return;
+    if (ctx->dialog) {
+        XtDestroyWidget(ctx->dialog);
+    }
+    delete ctx;
+}
+
+static void
+on_bookmark_dialog_save(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)call_data;
+    BookmarkDialogContext *ctx = (BookmarkDialogContext *)client_data;
+    if (!ctx) return;
+    char *name_value = NULL;
+    if (ctx->name_field) {
+        name_value = XmTextFieldGetString(ctx->name_field);
+    }
+    std::string bookmark_name = name_value ? name_value : "";
+    BrowserTab *tab = get_selected_tab();
+    const char *tab_url = display_url_for_tab(tab);
+    std::string bookmark_url;
+    if (tab_url && tab_url[0]) {
+        bookmark_url = normalize_url(tab_url);
+        if (bookmark_url.empty()) {
+            bookmark_url = tab_url;
+        }
+    }
+    bool add_to_menu = false;
+    if (ctx->add_to_menu_checkbox) {
+        Boolean set = False;
+        XtVaGetValues(ctx->add_to_menu_checkbox, XmNset, &set, NULL);
+        add_to_menu = set;
+    }
+    BookmarkGroup *target_group = g_selected_bookmark_group ? g_selected_bookmark_group :
+                                   ensure_bookmark_groups();
+    if (!target_group && g_bookmark_root) {
+        target_group = g_bookmark_root.get();
+    }
+    BookmarkEntry *entry_ptr = ctx->editing_entry;
+    if (entry_ptr) {
+        BookmarkGroup *source_group = ctx->editing_group ? ctx->editing_group : target_group;
+        if (source_group && target_group && source_group != target_group) {
+            auto &entries = source_group->entries;
+            for (auto it = entries.begin(); it != entries.end(); ++it) {
+                if (it->get() == entry_ptr) {
+                    std::unique_ptr<BookmarkEntry> moved_entry = std::move(*it);
+                    entries.erase(it);
+                    if (target_group) {
+                        target_group->entries.emplace_back(std::move(moved_entry));
+                        entry_ptr = target_group->entries.back().get();
+                    } else if (g_bookmark_root) {
+                        g_bookmark_root->entries.emplace_back(std::move(moved_entry));
+                        entry_ptr = g_bookmark_root->entries.back().get();
+                    }
+                    break;
+                }
+            }
+        }
+        if (entry_ptr) {
+            entry_ptr->name = bookmark_name;
+            entry_ptr->url = bookmark_url;
+            entry_ptr->show_in_menu = add_to_menu;
+        }
+    } else {
+        auto entry = std::make_unique<BookmarkEntry>();
+        entry->name = bookmark_name;
+        entry->url = bookmark_url;
+        entry->show_in_menu = add_to_menu;
+        entry_ptr = entry.get();
+        if (target_group) {
+            target_group->entries.emplace_back(std::move(entry));
+        } else if (g_bookmark_root) {
+            g_bookmark_root->entries.emplace_back(std::move(entry));
+        }
+    }
+    const char *log_url = entry_ptr && !entry_ptr->url.empty() ? entry_ptr->url.c_str() : "(none)";
+    fprintf(stderr,
+            "[ck-browser] Add Bookmark dialog Save name='%s' target='%s' show_in_menu=%d url='%s'\n",
+            entry_ptr ? entry_ptr->name.c_str() : "(none)",
+            target_group ? target_group->name.c_str() : "(none)",
+            entry_ptr && entry_ptr->show_in_menu ? 1 : 0,
+            log_url);
+    if (name_value) XtFree(name_value);
+    if (ctx->dialog) {
+        XtDestroyWidget(ctx->dialog);
+    }
+    delete ctx;
+    rebuild_bookmarks_menu_items();
+}
+
+static void
+show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry, BookmarkGroup *entry_group)
+{
+    if (!g_toplevel) return;
+    BookmarkGroup *root = ensure_bookmark_groups();
+    if (!root) return;
+    BookmarkGroup *initial_group = entry_group ? entry_group : root;
+    g_selected_bookmark_group = initial_group;
+    BookmarkDialogContext *ctx = new BookmarkDialogContext();
+    ctx->editing_entry = entry;
+    ctx->editing_group = entry_group;
+    Widget dialog = XmCreateFormDialog(g_toplevel, xm_name("bookmarkAddDialog"), NULL, 0);
+    XtVaSetValues(dialog,
+                  XmNautoUnmanage, False,
+                  XmNmarginWidth, 10,
+                  XmNmarginHeight, 10,
+                  NULL);
+    ctx->dialog = dialog;
+
+    Widget name_label = XmCreateLabelGadget(dialog, xm_name("bookmarkNameLabel"), NULL, 0);
+    XmString name_label_text = make_string("Name:");
+    XtVaSetValues(name_label,
+                  XmNlabelString, name_label_text,
+                  XmNalignment, XmALIGNMENT_BEGINNING,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNtopOffset, 2,
+                  NULL);
+    XmStringFree(name_label_text);
+    XtManageChild(name_label);
+
+    Widget name_field = XmCreateTextField(dialog, xm_name("bookmarkNameField"), NULL, 0);
+    XtVaSetValues(name_field,
+                  XmNtopAttachment, XmATTACH_WIDGET,
+                  XmNtopWidget, name_label,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNleftOffset, 0,
+                  XmNrightOffset, 0,
+                  XmNtopOffset, 4,
+                  NULL);
+    XtManageChild(name_field);
+    const char *prefill = NULL;
+    if (entry) {
+        if (!entry->name.empty()) {
+            prefill = entry->name.c_str();
+        } else if (!entry->url.empty()) {
+            prefill = entry->url.c_str();
+        }
+    } else if (tab) {
+        prefill = tab->title_full.empty() ? display_url_for_tab(tab) : tab->title_full.c_str();
+    }
+    if (prefill) {
+        XmTextFieldSetString(name_field, const_cast<char *>(prefill));
+    }
+    ctx->name_field = name_field;
+
+    Widget button_row = XmCreateRowColumn(dialog, xm_name("bookmarkButtonRow"), NULL, 0);
+    XtVaSetValues(button_row,
+                  XmNorientation, XmHORIZONTAL,
+                  XmNpacking, XmPACK_TIGHT,
+                  XmNtopAttachment, XmATTACH_NONE,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNbottomOffset, 10,
+                  XmNleftOffset, 0,
+                  XmNrightOffset, 0,
+                  XmNspacing, 10,
+                  NULL);
+    XtManageChild(button_row);
+
+    Widget tree_frame = XmCreateFrame(dialog, xm_name("bookmarkTargetFrame"), NULL, 0);
+    XtVaSetValues(tree_frame,
+                  XmNtopAttachment, XmATTACH_WIDGET,
+                  XmNtopWidget, name_field,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_WIDGET,
+                  XmNbottomWidget, button_row,
+                  XmNtopOffset, 10,
+                  XmNbottomOffset, 10,
+                  XmNleftOffset, 0,
+                  XmNrightOffset, 0,
+                  NULL);
+    XtManageChild(tree_frame);
+
+    Widget list = XmCreateScrolledList(tree_frame, xm_name("bookmarkTargetList"), NULL, 0);
+    XtVaSetValues(list,
+                  XmNscrollingPolicy, XmAUTOMATIC,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  NULL);
+    XtManageChild(list);
+    XtAddCallback(list, XmNbrowseSelectionCallback, bookmark_group_selection_cb, ctx);
+    ctx->group_list = list;
+
+    XmString toggle_label = make_string("Add to Bookmarks Menu");
+    Widget add_to_menu_toggle = XtVaCreateManagedWidget(
+        "bookmarkDialogAddToMenu",
+        xmToggleButtonWidgetClass,
+        dialog,
+        XmNlabelString, toggle_label,
+        XmNtopAttachment, XmATTACH_WIDGET,
+        XmNtopWidget, tree_frame,
+        XmNbottomAttachment, XmATTACH_WIDGET,
+        XmNbottomWidget, button_row,
+        XmNleftAttachment, XmATTACH_FORM,
+        XmNrightAttachment, XmATTACH_FORM,
+        XmNtopOffset, 8,
+        XmNbottomOffset, 6,
+        NULL);
+    XmStringFree(toggle_label);
+    Boolean toggle_state = False;
+    if (entry && entry->show_in_menu) {
+        toggle_state = True;
+    }
+    XmToggleButtonSetState(add_to_menu_toggle, toggle_state, False);
+    ctx->add_to_menu_checkbox = add_to_menu_toggle;
+    XtVaSetValues(tree_frame,
+                  XmNbottomWidget, add_to_menu_toggle,
+                  NULL);
+
+    std::vector<BookmarkGroup *> groups;
+    std::vector<std::string> labels;
+    collect_bookmark_groups(root, groups, labels, 0);
+    ctx->group_entries = std::move(groups);
+    for (size_t i = 0; i < ctx->group_entries.size(); ++i) {
+        XmString xm_label = make_string(labels[i].c_str());
+        XmListAddItemUnselected(list, xm_label, (int)i + 1);
+        XmStringFree(xm_label);
+    }
+    if (!ctx->group_entries.empty()) {
+        int selected_pos = 1;
+        if (entry_group) {
+            for (size_t i = 0; i < ctx->group_entries.size(); ++i) {
+                if (ctx->group_entries[i] == entry_group) {
+                    selected_pos = (int)i + 1;
+                    break;
+                }
+            }
+        }
+        g_selected_bookmark_group = ctx->group_entries[selected_pos - 1];
+        XmListSelectPos(list, selected_pos, False);
+    }
+
+    XmString save_label = make_string("Save");
+    Widget save_button = XmCreatePushButtonGadget(button_row, xm_name("bookmarkDialogSave"), NULL, 0);
+    XmString cancel_label = make_string("Cancel");
+    Widget cancel_button = XmCreatePushButtonGadget(button_row, xm_name("bookmarkDialogCancel"), NULL, 0);
+    XtVaSetValues(save_button, XmNlabelString, save_label, NULL);
+    XtVaSetValues(cancel_button, XmNlabelString, cancel_label, NULL);
+    XmStringFree(save_label);
+    XmStringFree(cancel_label);
+    XtAddCallback(save_button, XmNactivateCallback, on_bookmark_dialog_save, ctx);
+    XtAddCallback(cancel_button, XmNactivateCallback, on_bookmark_dialog_cancel, ctx);
+    XtManageChild(save_button);
+    XtManageChild(cancel_button);
+
+    XtManageChild(dialog);
 }
 
 static void on_menu_exit(Widget w, XtPointer client_data, XtPointer call_data)
@@ -3604,6 +4268,20 @@ static Widget create_menu_bar(Widget parent)
     Widget nav_open_url = create_menu_item(nav_menu, "navOpenUrl", "Open URL");
     g_nav_back = nav_back;
     g_nav_forward = nav_forward;
+
+    Widget bookmarks_menu =
+        create_cascade_menu(menu_bar, "Bookmarks", "bookmarksMenu", 'M');
+    g_bookmarks_menu = bookmarks_menu;
+    Widget bookmark_add = create_menu_item(bookmarks_menu, "bookmarkAdd", "Add Page...");
+    Widget bookmark_open_manager =
+        create_menu_item(bookmarks_menu, "bookmarkOpenManager", "Open Bookmark Manager...");
+    XtVaCreateManagedWidget("bookmarkFavoritesSep",
+                            xmSeparatorGadgetClass, bookmarks_menu, NULL);
+    XtVaSetValues(bookmark_add, XmNmnemonic, 'A', NULL);
+    XtVaSetValues(bookmark_open_manager, XmNmnemonic, 'O', NULL);
+    XtAddCallback(bookmark_add, XmNactivateCallback, on_add_bookmark_menu, NULL);
+    XtAddCallback(bookmark_open_manager, XmNactivateCallback,
+                  on_open_bookmark_manager_menu, NULL);
 
     Widget view_menu = create_cascade_menu(menu_bar, "View", "viewMenu", 'V');
     Widget view_zoom_in = create_menu_item(view_menu, "viewZoomIn", "Zoom In");
@@ -3660,6 +4338,8 @@ static Widget create_menu_bar(Widget parent)
     XtAddCallback(view_restore, XmNactivateCallback, on_restore_session, NULL);
     XtAddCallback(help_view, XmNactivateCallback, on_help_view, NULL);
     XtAddCallback(help_about, XmNactivateCallback, on_help_about, NULL);
+
+    rebuild_bookmarks_menu_items();
 
     return menu_bar;
 }

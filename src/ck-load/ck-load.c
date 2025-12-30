@@ -24,6 +24,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <limits.h>
+#include <math.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/Xatom.h>
@@ -61,6 +62,7 @@ enum {
 #define ICON_SEGMENT_GAP 2
 #define ICON_BORDER_INSET 4
 #define ICON_BAR_BG_DARKEN_FACTOR 0.4
+#define ICON_MIN_BRIGHTNESS_DIFF 0.45
 
 #ifndef DRAW_ICON_DEBUG_CIRCLES
 #define DRAW_ICON_DEBUG_CIRCLES 0
@@ -82,8 +84,10 @@ static Pixel g_icon_bg_color = 0;
 static Pixel g_icon_top_shadow = 0;
 static Pixel g_icon_bottom_shadow = 0;
 static Pixel g_icon_bar_bg_color = 0;
+static Pixel g_icon_bar_icon_color = 0;
 static Pixel g_icon_segment_color = 0;
 static int g_icon_colors_inited = 0;
+static int g_icon_bar_icon_color_ready = 0;
 
 /* ---------- Helper: CPU usage from /proc/stat ---------- */
 
@@ -368,6 +372,8 @@ update_icon_colors(void)
     g_icon_bar_bg_color = g_icon_bottom_shadow;
     g_icon_bar_bg_color = derive_darker_icon_pixel(g_icon_display, g_icon_screen,
                                                    g_icon_bar_bg_color);
+    g_icon_bar_icon_color = g_icon_bar_bg_color;
+    g_icon_bar_icon_color_ready = 0;
     g_icon_colors_inited = 1;
 }
 
@@ -419,14 +425,89 @@ update_window_title_with_cpu(int cpu_percent, int iconified)
                   XmNiconName, title, NULL);
 }
 
-static void
-draw_icon_bars(Display *display, Pixmap pixmap, int cpu_percent, int ram_percent)
+static double
+icon_pixel_brightness(Display *display, Colormap cmap, Pixel pixel)
 {
-    int screen = g_icon_screen;
+    if (!display || cmap == None) return 0.0;
+    XColor color;
+    color.pixel = pixel;
+    if (!XQueryColor(display, cmap, &color)) return 0.0;
+    double r = color.red / 65535.0;
+    double g = color.green / 65535.0;
+    double b = color.blue / 65535.0;
+    return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+
+static Pixel
+icon_mix_with_white(Display *display, Colormap cmap, XColor *base, double factor)
+{
+    if (!display || !base) return base ? base->pixel : 0;
+    if (factor <= 0.0) return base->pixel;
+    if (factor > 1.0) factor = 1.0;
+    XColor target = *base;
+    target.red   = (unsigned short)(base->red   +
+                                    (unsigned short)((65535 - base->red)   * factor));
+    target.green = (unsigned short)(base->green +
+                                    (unsigned short)((65535 - base->green) * factor));
+    target.blue  = (unsigned short)(base->blue  +
+                                    (unsigned short)((65535 - base->blue)  * factor));
+    target.flags = DoRed | DoGreen | DoBlue;
+    if (XAllocColor(display, cmap, &target)) {
+        return target.pixel;
+    }
+    return base->pixel;
+}
+
+static Pixel
+calculate_icon_bar_fill(Display *display, Colormap cmap,
+                        Pixel base_pixel, Pixel segment_pixel)
+{
+    if (!display || cmap == None) return base_pixel;
+
+    double segment_brightness = icon_pixel_brightness(display, cmap, segment_pixel);
+    double fill_brightness = icon_pixel_brightness(display, cmap, base_pixel);
+    double diff = fabs(segment_brightness - fill_brightness);
+    if (diff >= ICON_MIN_BRIGHTNESS_DIFF) {
+        return base_pixel;
+    }
+
+    XColor fill_color_info = {0};
+    fill_color_info.pixel = base_pixel;
+    if (!XQueryColor(display, cmap, &fill_color_info)) {
+        return base_pixel;
+    }
+
+    double factor = (ICON_MIN_BRIGHTNESS_DIFF - diff) / ICON_MIN_BRIGHTNESS_DIFF;
+    if (factor > 1.0) factor = 1.0;
+    return icon_mix_with_white(display, cmap, &fill_color_info, factor);
+}
+
+static Pixel
+get_icon_bar_icon_color(Display *display)
+{
+    if (!display) return g_icon_bar_bg_color;
+    if (!g_icon_colors_inited) return g_icon_bar_bg_color;
+    if (g_icon_bar_icon_color_ready) {
+        return g_icon_bar_icon_color;
+    }
+
+    int screen = (g_icon_screen >= 0) ? g_icon_screen : DefaultScreen(display);
+    Colormap cmap = DefaultColormap(display, screen);
+    g_icon_bar_icon_color =
+        calculate_icon_bar_fill(display, cmap, g_icon_bar_bg_color, g_icon_segment_color);
+    g_icon_bar_icon_color_ready = 1;
+    return g_icon_bar_icon_color;
+}
+
+static void
+draw_icon_bars(Display *display, Pixmap pixmap, int cpu_percent, int ram_percent,
+               unsigned long fill_color)
+{
+    int screen = (g_icon_screen >= 0) ? g_icon_screen : DefaultScreen(display);
     unsigned long bg = g_icon_colors_inited ? g_icon_bg_color :
                        WhitePixel(display, screen);
-    unsigned long fill_color = g_icon_colors_inited ? g_icon_bar_bg_color :
-                               BlackPixel(display, screen);
+    unsigned long fill = g_icon_colors_inited ? fill_color :
+                         BlackPixel(display, screen);
     unsigned long segment_color = g_icon_colors_inited ? g_icon_segment_color :
                                   BlackPixel(display, screen);
     unsigned long top_color = g_icon_colors_inited ? g_icon_top_shadow :
@@ -468,7 +549,7 @@ draw_icon_bars(Display *display, Pixmap pixmap, int cpu_percent, int ram_percent
     int cpu_inner_x = cpu_x + ICON_BORDER_INSET;
     if (inner_width < 1) inner_width = 1;
 
-    XSetForeground(display, g_icon_gc, fill_color);
+    XSetForeground(display, g_icon_gc, fill);
     XFillRectangle(display, pixmap, g_icon_gc,
                    cpu_x, ICON_MARGIN, bar_width, bar_height);
     XSetForeground(display, g_icon_gc, segment_color);
@@ -495,7 +576,7 @@ draw_icon_bars(Display *display, Pixmap pixmap, int cpu_percent, int ram_percent
     if (ram_segments > max_segments) ram_segments = max_segments;
     int ram_inner_x = ram_x + ICON_BORDER_INSET;
 
-    XSetForeground(display, g_icon_gc, fill_color);
+    XSetForeground(display, g_icon_gc, fill);
     XFillRectangle(display, pixmap, g_icon_gc,
                    ram_x, ICON_MARGIN, bar_width, bar_height);
     XSetForeground(display, g_icon_gc, segment_color);
@@ -569,12 +650,15 @@ refresh_dynamic_icon(int cpu_percent, int ram_percent)
 
     ensure_icon_resources(display);
     update_icon_colors();
-    Pixmap root = RootWindow(display, g_icon_screen);
+    int screen = (g_icon_screen >= 0) ? g_icon_screen : DefaultScreen(display);
+    Pixel icon_fill = g_icon_colors_inited ? get_icon_bar_icon_color(display) :
+                      BlackPixel(display, screen);
+    Pixmap root = RootWindow(display, screen);
     Pixmap new_pixmap = XCreatePixmap(display, root, ICON_WIDTH, ICON_HEIGHT,
-                                      DefaultDepth(display, g_icon_screen));
+                                      DefaultDepth(display, screen));
     if (new_pixmap == None) return;
 
-    draw_icon_bars(display, new_pixmap, cpu_percent, ram_percent);
+    draw_icon_bars(display, new_pixmap, cpu_percent, ram_percent, icon_fill);
     XFlush(display);
     Pixmap prev_pixmap = g_icon_pixmap;
     g_icon_pixmap = new_pixmap;

@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include <X11/Intrinsic.h>
 #include <X11/StringDefs.h>
@@ -45,6 +46,11 @@ typedef struct {
     Pixel top_shadow;
     Pixel bottom_shadow;
     Pixel bar_color;
+    Pixel bg_adapted;
+    GC    gc_bg;
+    double bar_brightness;
+    double bg_brightness;
+    Boolean has_adapted_bg;
 
     /* GCs */
     GC    gc_top;
@@ -61,6 +67,8 @@ static void vm_destroy_cb(Widget w, XtPointer client_data, XtPointer call_data);
 static void vm_expose_cb(Widget w, XtPointer client_data, XtPointer call_data);
 static void vm_resize_cb(Widget w, XtPointer client_data, XtPointer call_data);
 static void vm_draw(Widget w, VerticalMeterData *vm);
+static double vm_pixel_brightness(Display *dpy, Colormap cmap, Pixel pixel);
+static Pixel vm_mix_with_white(Display *dpy, Colormap cmap, XColor *base, double factor);
 
 /* -------------------------------------------------------------------------
  * Helpers
@@ -98,8 +106,63 @@ static VerticalMeterData *vm_get_data(Widget w, Boolean create_if_missing)
             XtIsManaged(w) /* just to avoid warnings; not strictly needed */) {
             if (XtVaGetValues(w, XmCHighlightColor, &select, NULL), 1) {
                 /* This may not be present for all widget classes */
-                vm->bar_color = select;
+        vm->bar_color = select;
+        }
+    }
+
+        Display *dpy = XtDisplay(w);
+        Colormap cmap = DefaultColormap(dpy, DefaultScreen(dpy));
+        vm->bar_brightness = vm_pixel_brightness(dpy, cmap, vm->bar_color);
+        vm->bg_brightness = vm_pixel_brightness(dpy, cmap, vm->bg);
+        XColor bar_color_info = {0};
+        XColor bg_color_info = {0};
+        bar_color_info.pixel = vm->bar_color;
+        bg_color_info.pixel = vm->bg;
+        XQueryColor(dpy, cmap, &bar_color_info);
+        XQueryColor(dpy, cmap, &bg_color_info);
+        double diff = fabs(vm->bar_brightness - vm->bg_brightness);
+        vm->bg_adapted = vm->bg;
+        vm->has_adapted_bg = False;
+        if (diff < 0.5) {
+            XColor bg_color = {0};
+            bg_color.pixel = vm->bg;
+            if (XQueryColor(dpy, cmap, &bg_color)) {
+                double factor = (0.5 - diff) / 0.5;
+                if (factor > 1.0) factor = 1.0;
+                vm->bg_adapted = vm_mix_with_white(dpy, cmap, &bg_color, factor);
+                vm->has_adapted_bg = True;
+                XColor adapted_info = {0};
+                adapted_info.pixel = vm->bg_adapted;
+                XQueryColor(dpy, cmap, &adapted_info);
+                double adapted_brightness = vm_pixel_brightness(dpy, cmap, vm->bg_adapted);
+                fprintf(stderr,
+                        "[vertical_meter] contrast low: bar=(%.3f;%u,%u,%u) bg=(%.3f;%u,%u,%u) diff=%.3f adapt=(%.3f;%u,%u,%u)\n",
+                        vm->bar_brightness,
+                        (unsigned)bar_color_info.red,
+                        (unsigned)bar_color_info.green,
+                        (unsigned)bar_color_info.blue,
+                        vm->bg_brightness,
+                        (unsigned)bg_color_info.red,
+                        (unsigned)bg_color_info.green,
+                        (unsigned)bg_color_info.blue,
+                        diff,
+                        adapted_brightness,
+                        (unsigned)adapted_info.red,
+                        (unsigned)adapted_info.green,
+                        (unsigned)adapted_info.blue);
             }
+        } else {
+            fprintf(stderr,
+                    "[vertical_meter] contrast OK: bar=(%.3f;%u,%u,%u) bg=(%.3f;%u,%u,%u) diff=%.3f\n",
+                    vm->bar_brightness,
+                    (unsigned)bar_color_info.red,
+                    (unsigned)bar_color_info.green,
+                    (unsigned)bar_color_info.blue,
+                    vm->bg_brightness,
+                    (unsigned)bg_color_info.red,
+                    (unsigned)bg_color_info.green,
+                    (unsigned)bg_color_info.blue,
+                    diff);
         }
 
         /* Create GCs */
@@ -112,6 +175,9 @@ static VerticalMeterData *vm_get_data(Widget w, Boolean create_if_missing)
 
         gcv.foreground = vm->bar_color;
         vm->gc_bar = XtGetGC(w, GCForeground, &gcv);
+
+        gcv.foreground = vm->bg_adapted;
+        vm->gc_bg = XtGetGC(w, GCForeground, &gcv);
 
         XtVaSetValues(w, XmNuserData, vm, NULL);
 
@@ -135,6 +201,7 @@ static void vm_destroy_cb(Widget w, XtPointer client_data, XtPointer call_data)
     if (vm->gc_top)    XtReleaseGC(w, vm->gc_top);
     if (vm->gc_bottom) XtReleaseGC(w, vm->gc_bottom);
     if (vm->gc_bar)    XtReleaseGC(w, vm->gc_bar);
+    if (vm->gc_bg)     XtReleaseGC(w, vm->gc_bg);
 
     free(vm);
     XtVaSetValues(w, XmNuserData, NULL, NULL);
@@ -186,8 +253,12 @@ static void vm_draw(Widget w, VerticalMeterData *vm)
     }
 
     /* Clear background */
-    XSetForeground(dpy, vm->gc_bar, vm->bg);
-    XFillRectangle(dpy, win, vm->gc_bar, 0, 0, width, height);
+    if (vm->gc_bg) {
+        XFillRectangle(dpy, win, vm->gc_bg, 0, 0, width, height);
+    } else {
+        XSetForeground(dpy, vm->gc_bar, vm->bg);
+        XFillRectangle(dpy, win, vm->gc_bar, 0, 0, width, height);
+    }
     XSetForeground(dpy, vm->gc_bar, vm->bar_color);  /* restore bar color */
 
     /* Draw sunken frame around whole widget */
@@ -286,6 +357,34 @@ static void vm_draw(Widget w, VerticalMeterData *vm)
             /* Here we just leave it blank so the meter is clean. */
         }
     }
+}
+
+static double vm_pixel_brightness(Display *dpy, Colormap cmap, Pixel pixel)
+{
+    if (!dpy) return 0.0;
+    XColor color;
+    color.pixel = pixel;
+    if (!XQueryColor(dpy, cmap, &color)) return 0.0;
+    double r = color.red / 65535.0;
+    double g = color.green / 65535.0;
+    double b = color.blue / 65535.0;
+    return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+
+static Pixel vm_mix_with_white(Display *dpy, Colormap cmap, XColor *base, double factor)
+{
+    if (!dpy || !base) return base ? base->pixel : 0;
+    if (factor <= 0.0) return base->pixel;
+    if (factor > 1.0) factor = 1.0;
+    XColor target = *base;
+    target.red   = (unsigned short)(base->red   + (unsigned short)((65535 - base->red)   * factor));
+    target.green = (unsigned short)(base->green + (unsigned short)((65535 - base->green) * factor));
+    target.blue  = (unsigned short)(base->blue  + (unsigned short)((65535 - base->blue)  * factor));
+    target.flags = DoRed | DoGreen | DoBlue;
+    if (XAllocColor(dpy, cmap, &target)) {
+        return target.pixel;
+    }
+    return base->pixel;
 }
 
 /* -------------------------------------------------------------------------

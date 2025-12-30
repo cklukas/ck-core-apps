@@ -13,6 +13,10 @@
 #include <Xm/SeparatoG.h>
 #include <Xm/ScrolledW.h>
 #include <Xm/List.h>
+#include <Xm/Outline.h>
+#ifndef XmNnodeParent
+#define XmNnodeParent "nodeParent"
+#endif
 #include <Xm/TabBox.h>
 #include <Xm/TabStack.h>
 #include <Xm/TextF.h>
@@ -151,9 +155,10 @@ struct BookmarkGroup {
 struct BookmarkDialogContext {
     Widget dialog = NULL;
     Widget name_field = NULL;
-    Widget group_list = NULL;
+    Widget group_outline = NULL;
     Widget add_to_menu_checkbox = NULL;
     std::vector<BookmarkGroup *> group_entries;
+    std::vector<Widget> group_nodes;
     BookmarkEntry *editing_entry = NULL;
     BookmarkGroup *editing_group = NULL;
 };
@@ -222,10 +227,11 @@ static void collect_bookmark_menu_entries(BookmarkGroup *group,
                                           std::vector<BookmarkEntry *> &entries);
 static void rebuild_bookmarks_menu_items();
 static void on_bookmark_menu_activate(Widget w, XtPointer client_data, XtPointer call_data);
-static void bookmark_group_selection_cb(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_bookmark_dialog_save(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_bookmark_dialog_cancel(Widget w, XtPointer client_data, XtPointer call_data);
 static void show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry = NULL, BookmarkGroup *group = NULL);
+static void bookmark_dialog_populate_outline(BookmarkDialogContext *ctx, Widget outline, BookmarkGroup *group, Widget parent);
+static void bookmark_outline_node_activate_cb(Widget w, XtPointer client_data, XtPointer call_data);
 static void close_bookmark_manager_dialog(BookmarkManagerContext *ctx);
 static void bookmark_manager_update_entry_list(BookmarkManagerContext *ctx);
 static void bookmark_manager_group_selection_cb(Widget w, XtPointer client_data, XtPointer call_data);
@@ -3910,6 +3916,40 @@ collect_bookmark_menu_entries(BookmarkGroup *group,
 }
 
 static void
+bookmark_dialog_populate_outline(BookmarkDialogContext *ctx, Widget outline, BookmarkGroup *group, Widget parent)
+{
+    if (!ctx || !outline || !group) return;
+    XmString xm_label = make_string(group->name.empty() ? "Bookmarks" : group->name.c_str());
+    Widget node = XmCreatePushButtonGadget(outline, xm_name("bookmarkGroupNode"), NULL, 0);
+    XtVaSetValues(node,
+                  XmNlabelString, xm_label,
+                  XmNalignment, XmALIGNMENT_BEGINNING,
+                  XmNuserData, group,
+                  XmNnodeParent, parent,
+                  XmNnodeState, group->children.empty() ? XmAlwaysOpen : XmOpen,
+                  NULL);
+    XmStringFree(xm_label);
+    ctx->group_entries.push_back(group);
+    ctx->group_nodes.push_back(node);
+    XtAddCallback(node, XmNactivateCallback, bookmark_outline_node_activate_cb, ctx);
+    for (const auto &child : group->children) {
+        bookmark_dialog_populate_outline(ctx, outline, child.get(), node);
+    }
+}
+
+static void
+bookmark_outline_node_activate_cb(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)call_data;
+    BookmarkDialogContext *ctx = (BookmarkDialogContext *)client_data;
+    if (!ctx || !w) return;
+    BookmarkGroup *group = NULL;
+    XtVaGetValues(w, XmNuserData, &group, NULL);
+    if (!group) return;
+    g_selected_bookmark_group = group;
+}
+
+static void
 rebuild_bookmarks_menu_items()
 {
     if (!g_bookmarks_menu) return;
@@ -3923,6 +3963,12 @@ rebuild_bookmarks_menu_items()
     if (!root) return;
     std::vector<BookmarkEntry *> favorites;
     collect_bookmark_menu_entries(root, favorites);
+    static const char *kFavoriteAccelerators[] = {
+        "Ctrl<Key>1", "Ctrl<Key>2", "Ctrl<Key>3", "Ctrl<Key>4", "Ctrl<Key>5",
+        "Ctrl<Key>6", "Ctrl<Key>7", "Ctrl<Key>8", "Ctrl<Key>9"};
+    static const char *kFavoriteAccelTexts[] = {
+        "Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5",
+        "Ctrl+6", "Ctrl+7", "Ctrl+8", "Ctrl+9"};
     for (size_t i = 0; i < favorites.size(); ++i) {
         BookmarkEntry *entry = favorites[i];
         if (!entry) continue;
@@ -3934,6 +3980,9 @@ rebuild_bookmarks_menu_items()
         }
         Widget item = create_menu_item(g_bookmarks_menu, name_buf, label.c_str());
         XtAddCallback(item, XmNactivateCallback, on_bookmark_menu_activate, entry);
+        if (i < sizeof(kFavoriteAccelerators) / sizeof(kFavoriteAccelerators[0])) {
+            set_menu_accelerator(item, kFavoriteAccelerators[i], kFavoriteAccelTexts[i]);
+        }
         g_bookmark_menu_items.push_back(item);
     }
 }
@@ -3954,20 +4003,6 @@ on_bookmark_menu_activate(Widget w, XtPointer client_data, XtPointer call_data)
     }
     set_current_tab(tab);
     load_url_for_tab(tab, entry->url);
-}
-
-static void
-bookmark_group_selection_cb(Widget w, XtPointer client_data, XtPointer call_data)
-{
-    (void)w;
-    BookmarkDialogContext *ctx = (BookmarkDialogContext *)client_data;
-    if (!ctx || !call_data) return;
-    XmListCallbackStruct *cbs = (XmListCallbackStruct *)call_data;
-    if (cbs->item_position <= 0 ||
-        cbs->item_position > (int)ctx->group_entries.size()) {
-        return;
-    }
-    g_selected_bookmark_group = ctx->group_entries[cbs->item_position - 1];
 }
 
 static void
@@ -4083,6 +4118,8 @@ show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry, BookmarkGroup *e
                   XmNautoUnmanage, False,
                   XmNmarginWidth, 10,
                   XmNmarginHeight, 10,
+                  XmNwidth, 420,
+                  XmNheight, 380,
                   NULL);
     ctx->dialog = dialog;
 
@@ -4124,11 +4161,36 @@ show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry, BookmarkGroup *e
     }
     ctx->name_field = name_field;
 
+    Widget tree_frame = XmCreateFrame(dialog, xm_name("bookmarkTargetFrame"), NULL, 0);
+    XtVaSetValues(tree_frame,
+                  XmNtopAttachment, XmATTACH_WIDGET,
+                  XmNtopWidget, name_field,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNtopOffset, 10,
+                  XmNbottomOffset, 10,
+                  XmNleftOffset, 0,
+                  XmNrightOffset, 0,
+                  XmNheight, 220,
+                  NULL);
+    XtManageChild(tree_frame);
+
+    Widget outline = XmCreateOutline(tree_frame, xm_name("bookmarkTargetOutline"), NULL, 0);
+    XtVaSetValues(outline,
+                  XmNconnectNodes, True,
+                  XmNindentSpace, 24,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  NULL);
+    XtManageChild(outline);
+    ctx->group_outline = outline;
+
     Widget button_row = XmCreateRowColumn(dialog, xm_name("bookmarkButtonRow"), NULL, 0);
     XtVaSetValues(button_row,
                   XmNorientation, XmHORIZONTAL,
                   XmNpacking, XmPACK_TIGHT,
-                  XmNtopAttachment, XmATTACH_NONE,
                   XmNbottomAttachment, XmATTACH_FORM,
                   XmNleftAttachment, XmATTACH_FORM,
                   XmNrightAttachment, XmATTACH_FORM,
@@ -4138,33 +4200,6 @@ show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry, BookmarkGroup *e
                   XmNspacing, 10,
                   NULL);
     XtManageChild(button_row);
-
-    Widget tree_frame = XmCreateFrame(dialog, xm_name("bookmarkTargetFrame"), NULL, 0);
-    XtVaSetValues(tree_frame,
-                  XmNtopAttachment, XmATTACH_WIDGET,
-                  XmNtopWidget, name_field,
-                  XmNleftAttachment, XmATTACH_FORM,
-                  XmNrightAttachment, XmATTACH_FORM,
-                  XmNbottomAttachment, XmATTACH_WIDGET,
-                  XmNbottomWidget, button_row,
-                  XmNtopOffset, 10,
-                  XmNbottomOffset, 10,
-                  XmNleftOffset, 0,
-                  XmNrightOffset, 0,
-                  NULL);
-    XtManageChild(tree_frame);
-
-    Widget list = XmCreateScrolledList(tree_frame, xm_name("bookmarkTargetList"), NULL, 0);
-    XtVaSetValues(list,
-                  XmNscrollingPolicy, XmAUTOMATIC,
-                  XmNleftAttachment, XmATTACH_FORM,
-                  XmNrightAttachment, XmATTACH_FORM,
-                  XmNtopAttachment, XmATTACH_FORM,
-                  XmNbottomAttachment, XmATTACH_FORM,
-                  NULL);
-    XtManageChild(list);
-    XtAddCallback(list, XmNbrowseSelectionCallback, bookmark_group_selection_cb, ctx);
-    ctx->group_list = list;
 
     XmString toggle_label = make_string("Add to Bookmarks Menu");
     Widget add_to_menu_toggle = XtVaCreateManagedWidget(
@@ -4189,30 +4224,39 @@ show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry, BookmarkGroup *e
     XmToggleButtonSetState(add_to_menu_toggle, toggle_state, False);
     ctx->add_to_menu_checkbox = add_to_menu_toggle;
     XtVaSetValues(tree_frame,
+                  XmNbottomAttachment, XmATTACH_WIDGET,
                   XmNbottomWidget, add_to_menu_toggle,
+                  XmNbottomOffset, 6,
                   NULL);
 
-    std::vector<BookmarkGroup *> groups;
-    std::vector<std::string> labels;
-    collect_bookmark_groups(root, groups, labels, 0);
-    ctx->group_entries = std::move(groups);
-    for (size_t i = 0; i < ctx->group_entries.size(); ++i) {
-        XmString xm_label = make_string(labels[i].c_str());
-        XmListAddItemUnselected(list, xm_label, (int)i + 1);
-        XmStringFree(xm_label);
-    }
+    XtVaSetValues(button_row,
+                  XmNtopAttachment, XmATTACH_WIDGET,
+                  XmNtopWidget, add_to_menu_toggle,
+                  XmNtopOffset, 12,
+                  NULL);
+
+    ctx->group_entries.clear();
+    ctx->group_nodes.clear();
+    bookmark_dialog_populate_outline(ctx, outline, root, NULL);
     if (!ctx->group_entries.empty()) {
-        int selected_pos = 1;
+        int selected_index = 0;
         if (entry_group) {
             for (size_t i = 0; i < ctx->group_entries.size(); ++i) {
                 if (ctx->group_entries[i] == entry_group) {
-                    selected_pos = (int)i + 1;
+                    selected_index = (int)i;
                     break;
                 }
             }
         }
-        g_selected_bookmark_group = ctx->group_entries[selected_pos - 1];
-        XmListSelectPos(list, selected_pos, False);
+        g_selected_bookmark_group = ctx->group_entries[selected_index];
+        if (!ctx->group_nodes.empty() &&
+            selected_index >= 0 &&
+            selected_index < (int)ctx->group_nodes.size()) {
+            Widget selected_node = ctx->group_nodes[selected_index];
+            if (selected_node) {
+                XmHierarchyOpenAllAncestors(selected_node);
+            }
+        }
     }
 
     XmString save_label = make_string("Save");
@@ -4270,7 +4314,7 @@ static Widget create_menu_bar(Widget parent)
     g_nav_forward = nav_forward;
 
     Widget bookmarks_menu =
-        create_cascade_menu(menu_bar, "Bookmarks", "bookmarksMenu", 'M');
+        create_cascade_menu(menu_bar, "Bookmarks", "bookmarksMenu", 'B');
     g_bookmarks_menu = bookmarks_menu;
     Widget bookmark_add = create_menu_item(bookmarks_menu, "bookmarkAdd", "Add Page...");
     Widget bookmark_open_manager =
@@ -4287,6 +4331,9 @@ static Widget create_menu_bar(Widget parent)
     Widget view_zoom_in = create_menu_item(view_menu, "viewZoomIn", "Zoom In");
     Widget view_zoom_out = create_menu_item(view_menu, "viewZoomOut", "Zoom Out");
     Widget view_zoom_reset = create_menu_item(view_menu, "viewZoomReset", "Reset Zoom");
+    set_menu_accelerator(view_zoom_in, "Ctrl<Key>plus", "Ctrl+Plus");
+    set_menu_accelerator(view_zoom_out, "Ctrl<Key>minus", "Ctrl+Minus");
+    set_menu_accelerator(view_zoom_reset, "Ctrl<Key>0", "Ctrl+0");
     XtVaCreateManagedWidget("viewSep1", xmSeparatorGadgetClass, view_menu, NULL);
     Widget view_restore = create_menu_item(view_menu, "viewRestoreSession", "Restore Session");
 

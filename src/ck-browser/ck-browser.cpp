@@ -69,6 +69,7 @@ extern "C" {
 #include <include/cef_navigation_entry.h>
 #include <include/cef_ssl_status.h>
 #include <include/cef_image.h>
+#include <include/cef_values.h>
 #include <include/internal/cef_linux.h>
 #include <include/wrapper/cef_helpers.h>
 
@@ -91,6 +92,7 @@ static Widget g_security_label = NULL;
 static Widget g_zoom_label = NULL;
 static Widget g_zoom_minus_button = NULL;
 static Widget g_zoom_plus_button = NULL;
+static Widget g_reload_button = NULL;
 static bool g_tab_sync_scheduled = false;
 static std::string g_homepage_url;
 static char g_resources_path[PATH_MAX] = "";
@@ -142,6 +144,8 @@ struct BrowserTab {
     int devtools_inspect_x = 0;
     int devtools_inspect_y = 0;
     bool devtools_show_scheduled = false;
+    bool loading = false;
+    std::string current_host;
 };
 
 struct FaviconCacheEntry {
@@ -278,6 +282,11 @@ static void clear_bookmark_menu_icon_pixmaps();
 static void bookmark_manager_free_entry_pixmaps(BookmarkManagerContext *ctx);
 static void bookmark_manager_clear_entry_widgets(BookmarkManagerContext *ctx);
 static void bookmark_manager_entry_activate_cb(Widget w, XtPointer client_data, XtPointer call_data);
+static void clear_tab_favicon(BrowserTab *tab);
+static std::string extract_host_from_url(const std::string &url);
+static void show_invalid_url_dialog(const char *text);
+static void set_reload_button_label(const char *text);
+static void update_reload_button_for_tab(BrowserTab *tab);
 static void write_netscape_bookmarks(FILE *f, BookmarkGroup *root);
 static void write_group_contents(FILE *f, BookmarkGroup *group, int indent);
 static void parse_netscape_bookmarks(const std::string &content, BookmarkGroup *root);
@@ -2518,11 +2527,95 @@ static void update_favicon_controls(BrowserTab *tab)
     }
 }
 
+static void
+set_reload_button_label(const char *text)
+{
+    if (!g_reload_button) return;
+    XmString xm_label = make_string(text ? text : "");
+    XtVaSetValues(g_reload_button, XmNlabelString, xm_label, NULL);
+    XmStringFree(xm_label);
+}
+
+static void
+update_reload_button_for_tab(BrowserTab *tab)
+{
+    bool loading = tab && tab->loading;
+    set_reload_button_label(loading ? "Stop" : "Reload");
+}
+
+static void
+clear_tab_favicon(BrowserTab *tab)
+{
+    if (!tab) return;
+    Display *display = g_toplevel ? XtDisplay(g_toplevel) : NULL;
+    if (tab->favicon_toolbar_pixmap != None && display) {
+        XFreePixmap(display, tab->favicon_toolbar_pixmap);
+    }
+    if (tab->favicon_window_pixmap != None && display) {
+        XFreePixmap(display, tab->favicon_window_pixmap);
+    }
+    if (tab->favicon_window_mask != None && display) {
+        XFreePixmap(display, tab->favicon_window_mask);
+    }
+    tab->favicon_toolbar_pixmap = None;
+    tab->favicon_toolbar_size = 0;
+    tab->favicon_window_pixmap = None;
+    tab->favicon_window_mask = None;
+    tab->favicon_window_size = 0;
+    tab->favicon_url.clear();
+    if (tab == g_current_tab) {
+        update_favicon_controls(tab);
+    }
+}
+
+static std::string
+extract_host_from_url(const std::string &url)
+{
+    size_t scheme = url.find("://");
+    if (scheme == std::string::npos) return std::string();
+    size_t start = scheme + 3;
+    if (start >= url.size()) return std::string();
+    size_t end = start;
+    if (url[start] == '[') {
+        end = start + 1;
+        while (end < url.size() && url[end] != ']') {
+            end++;
+        }
+        if (end < url.size()) {
+            end++;
+        }
+    } else {
+        while (end < url.size()) {
+            char ch = url[end];
+            if (ch == '/' || ch == ':' || ch == '?' || ch == '#') break;
+            end++;
+        }
+    }
+    if (start >= end) return std::string();
+    std::string host = url.substr(start, end - start);
+    size_t at_pos = host.rfind('@');
+    if (at_pos != std::string::npos) {
+        host.erase(0, at_pos + 1);
+    }
+    while (!host.empty() && host.back() == '.') {
+        host.pop_back();
+    }
+    for (char &c : host) {
+        c = (char)std::tolower((unsigned char)c);
+    }
+    return host;
+}
+
 static void load_url_for_tab(BrowserTab *tab, const std::string &url)
 {
     if (!tab || url.empty()) return;
     const std::string normalized = normalize_url(url.c_str());
     if (normalized.empty()) return;
+    std::string host = extract_host_from_url(normalized);
+    if (host != tab->current_host) {
+        tab->current_host = host;
+        clear_tab_favicon(tab);
+    }
     tab->pending_url = normalized;
     if (!tab->browser) {
         schedule_tab_browser_creation(tab);
@@ -2638,9 +2731,22 @@ static void on_url_activate(Widget w, XtPointer client_data, XtPointer call_data
     (void)call_data;
     char *value = XmTextFieldGetString(w);
     if (!value) return;
+    std::string typed = value ? value : "";
     std::string normalized = normalize_url(value);
     XtFree(value);
-    if (normalized.empty()) return;
+    if (normalized.empty()) {
+        show_invalid_url_dialog(typed.c_str());
+        set_status_label_text("Invalid URL");
+        return;
+    }
+    if (normalized.find("://") != std::string::npos) {
+        std::string host = extract_host_from_url(normalized);
+        if (host.empty()) {
+            show_invalid_url_dialog(typed.c_str());
+            set_status_label_text("Invalid URL");
+            return;
+        }
+    }
     BrowserTab *active = get_selected_tab();
     if (!active) return;
     set_current_tab(active);
@@ -2977,6 +3083,28 @@ static void on_url_button_press(Widget w, XtPointer client_data, XEvent *event, 
     }
     XtVaSetValues(w, XmNcursorPositionVisible, True, NULL);
     focus_motif_widget(w);
+}
+
+static void
+show_invalid_url_dialog(const char *text)
+{
+    if (!g_toplevel) return;
+    Widget dialog = XmCreateErrorDialog(g_toplevel, xm_name("invalidUrlDialog"), NULL, 0);
+    std::string combined = "Invalid URL";
+    combined += "\n";
+    combined += text && text[0] ? text : "Please check the address.";
+    XmString message = make_string(combined.c_str());
+    XtVaSetValues(dialog,
+                  XmNdialogType, XmDIALOG_ERROR,
+                  XmNmessageString, message,
+                  NULL);
+    XmStringFree(message);
+    Widget help = XmMessageBoxGetChild(dialog, XmDIALOG_HELP_BUTTON);
+    if (help) XtUnmanageChild(help);
+    Widget cancel = XmMessageBoxGetChild(dialog, XmDIALOG_CANCEL_BUTTON);
+    if (cancel) XtUnmanageChild(cancel);
+    XtAddCallback(dialog, XmNokCallback, (XtCallbackProc)XtDestroyWidget, dialog);
+    XtManageChild(dialog);
 }
 
 static void on_browser_area_button_press(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch)
@@ -4354,6 +4482,30 @@ write_indent(FILE *f, int indent)
 }
 
 static void
+write_bookmark_entry(FILE *f, BookmarkEntry *entry, int indent)
+{
+    if (!f || !entry) return;
+    time_t now = time(NULL);
+    write_indent(f, indent);
+    std::string icon_attr;
+    if (!entry->icon_png.empty()) {
+        std::string encoded = base64_encode(entry->icon_png);
+        icon_attr = " ICON=\"data:image/png;base64,";
+        icon_attr += encoded;
+        icon_attr += "\"";
+    }
+    fprintf(f,
+            "<DT><A HREF=\"%s\" ADD_DATE=\"%lld\" LAST_MODIFIED=\"%lld\" LAST_VISIT=\"%lld\" SHOW_IN_MENU=\"%d\"%s>%s</A>\n",
+            escape_html(entry->url).c_str(),
+            (long long)now,
+            (long long)now,
+            (long long)now,
+            entry->show_in_menu ? 1 : 0,
+            icon_attr.c_str(),
+            escape_html(entry->name).c_str());
+}
+
+static void
 write_group_contents(FILE *f, BookmarkGroup *group, int indent)
 {
     if (!f || !group) return;
@@ -4374,21 +4526,7 @@ write_group_contents(FILE *f, BookmarkGroup *group, int indent)
     }
     for (const auto &entry : group->entries) {
         if (!entry) continue;
-        write_indent(f, indent);
-        std::string icon_attr;
-        if (!entry->icon_png.empty()) {
-            std::string encoded = base64_encode(entry->icon_png);
-            icon_attr = " ICON=\"data:image/png;base64,";
-            icon_attr += encoded;
-            icon_attr += "\"";
-        }
-        fprintf(f,
-                "<DT><A HREF=\"%s\" ADD_DATE=\"%lld\" SHOW_IN_MENU=\"%d\"%s>%s</A>\n",
-                escape_html(entry->url).c_str(),
-                (long long)now,
-                entry->show_in_menu ? 1 : 0,
-                icon_attr.c_str(),
-                escape_html(entry->name).c_str());
+        write_bookmark_entry(f, entry.get(), indent);
     }
 }
 
@@ -4401,12 +4539,16 @@ write_netscape_bookmarks(FILE *f, BookmarkGroup *root)
             "<!-- This is an automatically generated file.\n"
             "     It will be read and overwritten.\n"
             "     DO NOT EDIT! -->\n"
+            "<HTML>\n"
+            "<HEAD>\n"
             "<META HTTP-EQUIV=\"Content-Type\" CONTENT=\"text/html; charset=UTF-8\">\n"
             "<TITLE>Bookmarks</TITLE>\n"
+            "</HEAD>\n"
+            "<BODY>\n"
             "<H1>Bookmarks</H1>\n\n"
             "<DL><p>\n");
     write_group_contents(f, root, 4);
-    fprintf(f, "</DL><p>\n");
+    fprintf(f, "</DL><p>\n</BODY>\n</HTML>\n");
 }
 
 static bool

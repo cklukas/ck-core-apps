@@ -29,16 +29,20 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <string.h>
 #include <limits.h>
 #include <unistd.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <ctime>
 #include <algorithm>
 #include <functional>
+#include <list>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 extern "C" {
@@ -140,10 +144,28 @@ struct BrowserTab {
     bool devtools_show_scheduled = false;
 };
 
+struct FaviconCacheEntry {
+    std::vector<unsigned char> data;
+    std::vector<unsigned char> png_data;
+    int width = 0;
+    int height = 0;
+    time_t saved_time = 0;
+    std::list<std::string>::iterator order_it;
+};
+
+static const size_t kFaviconCacheLimit = 500;
+static const time_t kFaviconCacheTTL_SECONDS = 6 * 60 * 60;
+static std::unordered_map<std::string, FaviconCacheEntry> g_favicon_cache;
+static std::list<std::string> g_favicon_cache_order;
+
 struct BookmarkEntry {
     std::string name;
     std::string url;
     bool show_in_menu = false;
+    std::vector<unsigned char> icon_raw;
+    std::vector<unsigned char> icon_png;
+    int icon_width = 0;
+    int icon_height = 0;
 };
 
 struct BookmarkGroup {
@@ -171,6 +193,9 @@ struct BookmarkManagerContext {
     Widget edit_button = NULL;
     std::vector<BookmarkGroup *> group_entries;
     std::vector<BookmarkEntry *> entry_items;
+    std::vector<Widget> bookmark_entry_widgets;
+    std::vector<Pixmap> bookmark_entry_pixmaps;
+    Widget selected_entry_widget = NULL;
     BookmarkGroup *selected_group = NULL;
     BookmarkEntry *selected_entry = NULL;
 };
@@ -182,7 +207,12 @@ static std::unique_ptr<BookmarkGroup> g_bookmark_root;
 static BookmarkGroup *g_selected_bookmark_group = NULL;
 static Widget g_bookmarks_menu = NULL;
 static std::vector<Widget> g_bookmark_menu_items;
+static std::vector<Pixmap> g_bookmark_menu_icon_pixmaps;
 static const char *kInitialBrowserUrl = "https://www.wikipedia.org";
+static const char *kBookmarksFileName = "bookmarks.html";
+static char g_bookmarks_file_path[PATH_MAX] = "";
+static bool g_bookmarks_path_ready = false;
+static time_t g_bookmarks_file_mtime = 0;
 static std::string normalize_url(const char *input);
 static const char *display_url_for_tab(const BrowserTab *tab);
 static bool is_devtools_url(const std::string &url);
@@ -232,10 +262,33 @@ static void on_bookmark_dialog_cancel(Widget w, XtPointer client_data, XtPointer
 static void show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry = NULL, BookmarkGroup *group = NULL);
 static void bookmark_dialog_populate_outline(BookmarkDialogContext *ctx, Widget outline, BookmarkGroup *group, Widget parent);
 static void bookmark_outline_node_activate_cb(Widget w, XtPointer client_data, XtPointer call_data);
+static void save_bookmarks_to_file();
+static std::unique_ptr<BookmarkGroup> load_bookmarks_from_file();
+static void ensure_path_directory(const char *path);
+static const char *get_bookmarks_file_path();
+static time_t get_file_mtime(const char *path);
+static std::string escape_html(const std::string &input);
+static std::string base64_encode(const std::vector<unsigned char> &data);
+static bool base64_decode(const std::string &input, std::vector<unsigned char> &output);
+static bool extract_base64_payload(const std::string &value, std::string &out_payload);
+static bool bookmark_entry_set_icon_png(BookmarkEntry *entry, const unsigned char *png_data, size_t png_size);
+static void bookmark_entry_copy_icon_from_cache(BookmarkEntry *entry, const char *url);
+static Pixmap create_bookmark_icon_pixmap(BookmarkEntry *entry, int target_size, Pixel bg_pixel);
+static void clear_bookmark_menu_icon_pixmaps();
+static void bookmark_manager_free_entry_pixmaps(BookmarkManagerContext *ctx);
+static void bookmark_manager_clear_entry_widgets(BookmarkManagerContext *ctx);
+static void bookmark_manager_entry_activate_cb(Widget w, XtPointer client_data, XtPointer call_data);
+static void write_netscape_bookmarks(FILE *f, BookmarkGroup *root);
+static void write_group_contents(FILE *f, BookmarkGroup *group, int indent);
+static void parse_netscape_bookmarks(const std::string &content, BookmarkGroup *root);
+static bool extract_tag_text(const std::string &content, size_t start, const char *closing_tag, size_t &out_end, std::string &out_text);
+static bool parse_attribute_value(const std::string &tag, const char *name, std::string &out_value);
+static BookmarkGroup *find_or_create_child_group(BookmarkGroup *parent, const std::string &name);
+static std::unique_ptr<BookmarkGroup> create_default_bookmark_tree();
+static void bookmark_file_monitor_timer_cb(XtPointer client_data, XtIntervalId *id);
 static void close_bookmark_manager_dialog(BookmarkManagerContext *ctx);
 static void bookmark_manager_update_entry_list(BookmarkManagerContext *ctx);
 static void bookmark_manager_group_selection_cb(Widget w, XtPointer client_data, XtPointer call_data);
-static void bookmark_manager_entry_selection_cb(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_bookmark_manager_open(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_bookmark_manager_edit(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_bookmark_manager_cancel(Widget w, XtPointer client_data, XtPointer call_data);
@@ -2187,6 +2240,128 @@ static int desired_window_icon_size()
     return 96;
 }
 
+static void remove_favicon_cache_entry(const std::string &key)
+{
+    auto it = g_favicon_cache.find(key);
+    if (it == g_favicon_cache.end()) return;
+    if (it->second.order_it != g_favicon_cache_order.end()) {
+        g_favicon_cache_order.erase(it->second.order_it);
+    }
+    g_favicon_cache.erase(it);
+}
+
+static void cleanup_favicon_cache()
+{
+    time_t now = time(NULL);
+    std::vector<std::string> expired;
+    for (const auto &pair : g_favicon_cache) {
+        if (now - pair.second.saved_time > kFaviconCacheTTL_SECONDS) {
+            expired.push_back(pair.first);
+        }
+    }
+    for (const auto &key : expired) {
+        remove_favicon_cache_entry(key);
+    }
+}
+
+static bool apply_favicon_to_tab_from_raw(BrowserTab *tab,
+                                          const unsigned char *raw,
+                                          int raw_w,
+                                          int raw_h,
+                                          int toolbar_size,
+                                          int window_size,
+                                          Pixel toolbar_bg_pixel)
+{
+    if (!tab || !g_toplevel || !raw || raw_w <= 0 || raw_h <= 0) return false;
+    Display *display = XtDisplay(g_toplevel);
+    if (!display) return false;
+    int screen = DefaultScreen(display);
+    Pixmap toolbar_pix = create_scaled_toolbar_pixmap_from_bgra(display,
+                                                                screen,
+                                                                raw,
+                                                                raw_w,
+                                                                raw_h,
+                                                                toolbar_size,
+                                                                toolbar_bg_pixel);
+    Pixmap window_pix = None;
+    Pixmap window_mask = None;
+    (void)create_scaled_window_icon_from_bgra(display,
+                                              screen,
+                                              raw,
+                                              raw_w,
+                                              raw_h,
+                                              window_size,
+                                              &window_pix,
+                                              &window_mask);
+    if (toolbar_pix != None) {
+        if (tab->favicon_toolbar_pixmap != None) {
+            XFreePixmap(display, tab->favicon_toolbar_pixmap);
+        }
+        tab->favicon_toolbar_pixmap = toolbar_pix;
+        tab->favicon_toolbar_size = toolbar_size;
+    }
+    if (window_pix != None) {
+        if (tab->favicon_window_pixmap != None) {
+            XFreePixmap(display, tab->favicon_window_pixmap);
+        }
+        if (tab->favicon_window_mask != None) {
+            XFreePixmap(display, tab->favicon_window_mask);
+        }
+        tab->favicon_window_pixmap = window_pix;
+        tab->favicon_window_mask = window_mask;
+        tab->favicon_window_size = window_size;
+    }
+    return toolbar_pix != None || window_pix != None;
+}
+
+static void store_favicon_in_cache(const char *url,
+                                   const unsigned char *raw,
+                                   size_t raw_size,
+                                   int width,
+                                   int height,
+                                   const unsigned char *png,
+                                   size_t png_size)
+{
+    if (!url || !raw || raw_size == 0 || width <= 0 || height <= 0) return;
+    std::string key(url);
+    std::vector<unsigned char> copy(raw, raw + raw_size);
+    std::vector<unsigned char> png_copy;
+    if (png && png_size > 0) {
+        png_copy.assign(png, png + png_size);
+    }
+    time_t now = time(NULL);
+    auto it = g_favicon_cache.find(key);
+    if (it != g_favicon_cache.end()) {
+        it->second.data = std::move(copy);
+        it->second.width = width;
+        it->second.height = height;
+        it->second.saved_time = now;
+        it->second.png_data = std::move(png_copy);
+        if (it->second.order_it != g_favicon_cache_order.end()) {
+            g_favicon_cache_order.erase(it->second.order_it);
+        }
+        g_favicon_cache_order.push_back(key);
+        auto order_it = g_favicon_cache_order.end();
+        --order_it;
+        it->second.order_it = order_it;
+    } else {
+        FaviconCacheEntry entry;
+        entry.data = std::move(copy);
+        entry.width = width;
+        entry.height = height;
+        entry.saved_time = now;
+        entry.png_data = std::move(png_copy);
+        g_favicon_cache_order.push_back(key);
+        auto order_it = g_favicon_cache_order.end();
+        --order_it;
+        entry.order_it = order_it;
+        g_favicon_cache.emplace(key, std::move(entry));
+    }
+    while (g_favicon_cache.size() > kFaviconCacheLimit && !g_favicon_cache_order.empty()) {
+        remove_favicon_cache_entry(g_favicon_cache_order.front());
+    }
+}
+
 class FaviconDownloadCallback : public CefDownloadImageCallback {
  public:
   FaviconDownloadCallback(BrowserTab *tab,
@@ -2225,54 +2400,28 @@ class FaviconDownloadCallback : public CefDownloadImageCallback {
       fprintf(stderr, "[ck-browser] favicon bitmap invalid tab=%p size=%zu\n", (void *)tab_, raw_size);
       return;
     }
-    if (!g_toplevel) {
-      return;
-    }
-    Display *display = XtDisplay(g_toplevel);
-    if (!display) {
-      return;
-    }
-    int screen = DefaultScreen(display);
-    Pixmap toolbar_pix = create_scaled_toolbar_pixmap_from_bgra(display,
-                                                                screen,
-                                                                raw,
-                                                                pixel_w,
-                                                                pixel_h,
-                                                                toolbar_size_,
-                                                                toolbar_bg_pixel_);
-
-    Pixmap window_pix = None;
-    Pixmap window_mask = None;
-    (void)create_scaled_window_icon_from_bgra(display,
-                                              screen,
-                                              raw,
-                                              pixel_w,
-                                              pixel_h,
-                                              window_size_,
-                                              &window_pix,
-                                              &window_mask);
-
-    if (toolbar_pix != None) {
-      if (tab_->favicon_toolbar_pixmap != None) {
-        XFreePixmap(display, tab_->favicon_toolbar_pixmap);
+    int png_w = 0;
+    int png_h = 0;
+    CefRefPtr<CefBinaryValue> png_value = image->GetAsPNG(1.0f, true, png_w, png_h);
+    std::vector<unsigned char> png_bytes;
+    if (png_value && png_value->GetSize() > 0) {
+      const unsigned char *png_data = (const unsigned char *)png_value->GetRawData();
+      size_t png_size = png_value->GetSize();
+      if (png_data && png_size > 0) {
+        png_bytes.assign(png_data, png_data + png_size);
       }
-      tab_->favicon_toolbar_pixmap = toolbar_pix;
-      tab_->favicon_toolbar_size = toolbar_size_;
     }
-
-    if (window_pix != None) {
-      if (tab_->favicon_window_pixmap != None) {
-        XFreePixmap(display, tab_->favicon_window_pixmap);
+    store_favicon_in_cache(tab_->favicon_url.c_str(),
+                           raw,
+                           raw_size,
+                           pixel_w,
+                           pixel_h,
+                           png_bytes.empty() ? NULL : png_bytes.data(),
+                           png_bytes.size());
+    if (apply_favicon_to_tab_from_raw(tab_, raw, pixel_w, pixel_h, toolbar_size_, window_size_, toolbar_bg_pixel_)) {
+      if (tab_ == g_current_tab) {
+        update_favicon_controls(tab_);
       }
-      if (tab_->favicon_window_mask != None) {
-        XFreePixmap(display, tab_->favicon_window_mask);
-      }
-      tab_->favicon_window_pixmap = window_pix;
-      tab_->favicon_window_mask = window_mask;
-      tab_->favicon_window_size = window_size_;
-    }
-    if (tab_ == g_current_tab) {
-      update_favicon_controls(tab_);
     }
   }
 
@@ -2300,6 +2449,29 @@ static void request_favicon_download(BrowserTab *tab, const char *reason)
         XtVaGetValues(g_favicon_label, XmNbackground, &bg_pixel, NULL);
     } else if (g_toplevel) {
         XtVaGetValues(g_toplevel, XmNbackground, &bg_pixel, NULL);
+    }
+
+    cleanup_favicon_cache();
+    time_t now = time(NULL);
+    auto cache_it = g_favicon_cache.find(tab->favicon_url);
+    if (cache_it != g_favicon_cache.end()) {
+        time_t age = now - cache_it->second.saved_time;
+        size_t expected_size = (size_t)cache_it->second.width * (size_t)cache_it->second.height * 4u;
+        if (age <= kFaviconCacheTTL_SECONDS &&
+            cache_it->second.data.size() >= expected_size &&
+            apply_favicon_to_tab_from_raw(tab,
+                                          cache_it->second.data.data(),
+                                          cache_it->second.width,
+                                          cache_it->second.height,
+                                          toolbar_size,
+                                          window_size,
+                                          bg_pixel)) {
+            if (tab == g_current_tab) {
+                update_favicon_controls(tab);
+            }
+            return;
+        }
+        remove_favicon_cache_entry(cache_it->first);
     }
 
     fprintf(stderr,
@@ -2669,13 +2841,15 @@ static void initialize_cef_browser_cb(XtPointer client_data, XtIntervalId *id)
     tab->create_scheduled = false;
 }
 
-static Widget create_menu_item(Widget parent, const char *name, const char *label)
+static Widget create_menu_item(Widget parent, const char *name, const char *label, Pixmap icon = XmUNSPECIFIED_PIXMAP)
 {
     XmString xm_label = make_string(label);
     Widget item = XtVaCreateManagedWidget(
         name,
         xmPushButtonGadgetClass, parent,
         XmNlabelString, xm_label,
+        XmNlabelType, icon != XmUNSPECIFIED_PIXMAP ? XmPIXMAP_AND_STRING : XmSTRING,
+        XmNlabelPixmap, icon != XmUNSPECIFIED_PIXMAP ? icon : XmUNSPECIFIED_PIXMAP,
         NULL);
     XmStringFree(xm_label);
     return item;
@@ -3626,6 +3800,7 @@ static void
 close_bookmark_manager_dialog(BookmarkManagerContext *ctx)
 {
     if (!ctx) return;
+    bookmark_manager_clear_entry_widgets(ctx);
     if (ctx->dialog) {
         XtDestroyWidget(ctx->dialog);
     }
@@ -3636,16 +3811,10 @@ static void
 bookmark_manager_update_entry_list(BookmarkManagerContext *ctx)
 {
     if (!ctx || !ctx->bookmark_list) return;
-    XmListDeleteAllItems(ctx->bookmark_list);
-    ctx->entry_items.clear();
-    ctx->selected_entry = NULL;
-    if (ctx->open_button) {
-        XtSetSensitive(ctx->open_button, False);
-    }
-    if (ctx->edit_button) {
-        XtSetSensitive(ctx->edit_button, False);
-    }
+    bookmark_manager_clear_entry_widgets(ctx);
     if (!ctx->selected_group) return;
+    Pixel bg = 0;
+    XtVaGetValues(ctx->bookmark_list, XmNbackground, &bg, NULL);
     for (const auto &entry : ctx->selected_group->entries) {
         if (!entry) continue;
         std::string label;
@@ -3658,9 +3827,29 @@ bookmark_manager_update_entry_list(BookmarkManagerContext *ctx)
             label = "Bookmark";
         }
         XmString xm_label = make_string(label.c_str());
-        XmListAddItemUnselected(ctx->bookmark_list, xm_label, (int)ctx->entry_items.size() + 1);
+        Pixmap icon_pix = create_bookmark_icon_pixmap(entry.get(), desired_favicon_size(), bg);
+        if (icon_pix != None) {
+            ctx->bookmark_entry_pixmaps.push_back(icon_pix);
+        }
+        Widget item = XtVaCreateManagedWidget(
+            "bookmarkManagerEntry",
+            xmPushButtonWidgetClass, ctx->bookmark_list,
+            XmNlabelString, xm_label,
+            XmNlabelType, icon_pix != None ? XmPIXMAP_AND_STRING : XmSTRING,
+            XmNlabelPixmap, icon_pix != None ? icon_pix : XmUNSPECIFIED_PIXMAP,
+            XmNalignment, XmALIGNMENT_BEGINNING,
+            XmNuserData, entry.get(),
+            NULL);
         XmStringFree(xm_label);
+        XtAddCallback(item, XmNactivateCallback, bookmark_manager_entry_activate_cb, ctx);
+        ctx->bookmark_entry_widgets.push_back(item);
         ctx->entry_items.push_back(entry.get());
+    }
+    if (!ctx->bookmark_entry_widgets.empty()) {
+        Widget first = ctx->bookmark_entry_widgets[0];
+        if (first) {
+            bookmark_manager_entry_activate_cb(first, ctx, NULL);
+        }
     }
 }
 
@@ -3677,28 +3866,6 @@ bookmark_manager_group_selection_cb(Widget w, XtPointer client_data, XtPointer c
     }
     ctx->selected_group = ctx->group_entries[cbs->item_position - 1];
     bookmark_manager_update_entry_list(ctx);
-}
-
-static void
-bookmark_manager_entry_selection_cb(Widget w, XtPointer client_data, XtPointer call_data)
-{
-    (void)w;
-    BookmarkManagerContext *ctx = (BookmarkManagerContext *)client_data;
-    if (!ctx || !call_data) return;
-    XmListCallbackStruct *cbs = (XmListCallbackStruct *)call_data;
-    if (cbs->item_position <= 0 ||
-        cbs->item_position > (int)ctx->entry_items.size()) {
-        ctx->selected_entry = NULL;
-    } else {
-        ctx->selected_entry = ctx->entry_items[cbs->item_position - 1];
-    }
-    Boolean enabled = ctx->selected_entry ? True : False;
-    if (ctx->open_button) {
-        XtSetSensitive(ctx->open_button, enabled);
-    }
-    if (ctx->edit_button) {
-        XtSetSensitive(ctx->edit_button, enabled);
-    }
 }
 
 static void
@@ -3742,6 +3909,21 @@ on_bookmark_manager_cancel(Widget w, XtPointer client_data, XtPointer call_data)
 }
 
 static void
+on_bookmark_manager_show_bookmarks(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)client_data;
+    (void)call_data;
+    BookmarkGroup *root = ensure_bookmark_groups();
+    if (!root) return;
+    save_bookmarks_to_file();
+    const char *path = get_bookmarks_file_path();
+    if (!path || !path[0]) return;
+    std::string url = std::string("file://") + path;
+    open_url_in_new_tab(url, True);
+}
+
+static void
 show_bookmark_manager_dialog()
 {
     if (!g_toplevel) return;
@@ -3753,6 +3935,7 @@ show_bookmark_manager_dialog()
                   XmNautoUnmanage, False,
                   XmNmarginWidth, 8,
                   XmNmarginHeight, 8,
+                  XmNtitle, "Bookmark Manager",
                   NULL);
     ctx->dialog = dialog;
 
@@ -3796,6 +3979,13 @@ show_bookmark_manager_dialog()
     XtAddCallback(cancel_button, XmNactivateCallback, on_bookmark_manager_cancel, ctx);
     XtManageChild(cancel_button);
 
+    XmString show_label = make_string("Show Bookmarks");
+    Widget show_button = XmCreatePushButtonGadget(button_row, xm_name("bookmarkManagerShowBookmarks"), NULL, 0);
+    XtVaSetValues(show_button, XmNlabelString, show_label, NULL);
+    XmStringFree(show_label);
+    XtAddCallback(show_button, XmNactivateCallback, on_bookmark_manager_show_bookmarks, ctx);
+    XtManageChild(show_button);
+
     Widget lists_area = XmCreateRowColumn(dialog, xm_name("bookmarkManagerLists"), NULL, 0);
     XtVaSetValues(lists_area,
                   XmNorientation, XmHORIZONTAL,
@@ -3829,17 +4019,20 @@ show_bookmark_manager_dialog()
 
     Widget bookmark_frame = XmCreateFrame(lists_area, xm_name("bookmarkManagerBookmarkFrame"), NULL, 0);
     XtManageChild(bookmark_frame);
-    Widget bookmark_list = XmCreateScrolledList(bookmark_frame, xm_name("bookmarkManagerBookmarkList"), NULL, 0);
-    XtVaSetValues(bookmark_list,
+    Widget bookmark_scroll = XmCreateScrolledWindow(bookmark_frame, xm_name("bookmarkManagerBookmarkScroll"), NULL, 0);
+    XtVaSetValues(bookmark_scroll,
                   XmNscrollingPolicy, XmAUTOMATIC,
-                  XmNleftAttachment, XmATTACH_FORM,
-                  XmNrightAttachment, XmATTACH_FORM,
-                  XmNtopAttachment, XmATTACH_FORM,
-                  XmNbottomAttachment, XmATTACH_FORM,
                   XmNwidth, 360,
                   XmNheight, 240,
                   NULL);
-    XtAddCallback(bookmark_list, XmNbrowseSelectionCallback, bookmark_manager_entry_selection_cb, ctx);
+    XtManageChild(bookmark_scroll);
+    Widget bookmark_list = XmCreateRowColumn(bookmark_scroll, xm_name("bookmarkManagerBookmarkList"), NULL, 0);
+    XtVaSetValues(bookmark_list,
+                  XmNorientation, XmVERTICAL,
+                  XmNpacking, XmPACK_TIGHT,
+                  XmNrowColumnType, XmWORK_AREA,
+                  XmNspacing, 4,
+                  NULL);
     XtManageChild(bookmark_list);
     ctx->bookmark_list = bookmark_list;
 
@@ -3869,19 +4062,37 @@ add_bookmark_group(BookmarkGroup *parent, const char *name)
     return child;
 }
 
+static std::unique_ptr<BookmarkGroup>
+create_default_bookmark_tree()
+{
+    auto root = std::make_unique<BookmarkGroup>();
+    root->name = "Bookmarks Menu";
+    BookmarkGroup *favorites = add_bookmark_group(root.get(), "Favorites");
+    add_bookmark_group(favorites, "Work");
+    add_bookmark_group(favorites, "Personal");
+    BookmarkGroup *other = add_bookmark_group(root.get(), "Other Bookmarks");
+    add_bookmark_group(other, "Research");
+    add_bookmark_group(other, "Snippets");
+    return root;
+}
+
 static BookmarkGroup *
 ensure_bookmark_groups()
 {
     if (g_bookmark_root) return g_bookmark_root.get();
-    g_bookmark_root = std::make_unique<BookmarkGroup>();
-    g_bookmark_root->name = "Bookmarks Menu";
-    BookmarkGroup *favorites = add_bookmark_group(g_bookmark_root.get(), "Favorites");
-    add_bookmark_group(favorites, "Work");
-    add_bookmark_group(favorites, "Personal");
-    BookmarkGroup *other = add_bookmark_group(g_bookmark_root.get(), "Other Bookmarks");
-    add_bookmark_group(other, "Research");
-    add_bookmark_group(other, "Snippets");
-    g_selected_bookmark_group = favorites ? favorites : g_bookmark_root.get();
+    std::unique_ptr<BookmarkGroup> loaded = load_bookmarks_from_file();
+    if (loaded) {
+        g_bookmark_root = std::move(loaded);
+    } else {
+        g_bookmark_root = create_default_bookmark_tree();
+    }
+    BookmarkGroup *selected = g_bookmark_root.get();
+    if (g_bookmark_root->children.empty()) {
+        selected = g_bookmark_root.get();
+    } else {
+        selected = g_bookmark_root->children[0].get();
+    }
+    g_selected_bookmark_group = selected ? selected : g_bookmark_root.get();
     return g_bookmark_root.get();
 }
 
@@ -3912,6 +4123,548 @@ collect_bookmark_menu_entries(BookmarkGroup *group,
     }
     for (const auto &child : group->children) {
         collect_bookmark_menu_entries(child.get(), entries);
+    }
+}
+
+static void
+ensure_path_directory(const char *path)
+{
+    if (!path) return;
+    char dir[PATH_MAX];
+    strncpy(dir, path, sizeof(dir) - 1);
+    dir[sizeof(dir) - 1] = '\0';
+    char *slash = strrchr(dir, '/');
+    if (slash) {
+        *slash = '\0';
+        if (dir[0]) {
+            mkdir(dir, 0700);
+        }
+    }
+}
+
+static const char *
+get_bookmarks_file_path()
+{
+    if (!g_bookmarks_path_ready) {
+        config_build_path(g_bookmarks_file_path, sizeof(g_bookmarks_file_path), kBookmarksFileName);
+        g_bookmarks_path_ready = true;
+    }
+    return g_bookmarks_file_path;
+}
+
+static time_t
+get_file_mtime(const char *path)
+{
+    if (!path || path[0] == '\0') return 0;
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        return st.st_mtime;
+    }
+    return 0;
+}
+
+static std::string
+escape_html(const std::string &input)
+{
+    std::string output;
+    output.reserve(input.size());
+    for (char c : input) {
+        switch (c) {
+            case '&': output += "&amp;"; break;
+            case '<': output += "&lt;"; break;
+            case '>': output += "&gt;"; break;
+            case '\"': output += "&quot;"; break;
+            default: output += c; break;
+        }
+    }
+    return output;
+}
+
+static const char kBase64Chars[] =
+"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+"abcdefghijklmnopqrstuvwxyz"
+"0123456789+/";
+
+static std::string
+base64_encode(const std::vector<unsigned char> &data)
+{
+    std::string output;
+    size_t len = data.size();
+    size_t i = 0;
+    output.reserve(((len + 2) / 3) * 4);
+    while (i + 2 < len) {
+        unsigned char a = data[i++];
+        unsigned char b = data[i++];
+        unsigned char c = data[i++];
+        output.push_back(kBase64Chars[a >> 2]);
+        output.push_back(kBase64Chars[((a & 0x3) << 4) | (b >> 4)]);
+        output.push_back(kBase64Chars[((b & 0xf) << 2) | (c >> 6)]);
+        output.push_back(kBase64Chars[c & 0x3f]);
+    }
+    size_t remaining = len - i;
+    if (remaining == 1) {
+        unsigned char a = data[i];
+        output.push_back(kBase64Chars[a >> 2]);
+        output.push_back(kBase64Chars[(a & 0x3) << 4]);
+        output.push_back('=');
+        output.push_back('=');
+    } else if (remaining == 2) {
+        unsigned char a = data[i++];
+        unsigned char b = data[i];
+        output.push_back(kBase64Chars[a >> 2]);
+        output.push_back(kBase64Chars[((a & 0x3) << 4) | (b >> 4)]);
+        output.push_back(kBase64Chars[(b & 0xf) << 2]);
+        output.push_back('=');
+    }
+    return output;
+}
+
+static inline bool
+is_base64_char(char c)
+{
+    return (c >= 'A' && c <= 'Z') ||
+           (c >= 'a' && c <= 'z') ||
+           (c >= '0' && c <= '9') ||
+           c == '+' || c == '/';
+}
+
+static bool
+base64_decode(const std::string &input, std::vector<unsigned char> &output)
+{
+    output.clear();
+    int val = 0;
+    int valb = -8;
+    for (char ch : input) {
+        if (isspace((unsigned char)ch)) continue;
+        if (ch == '=') {
+            valb = -8;
+            break;
+        }
+        if (!is_base64_char(ch)) continue;
+        val = (val << 6) + (int)(strchr(kBase64Chars, ch) - kBase64Chars);
+        valb += 6;
+        if (valb >= 0) {
+            output.push_back((unsigned char)((val >> valb) & 0xff));
+            valb -= 8;
+        }
+    }
+    return !output.empty();
+}
+
+static bool
+extract_base64_payload(const std::string &value, std::string &out_payload)
+{
+    if (value.empty()) return false;
+    size_t comma = value.find(',');
+    if (comma == std::string::npos) {
+        out_payload = value;
+    } else {
+        out_payload = value.substr(comma + 1);
+    }
+    while (!out_payload.empty() && isspace((unsigned char)out_payload.front())) {
+        out_payload.erase(out_payload.begin());
+    }
+    while (!out_payload.empty() && isspace((unsigned char)out_payload.back())) {
+        out_payload.pop_back();
+    }
+    return !out_payload.empty();
+}
+
+static bool
+bookmark_entry_set_icon_png(BookmarkEntry *entry, const unsigned char *png_data, size_t png_size)
+{
+    if (!entry || !png_data || png_size == 0) return false;
+    CefRefPtr<CefImage> image = CefImage::CreateImage();
+    if (!image) return false;
+    if (!image->AddPNG(1.0f, png_data, png_size)) return false;
+    int pixel_w = 0;
+    int pixel_h = 0;
+    CefRefPtr<CefBinaryValue> raw = image->GetAsBitmap(1.0f,
+                                                      CEF_COLOR_TYPE_BGRA_8888,
+                                                      CEF_ALPHA_TYPE_PREMULTIPLIED,
+                                                      pixel_w,
+                                                      pixel_h);
+    if (!raw || pixel_w <= 0 || pixel_h <= 0) return false;
+    const unsigned char *raw_bytes = (const unsigned char *)raw->GetRawData();
+    if (!raw_bytes) return false;
+    size_t raw_size = raw->GetSize();
+    entry->icon_png.assign(png_data, png_data + png_size);
+    entry->icon_raw.assign(raw_bytes, raw_bytes + raw_size);
+    entry->icon_width = pixel_w;
+    entry->icon_height = pixel_h;
+    return true;
+}
+
+static void
+bookmark_entry_copy_icon_from_cache(BookmarkEntry *entry, const char *url)
+{
+    if (!entry || !url) return;
+    auto it = g_favicon_cache.find(url);
+    if (it == g_favicon_cache.end()) return;
+    if (it->second.width > 0 && it->second.height > 0) {
+        size_t expected_size = (size_t)it->second.width * (size_t)it->second.height * 4u;
+        if (it->second.data.size() >= expected_size) {
+            entry->icon_raw = it->second.data;
+            entry->icon_width = it->second.width;
+            entry->icon_height = it->second.height;
+        }
+    }
+    if (!it->second.png_data.empty()) {
+        entry->icon_png = it->second.png_data;
+    }
+}
+
+static Pixmap
+create_bookmark_icon_pixmap(BookmarkEntry *entry, int target_size, Pixel bg_pixel)
+{
+    if (!entry || entry->icon_raw.empty() || entry->icon_width <= 0 || entry->icon_height <= 0 || target_size <= 0) {
+        return None;
+    }
+    if (!g_toplevel) return None;
+    Display *display = XtDisplay(g_toplevel);
+    if (!display) return None;
+    int screen = DefaultScreen(display);
+    return create_scaled_toolbar_pixmap_from_bgra(display,
+                                                  screen,
+                                                  entry->icon_raw.data(),
+                                                  entry->icon_width,
+                                                  entry->icon_height,
+                                                  target_size,
+                                                  bg_pixel);
+}
+
+static void
+clear_bookmark_menu_icon_pixmaps()
+{
+    Display *display = g_toplevel ? XtDisplay(g_toplevel) : NULL;
+    for (Pixmap pix : g_bookmark_menu_icon_pixmaps) {
+        if (pix != None && display) {
+            XFreePixmap(display, pix);
+        }
+    }
+    g_bookmark_menu_icon_pixmaps.clear();
+}
+
+static void
+write_indent(FILE *f, int indent)
+{
+    for (int i = 0; i < indent; ++i) {
+        fputc(' ', f);
+    }
+}
+
+static void
+write_group_contents(FILE *f, BookmarkGroup *group, int indent)
+{
+    if (!f || !group) return;
+    time_t now = time(NULL);
+    for (const auto &child : group->children) {
+        if (!child) continue;
+        write_indent(f, indent);
+        fprintf(f,
+                "<DT><H3 ADD_DATE=\"%lld\" LAST_MODIFIED=\"%lld\">%s</H3>\n",
+                (long long)now,
+                (long long)now,
+                escape_html(child->name).c_str());
+        write_indent(f, indent);
+        fprintf(f, "<DL><p>\n");
+        write_group_contents(f, child.get(), indent + 4);
+        write_indent(f, indent);
+        fprintf(f, "</DL><p>\n");
+    }
+    for (const auto &entry : group->entries) {
+        if (!entry) continue;
+        write_indent(f, indent);
+        std::string icon_attr;
+        if (!entry->icon_png.empty()) {
+            std::string encoded = base64_encode(entry->icon_png);
+            icon_attr = " ICON=\"data:image/png;base64,";
+            icon_attr += encoded;
+            icon_attr += "\"";
+        }
+        fprintf(f,
+                "<DT><A HREF=\"%s\" ADD_DATE=\"%lld\" SHOW_IN_MENU=\"%d\"%s>%s</A>\n",
+                escape_html(entry->url).c_str(),
+                (long long)now,
+                entry->show_in_menu ? 1 : 0,
+                icon_attr.c_str(),
+                escape_html(entry->name).c_str());
+    }
+}
+
+static void
+write_netscape_bookmarks(FILE *f, BookmarkGroup *root)
+{
+    if (!f || !root) return;
+    fprintf(f,
+            "<!DOCTYPE NETSCAPE-Bookmark-file-1>\n"
+            "<!-- This is an automatically generated file.\n"
+            "     It will be read and overwritten.\n"
+            "     DO NOT EDIT! -->\n"
+            "<META HTTP-EQUIV=\"Content-Type\" CONTENT=\"text/html; charset=UTF-8\">\n"
+            "<TITLE>Bookmarks</TITLE>\n"
+            "<H1>Bookmarks</H1>\n\n"
+            "<DL><p>\n");
+    write_group_contents(f, root, 4);
+    fprintf(f, "</DL><p>\n");
+}
+
+static bool
+extract_tag_text(const std::string &content, size_t start, const char *closing_tag, size_t &out_end, std::string &out_text)
+{
+    size_t closing = content.find(closing_tag, start);
+    if (closing == std::string::npos) return false;
+    out_text = content.substr(start, closing - start);
+    out_end = closing + strlen(closing_tag);
+    while (!out_text.empty() && isspace((unsigned char)out_text.front())) {
+        out_text.erase(out_text.begin());
+    }
+    while (!out_text.empty() && isspace((unsigned char)out_text.back())) {
+        out_text.pop_back();
+    }
+    return true;
+}
+
+static bool
+parse_attribute_value(const std::string &tag, const char *name, std::string &out_value)
+{
+    std::string lower_name;
+    for (const char *c = name; *c; ++c) {
+        lower_name.push_back(std::tolower((unsigned char)*c));
+    }
+    size_t pos = 0;
+    while (pos < tag.size()) {
+        while (pos < tag.size() && isspace((unsigned char)tag[pos])) ++pos;
+        size_t name_start = pos;
+        while (pos < tag.size() && tag[pos] != '=' && !isspace((unsigned char)tag[pos])) ++pos;
+        if (pos >= tag.size()) break;
+        std::string attr_name = tag.substr(name_start, pos - name_start);
+        std::string attr_name_lower;
+        for (char ch : attr_name) {
+            attr_name_lower.push_back(std::tolower((unsigned char)ch));
+        }
+        while (pos < tag.size() && isspace((unsigned char)tag[pos])) ++pos;
+        if (pos >= tag.size() || tag[pos] != '=') continue;
+        ++pos;
+        while (pos < tag.size() && isspace((unsigned char)tag[pos])) ++pos;
+        if (pos >= tag.size()) break;
+        char quote = tag[pos];
+        if (quote == '\"' || quote == '\'') {
+            ++pos;
+            size_t value_start = pos;
+            while (pos < tag.size() && tag[pos] != quote) ++pos;
+            std::string attr_value = tag.substr(value_start, pos - value_start);
+            if (attr_name_lower == lower_name) {
+                out_value = attr_value;
+                return true;
+            }
+            if (pos < tag.size()) ++pos;
+        } else {
+            size_t value_start = pos;
+            while (pos < tag.size() && !isspace((unsigned char)tag[pos])) ++pos;
+            std::string attr_value = tag.substr(value_start, pos - value_start);
+            if (attr_name_lower == lower_name) {
+                out_value = attr_value;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static std::string
+trim_whitespace(std::string value)
+{
+    size_t start = 0;
+    while (start < value.size() && isspace((unsigned char)value[start])) start++;
+    size_t end = value.size();
+    while (end > start && isspace((unsigned char)value[end - 1])) end--;
+    return value.substr(start, end - start);
+}
+
+static BookmarkGroup *
+find_or_create_child_group(BookmarkGroup *parent, const std::string &name)
+{
+    if (!parent) return NULL;
+    for (const auto &child : parent->children) {
+        if (child && child->name == name) {
+            return child.get();
+        }
+    }
+    return add_bookmark_group(parent, name.c_str());
+}
+
+static void
+parse_netscape_bookmarks(const std::string &content, BookmarkGroup *root)
+{
+    if (!root) return;
+    std::vector<BookmarkGroup *> stack;
+    stack.push_back(root);
+    size_t pos = 0;
+    while (pos < content.size()) {
+        size_t lt = content.find('<', pos);
+        if (lt == std::string::npos) break;
+        size_t gt = content.find('>', lt);
+        if (gt == std::string::npos) break;
+        std::string tag = content.substr(lt + 1, gt - lt - 1);
+        size_t name_start = 0;
+        while (name_start < tag.size() && isspace((unsigned char)tag[name_start])) {
+            name_start++;
+        }
+        if (name_start >= tag.size()) {
+            pos = gt + 1;
+            continue;
+        }
+        bool closing = false;
+        if (tag[name_start] == '/') {
+            closing = true;
+            name_start++;
+        }
+        size_t name_end = name_start;
+        while (name_end < tag.size() && !isspace((unsigned char)tag[name_end])) {
+            name_end++;
+        }
+        std::string name = tag.substr(name_start, name_end - name_start);
+        for (char &c : name) {
+            c = std::toupper((unsigned char)c);
+        }
+        if (closing) {
+            if (name == "DL" && stack.size() > 1) {
+                stack.pop_back();
+            }
+            pos = gt + 1;
+            continue;
+        }
+        if (name == "DL" || name == "P" || name == "DT") {
+            pos = gt + 1;
+            continue;
+        }
+        if (name == "H3") {
+            std::string folder_name;
+            size_t end_pos;
+            if (extract_tag_text(content, gt + 1, "</H3>", end_pos, folder_name)) {
+                BookmarkGroup *parent = stack.back();
+                std::string trimmed = trim_whitespace(folder_name);
+                BookmarkGroup *child = find_or_create_child_group(parent, trimmed);
+                if (child) {
+                    stack.push_back(child);
+                }
+                pos = end_pos;
+                continue;
+            }
+        } else if (name == "A") {
+            std::string href;
+            parse_attribute_value(tag, "HREF", href);
+            std::string show_in_menu;
+            parse_attribute_value(tag, "SHOW_IN_MENU", show_in_menu);
+            std::string icon_value;
+            parse_attribute_value(tag, "ICON", icon_value);
+            std::string link_text;
+            size_t end_pos;
+            if (extract_tag_text(content, gt + 1, "</A>", end_pos, link_text) && !href.empty()) {
+                BookmarkGroup *current = stack.back();
+                auto entry = std::make_unique<BookmarkEntry>();
+                entry->name = trim_whitespace(link_text);
+                entry->url = href;
+                entry->show_in_menu = (show_in_menu == "1" || show_in_menu == "true" || show_in_menu == "yes");
+                if (!icon_value.empty()) {
+                    std::string payload;
+                    if (extract_base64_payload(icon_value, payload)) {
+                        std::vector<unsigned char> icon_bytes;
+                        if (base64_decode(payload, icon_bytes)) {
+                            bookmark_entry_set_icon_png(entry.get(), icon_bytes.data(), icon_bytes.size());
+                        }
+                    }
+                }
+                current->entries.emplace_back(std::move(entry));
+                pos = end_pos;
+                continue;
+            }
+        }
+        pos = gt + 1;
+    }
+}
+
+static void
+save_bookmarks_to_file()
+{
+    if (!g_bookmark_root) return;
+    const char *path = get_bookmarks_file_path();
+    if (!path || path[0] == '\0') return;
+    ensure_path_directory(path);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    write_netscape_bookmarks(f, g_bookmark_root.get());
+    fclose(f);
+    g_bookmarks_file_mtime = get_file_mtime(path);
+}
+
+static std::unique_ptr<BookmarkGroup>
+load_bookmarks_from_file()
+{
+    const char *path = get_bookmarks_file_path();
+    if (!path || path[0] == '\0') return nullptr;
+    time_t new_mtime = get_file_mtime(path);
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        g_bookmarks_file_mtime = new_mtime;
+        return nullptr;
+    }
+    std::string content;
+    char buffer[4096];
+    size_t read = 0;
+    while ((read = fread(buffer, 1, sizeof(buffer), f)) > 0) {
+        content.append(buffer, read);
+    }
+    fclose(f);
+    auto root = std::make_unique<BookmarkGroup>();
+    root->name = "Bookmarks Menu";
+    parse_netscape_bookmarks(content, root.get());
+    g_bookmarks_file_mtime = new_mtime;
+    return root;
+}
+
+static void
+bookmark_file_monitor_timer_cb(XtPointer client_data, XtIntervalId *id)
+{
+    (void)client_data;
+    (void)id;
+    const char *path = get_bookmarks_file_path();
+    if (path && path[0]) {
+        struct stat st;
+        if (stat(path, &st) == 0) {
+            time_t current = st.st_mtime;
+            if (current == 0) {
+                current = get_file_mtime(path);
+            }
+            if (current != g_bookmarks_file_mtime) {
+                std::unique_ptr<BookmarkGroup> loaded = load_bookmarks_from_file();
+                if (loaded) {
+                    g_bookmark_root = std::move(loaded);
+                    BookmarkGroup *selected = g_bookmark_root.get();
+                    if (!g_bookmark_root->children.empty()) {
+                        selected = g_bookmark_root->children[0].get();
+                    }
+                    g_selected_bookmark_group = selected ? selected : g_bookmark_root.get();
+                    rebuild_bookmarks_menu_items();
+                }
+            }
+        } else if (g_bookmarks_file_mtime != 0) {
+            g_bookmarks_file_mtime = 0;
+            std::unique_ptr<BookmarkGroup> fallback = create_default_bookmark_tree();
+            if (fallback) {
+                g_bookmark_root = std::move(fallback);
+                BookmarkGroup *selected = g_bookmark_root.get();
+                if (!g_bookmark_root->children.empty()) {
+                    selected = g_bookmark_root->children[0].get();
+                }
+                g_selected_bookmark_group = selected ? selected : g_bookmark_root.get();
+                rebuild_bookmarks_menu_items();
+            }
+        }
+    }
+    if (g_app) {
+        XtAppAddTimeOut(g_app, 1000, bookmark_file_monitor_timer_cb, NULL);
     }
 }
 
@@ -3959,6 +4712,7 @@ rebuild_bookmarks_menu_items()
         }
     }
     g_bookmark_menu_items.clear();
+    clear_bookmark_menu_icon_pixmaps();
     BookmarkGroup *root = ensure_bookmark_groups();
     if (!root) return;
     std::vector<BookmarkEntry *> favorites;
@@ -3969,6 +4723,12 @@ rebuild_bookmarks_menu_items()
     static const char *kFavoriteAccelTexts[] = {
         "Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5",
         "Ctrl+6", "Ctrl+7", "Ctrl+8", "Ctrl+9"};
+    Pixel menu_bg = 0;
+    if (g_bookmarks_menu) {
+        XtVaGetValues(g_bookmarks_menu, XmNbackground, &menu_bg, NULL);
+    } else if (g_toplevel) {
+        XtVaGetValues(g_toplevel, XmNbackground, &menu_bg, NULL);
+    }
     for (size_t i = 0; i < favorites.size(); ++i) {
         BookmarkEntry *entry = favorites[i];
         if (!entry) continue;
@@ -3978,12 +4738,76 @@ rebuild_bookmarks_menu_items()
         if (label.empty()) {
             label = "Bookmark";
         }
-        Widget item = create_menu_item(g_bookmarks_menu, name_buf, label.c_str());
+        Pixmap icon_pix = create_bookmark_icon_pixmap(entry, desired_favicon_size(), menu_bg);
+        if (icon_pix != None) {
+            g_bookmark_menu_icon_pixmaps.push_back(icon_pix);
+        }
+        Widget item = create_menu_item(g_bookmarks_menu, name_buf, label.c_str(), icon_pix);
         XtAddCallback(item, XmNactivateCallback, on_bookmark_menu_activate, entry);
         if (i < sizeof(kFavoriteAccelerators) / sizeof(kFavoriteAccelerators[0])) {
             set_menu_accelerator(item, kFavoriteAccelerators[i], kFavoriteAccelTexts[i]);
         }
         g_bookmark_menu_items.push_back(item);
+    }
+}
+
+static void
+bookmark_manager_free_entry_pixmaps(BookmarkManagerContext *ctx)
+{
+    if (!ctx) return;
+    Display *display = NULL;
+    if (ctx->bookmark_list) {
+        display = XtDisplay(ctx->bookmark_list);
+    } else if (g_toplevel) {
+        display = XtDisplay(g_toplevel);
+    }
+    for (Pixmap pix : ctx->bookmark_entry_pixmaps) {
+        if (pix != None && display) {
+            XFreePixmap(display, pix);
+        }
+    }
+    ctx->bookmark_entry_pixmaps.clear();
+}
+
+static void
+bookmark_manager_clear_entry_widgets(BookmarkManagerContext *ctx)
+{
+    if (!ctx) return;
+    for (Widget w : ctx->bookmark_entry_widgets) {
+        if (w) {
+            XtDestroyWidget(w);
+        }
+    }
+    ctx->bookmark_entry_widgets.clear();
+    bookmark_manager_free_entry_pixmaps(ctx);
+    ctx->entry_items.clear();
+    ctx->selected_entry = NULL;
+    ctx->selected_entry_widget = NULL;
+    if (ctx->open_button) {
+        XtSetSensitive(ctx->open_button, False);
+    }
+    if (ctx->edit_button) {
+        XtSetSensitive(ctx->edit_button, False);
+    }
+}
+
+static void
+bookmark_manager_entry_activate_cb(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)call_data;
+    BookmarkManagerContext *ctx = (BookmarkManagerContext *)client_data;
+    if (!ctx || !w) return;
+    BookmarkEntry *entry = NULL;
+    XtVaGetValues(w, XmNuserData, &entry, NULL);
+    if (!entry) return;
+    ctx->selected_entry = entry;
+    ctx->selected_entry_widget = w;
+    Boolean enabled = True;
+    if (ctx->open_button) {
+        XtSetSensitive(ctx->open_button, enabled);
+    }
+    if (ctx->edit_button) {
+        XtSetSensitive(ctx->edit_button, enabled);
     }
 }
 
@@ -4087,6 +4911,9 @@ on_bookmark_dialog_save(Widget w, XtPointer client_data, XtPointer call_data)
             g_bookmark_root->entries.emplace_back(std::move(entry));
         }
     }
+    if (!ctx->editing_entry && tab && tab->favicon_url.c_str()) {
+        bookmark_entry_copy_icon_from_cache(entry_ptr, tab->favicon_url.c_str());
+    }
     const char *log_url = entry_ptr && !entry_ptr->url.empty() ? entry_ptr->url.c_str() : "(none)";
     fprintf(stderr,
             "[ck-browser] Add Bookmark dialog Save name='%s' target='%s' show_in_menu=%d url='%s'\n",
@@ -4100,6 +4927,7 @@ on_bookmark_dialog_save(Widget w, XtPointer client_data, XtPointer call_data)
     }
     delete ctx;
     rebuild_bookmarks_menu_items();
+    save_bookmarks_to_file();
 }
 
 static void
@@ -4113,6 +4941,7 @@ show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry, BookmarkGroup *e
     BookmarkDialogContext *ctx = new BookmarkDialogContext();
     ctx->editing_entry = entry;
     ctx->editing_group = entry_group;
+    const char *dialog_title = entry ? "Edit Bookmark" : "Add Bookmark";
     Widget dialog = XmCreateFormDialog(g_toplevel, xm_name("bookmarkAddDialog"), NULL, 0);
     XtVaSetValues(dialog,
                   XmNautoUnmanage, False,
@@ -4120,6 +4949,7 @@ show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry, BookmarkGroup *e
                   XmNmarginHeight, 10,
                   XmNwidth, 420,
                   XmNheight, 380,
+                  XmNtitle, dialog_title,
                   NULL);
     ctx->dialog = dialog;
 
@@ -4223,16 +5053,15 @@ show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry, BookmarkGroup *e
     }
     XmToggleButtonSetState(add_to_menu_toggle, toggle_state, False);
     ctx->add_to_menu_checkbox = add_to_menu_toggle;
+    XtVaSetValues(button_row,
+                  XmNtopAttachment, XmATTACH_WIDGET,
+                  XmNtopWidget, add_to_menu_toggle,
+                  XmNtopOffset, 8,
+                  NULL);
     XtVaSetValues(tree_frame,
                   XmNbottomAttachment, XmATTACH_WIDGET,
                   XmNbottomWidget, add_to_menu_toggle,
                   XmNbottomOffset, 6,
-                  NULL);
-
-    XtVaSetValues(button_row,
-                  XmNtopAttachment, XmATTACH_WIDGET,
-                  XmNtopWidget, add_to_menu_toggle,
-                  XmNtopOffset, 12,
                   NULL);
 
     ctx->group_entries.clear();
@@ -4952,6 +5781,7 @@ int main(int argc, char *argv[])
 
     XtRealizeWidget(toplevel);
     XtAppAddTimeOut(app, 0, attach_tab_handlers_cb, NULL);
+    XtAppAddTimeOut(app, 1000, bookmark_file_monitor_timer_cb, NULL);
 
     if (g_session_loaded && g_session_data) {
         session_apply_geometry(toplevel, g_session_data, "x", "y", "w", "h");

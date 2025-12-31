@@ -21,6 +21,7 @@
 #include <Xm/TabStack.h>
 #include <Xm/TextF.h>
 #include <Xm/ToggleB.h>
+#include <Xm/FileSB.h>
 #include <X11/Intrinsic.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -37,6 +38,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <stdarg.h>
+#include <system_error>
 #include <ctime>
 #include <algorithm>
 #include <functional>
@@ -109,6 +111,8 @@ static Widget g_zoom_label = NULL;
 static Widget g_zoom_minus_button = NULL;
 static Widget g_zoom_plus_button = NULL;
 static Widget g_reload_button = NULL;
+static Widget g_file_open_dialog = NULL;
+static std::string g_file_open_last_dir;
 static bool g_tab_sync_scheduled = false;
 static std::string g_homepage_url;
 static char g_resources_path[PATH_MAX] = "";
@@ -156,6 +160,8 @@ struct BrowserTab {
     unsigned char theme_r = 0;
     unsigned char theme_g = 0;
     unsigned char theme_b = 0;
+    int theme_color_retry_count = 0;
+    bool theme_color_retry_scheduled = false;
     Widget devtools_shell = NULL;
     Widget devtools_area = NULL;
     CefRefPtr<CefBrowser> devtools_browser;
@@ -178,6 +184,7 @@ struct FaviconCacheEntry {
 
 static const size_t kFaviconCacheLimit = 500;
 static const time_t kFaviconCacheTTL_SECONDS = 6 * 60 * 60;
+static const int kThemeColorRetryLimit = 3;
 static std::unordered_map<std::string, FaviconCacheEntry> g_favicon_cache;
 static std::list<std::string> g_favicon_cache_order;
 
@@ -260,6 +267,9 @@ static void on_enter_url(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_go_back_menu(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_go_forward_menu(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_reload_menu(Widget w, XtPointer client_data, XtPointer call_data);
+static void on_open_file_menu(Widget w, XtPointer client_data, XtPointer call_data);
+static void on_file_open_dialog_ok(Widget w, XtPointer client_data, XtPointer call_data);
+static void on_file_open_dialog_cancel(Widget w, XtPointer client_data, XtPointer call_data);
 static void set_status_label_text(const char *text);
 static void update_navigation_buttons(BrowserTab *tab);
 static void update_tab_label(BrowserTab *tab, const char *text);
@@ -357,6 +367,9 @@ static void apply_tab_theme_colors(BrowserTab *tab, bool active);
 static void attach_tab_handlers_cb(XtPointer client_data, XtIntervalId *id);
 static void update_favicon_controls(BrowserTab *tab);
 static void request_favicon_download(BrowserTab *tab, const char *reason);
+static void request_tab_theme_color(BrowserTab *tab);
+static void theme_color_request_timer_cb(XtPointer client_data, XtIntervalId *id);
+static void schedule_theme_color_request(BrowserTab *tab, int delay_ms);
 static void spawn_new_browser_window(const std::string &url);
 static void open_url_in_new_tab(const std::string &url, bool select);
 static int count_tabs_with_base_title(const char *base_title);
@@ -594,6 +607,7 @@ class BrowserClient : public CefClient,
       clear_tab_favicon(tab_);
     }
     tab_->loading = true;
+    tab_->theme_color_retry_count = 0;
     if (tab_ == g_current_tab) {
       update_url_field_for_tab(tab_);
       update_reload_button_for_tab(tab_);
@@ -606,8 +620,6 @@ class BrowserClient : public CefClient,
     CEF_REQUIRE_UI_THREAD();
     (void)httpStatusCode;
     if (!tab_ || !browser || !frame || !frame->IsMain()) return;
-    CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("ck_request_theme_color");
-    frame->SendProcessMessage(PID_RENDERER, msg);
   }
 
   bool OnOpenURLFromTab(CefRefPtr<CefBrowser> browser,
@@ -748,10 +760,41 @@ class BrowserClient : public CefClient,
     std::string name = message->GetName().ToString();
     if (name != "ck_theme_color") return false;
     CefRefPtr<CefListValue> args = message->GetArgumentList();
-    if (!args || args->GetSize() < 3) return true;
+    if (!args || args->GetSize() < 6) return true;
     int r = args->GetInt(0);
     int g = args->GetInt(1);
     int b = args->GetInt(2);
+    std::string source;
+    CefString source_val = args->GetString(3);
+    if (!source_val.empty()) {
+        source = source_val.ToString();
+    }
+    std::string raw_color;
+    CefString raw_val = args->GetString(4);
+    if (!raw_val.empty()) {
+        raw_color = raw_val.ToString();
+    }
+    std::string ready_state;
+    CefString ready_val = args->GetString(5);
+    if (!ready_val.empty()) {
+        ready_state = ready_val.ToString();
+    }
+    bool ready_complete = (ready_state == "complete" || ready_state == "interactive");
+    std::string frame_url = frame ? frame->GetURL().ToString() : std::string();
+    if (frame_url.empty()) frame_url = "(none)";
+    fprintf(stderr,
+            "[ck-browser] theme color tab=%s (%p) frame=%s url=%s rgb=%d,%d,%d source=%s raw='%s' readyState=%s\n",
+            tab_->base_title.empty() ? "Tab" : tab_->base_title.c_str(),
+            (void *)tab_,
+            frame_url.c_str(),
+            tab_->pending_url.empty() ? "(none)" : tab_->pending_url.c_str(),
+            r, g, b,
+            source.empty() ? "unknown" : source.c_str(),
+            raw_color.empty() ? "(empty)" : raw_color.c_str(),
+            ready_state.empty() ? "unknown" : ready_state.c_str());
+    if (!ready_complete) {
+      return true;
+    }
     if (r < 0) r = 0;
     if (g < 0) g = 0;
     if (b < 0) b = 0;
@@ -762,12 +805,25 @@ class BrowserClient : public CefClient,
     tab_->theme_g = (unsigned char)g;
     tab_->theme_b = (unsigned char)b;
     tab_->has_theme_color = true;
-    fprintf(stderr, "[ck-browser] theme color tab=%s (%p) rgb=%d,%d,%d\n",
-            tab_->base_title.empty() ? "Tab" : tab_->base_title.c_str(),
-            (void *)tab_,
-            r, g, b);
     if (tab_ == g_current_tab) {
       apply_tab_theme_colors(tab_, true);
+    }
+    bool fallback = (source.empty() || source == "fallback" || raw_color.empty() || raw_color == "#ffffff");
+    if (fallback && tab_) {
+      if (tab_->theme_color_retry_count < kThemeColorRetryLimit) {
+        schedule_theme_color_request(tab_, 250);
+        tab_->theme_color_retry_count++;
+        fprintf(stderr,
+                "[ck-browser] theme color fallback detected, retry %d for tab=%s\n",
+                tab_->theme_color_retry_count,
+                tab_->base_title.empty() ? "Tab" : tab_->base_title.c_str());
+      } else {
+        fprintf(stderr,
+                "[ck-browser] theme color retry limit reached for tab=%s\n",
+                tab_->base_title.empty() ? "Tab" : tab_->base_title.c_str());
+      }
+    } else if (!fallback && tab_) {
+      tab_->theme_color_retry_count = 0;
     }
     return true;
   }
@@ -876,6 +932,10 @@ class BrowserClient : public CefClient,
       if (tab_ == g_current_tab) {
         update_security_controls(tab_);
       }
+      schedule_theme_color_request(tab_, 50);
+      fprintf(stderr,
+              "[ck-browser] scheduling theme color request (loading finished) url=%s ready_state=complete\n",
+              tab_->pending_url.c_str());
     }
     if (tab_ == g_current_tab) {
       update_navigation_buttons(tab_);
@@ -936,18 +996,37 @@ class CkCefApp : public CefApp, public CefRenderProcessHandler {
         "  return null;"
         "}"
         "var c='';"
+        "var source='fallback';"
         "var meta=document.querySelector('meta[name=\"theme-color\"]');"
-        "if(meta&&meta.content) c=meta.content;"
+        "if(meta&&meta.content){"
+        "  c=meta.content;"
+        "  source='meta';"
+        "}"
         "if(!c){"
         "  var e=document.documentElement;"
         "  var cs=getComputedStyle(e);"
-        "  c=(cs&&cs.backgroundColor)||'';"
+        "  var candidate=(cs&&cs.backgroundColor)||'';"
+        "  if(candidate){"
+        "    c=candidate;"
+        "    source='html';"
+        "  }"
         "}"
         "if(!c&&document.body){"
         "  var cs2=getComputedStyle(document.body);"
-        "  c=(cs2&&cs2.backgroundColor)||'';"
+        "  var candidate2=(cs2&&cs2.backgroundColor)||'';"
+        "  if(candidate2){"
+        "    c=candidate2;"
+        "    source='body';"
+        "  }"
         "}"
-        "var rgb=norm(c||'#ffffff')||[255,255,255];"
+        "var used=c||'#ffffff';"
+        "if(!c){"
+        "  source='fallback';"
+        "}"
+        "var rgb=norm(used)||[255,255,255];"
+        "rgb.push(source);"
+        "rgb.push(used);"
+        "rgb.push(document.readyState||'unknown');"
         "return rgb;"
         "})()";
 
@@ -964,6 +1043,29 @@ class CkCefApp : public CefApp, public CefRenderProcessHandler {
     if (v0 && v0->IsInt()) r = v0->GetIntValue();
     if (v1 && v1->IsInt()) g = v1->GetIntValue();
     if (v2 && v2->IsInt()) b = v2->GetIntValue();
+    std::string source_str;
+    CefRefPtr<CefV8Value> v3 = retval->GetValue(3);
+    if (v3 && v3->IsString()) {
+      source_str = v3->GetStringValue();
+    }
+    std::string raw_str;
+    CefRefPtr<CefV8Value> v4 = retval->GetValue(4);
+    if (v4 && v4->IsString()) {
+      raw_str = v4->GetStringValue();
+    }
+    std::string ready_state;
+    CefRefPtr<CefV8Value> v5 = retval->GetValue(5);
+    if (v5 && v5->IsString()) {
+      ready_state = v5->GetStringValue();
+    }
+    fprintf(stderr,
+            "[ck-browser] renderer theme color rgb=%d,%d,%d source=%s raw='%s' readyState=%s\n",
+            r,
+            g,
+            b,
+            source_str.empty() ? "fallback" : source_str.c_str(),
+            raw_str.empty() ? "(empty)" : raw_str.c_str(),
+            ready_state.empty() ? "unknown" : ready_state.c_str());
     if (r < 0) r = 0;
     if (g < 0) g = 0;
     if (b < 0) b = 0;
@@ -976,6 +1078,9 @@ class CkCefApp : public CefApp, public CefRenderProcessHandler {
     args->SetInt(0, r);
     args->SetInt(1, g);
     args->SetInt(2, b);
+    args->SetString(3, source_str.empty() ? "fallback" : source_str.c_str());
+    args->SetString(4, raw_str.empty() ? "#ffffff" : raw_str.c_str());
+    args->SetString(5, ready_state.empty() ? "unknown" : ready_state.c_str());
     frame->SendProcessMessage(PID_BROWSER, reply);
     return true;
   }
@@ -2720,6 +2825,147 @@ static void load_url_for_tab(BrowserTab *tab, const std::string &url)
     if (tab == g_current_tab && g_url_field) {
         XmTextFieldSetString(g_url_field, const_cast<char *>(tab->pending_url.c_str()));
     }
+}
+
+static void request_tab_theme_color(BrowserTab *tab)
+{
+    if (!tab || !tab->browser) return;
+    CefRefPtr<CefFrame> frame = tab->browser->GetMainFrame();
+    if (!frame) return;
+    CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("ck_request_theme_color");
+    frame->SendProcessMessage(PID_RENDERER, msg);
+}
+
+static void theme_color_request_timer_cb(XtPointer client_data, XtIntervalId *id)
+{
+    (void)id;
+    BrowserTab *tab = (BrowserTab *)client_data;
+    if (!tab) return;
+    tab->theme_color_retry_scheduled = false;
+    request_tab_theme_color(tab);
+}
+
+static void schedule_theme_color_request(BrowserTab *tab, int delay_ms)
+{
+    if (!tab || !g_app) return;
+    if (tab->theme_color_retry_scheduled) return;
+    tab->theme_color_retry_scheduled = true;
+    fprintf(stderr,
+            "[ck-browser] schedule_theme_color_request tab=%s delay=%d pending=%s\n",
+            tab->base_title.empty() ? "Tab" : tab->base_title.c_str(),
+            delay_ms,
+            tab->pending_url.empty() ? "(none)" : tab->pending_url.c_str());
+    XtAppAddTimeOut(g_app, delay_ms, theme_color_request_timer_cb, (XtPointer)tab);
+}
+
+static std::string percent_encode_path(const std::string &path)
+{
+    static const char *safe_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~/";
+    std::string encoded;
+    encoded.reserve(path.size());
+    for (unsigned char ch : path) {
+        if (std::strchr(safe_chars, (char)ch)) {
+            encoded.push_back((char)ch);
+        } else {
+            char buf[4];
+            snprintf(buf, sizeof(buf), "%%%02X", ch);
+            encoded += buf;
+        }
+    }
+    return encoded;
+}
+
+static std::string make_absolute_path_for_file(const std::string &path)
+{
+    if (path.empty()) return std::string();
+    std::filesystem::path fs_path(path);
+    std::error_code ec;
+    if (!fs_path.is_absolute()) {
+        const std::filesystem::path cwd = std::filesystem::current_path(ec);
+        if (!ec) {
+            fs_path = cwd / fs_path;
+        }
+    }
+    fs_path = fs_path.lexically_normal();
+    return fs_path.string();
+}
+
+static void close_file_open_dialog()
+{
+    if (!g_file_open_dialog) return;
+    XtUnmanageChild(g_file_open_dialog);
+}
+
+static void on_file_open_dialog_ok(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)client_data;
+    XmFileSelectionBoxCallbackStruct *cb = (XmFileSelectionBoxCallbackStruct *)call_data;
+    if (!cb) {
+        close_file_open_dialog();
+        return;
+    }
+    char *raw_path = NULL;
+    if (cb->value) {
+        XmStringGetLtoR(cb->value, XmSTRING_DEFAULT_CHARSET, &raw_path);
+    }
+    if (raw_path) {
+        std::string selection(raw_path);
+        XtFree(raw_path);
+        std::string absolute = make_absolute_path_for_file(selection);
+        std::string file_url = absolute.empty() ? std::string() : std::string("file://") + percent_encode_path(absolute);
+        if (!file_url.empty()) {
+            BrowserTab *tab = get_selected_tab();
+            if (tab) {
+                load_url_for_tab(tab, file_url);
+            } else {
+                open_url_in_new_tab(file_url, true);
+            }
+            std::filesystem::path parent_dir(absolute);
+            std::filesystem::path directory = parent_dir.has_parent_path() ? parent_dir.parent_path() : parent_dir;
+            if (!directory.empty()) {
+                g_file_open_last_dir = directory.string();
+            }
+        }
+    }
+    close_file_open_dialog();
+}
+
+static void on_file_open_dialog_cancel(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)client_data;
+    (void)call_data;
+    close_file_open_dialog();
+}
+
+static void on_open_file_menu(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)client_data;
+    (void)call_data;
+    if (!g_file_open_dialog) {
+        static const char dialog_name[] = "fileOpenDialog";
+        g_file_open_dialog =
+            XmCreateFileSelectionDialog(g_toplevel, const_cast<String>(dialog_name), NULL, 0);
+        XtAddCallback(g_file_open_dialog, XmNokCallback, on_file_open_dialog_ok, NULL);
+        XtAddCallback(g_file_open_dialog, XmNcancelCallback, on_file_open_dialog_cancel, NULL);
+        XtAddCallback(g_file_open_dialog, XmNhelpCallback, on_file_open_dialog_cancel, NULL);
+        XtVaSetValues(XtParent(g_file_open_dialog), XmNtitle, "Open File...", NULL);
+    }
+    if (g_file_open_last_dir.empty()) {
+        std::error_code ec;
+        const std::filesystem::path cwd = std::filesystem::current_path(ec);
+        if (!ec && !cwd.empty()) {
+            g_file_open_last_dir = cwd.string();
+        }
+    }
+    if (!g_file_open_last_dir.empty()) {
+        XmString xm_dir = make_string(g_file_open_last_dir.c_str());
+        XtVaSetValues(g_file_open_dialog, XmNdirectory, xm_dir, NULL);
+        XmStringFree(xm_dir);
+    }
+    XtManageChild(g_file_open_dialog);
 }
 
 static void close_tab_browser(BrowserTab *tab)
@@ -5616,6 +5862,8 @@ static Widget create_menu_bar(Widget parent)
     Widget file_new_window = create_menu_item(file_menu, "fileNewWindow", "New Window");
     Widget file_new_tab = create_menu_item(file_menu, "fileNewTab", "New Tab");
     Widget file_close_tab = create_menu_item(file_menu, "fileCloseTab", "Close Tab");
+    Widget file_open_file =
+        create_menu_item(file_menu, "fileOpenFile", "Open File...");
     XtVaCreateManagedWidget("fileSep", xmSeparatorGadgetClass, file_menu, NULL);
     Widget file_exit = create_menu_item(file_menu, "fileExit", "Exit");
 
@@ -5649,7 +5897,6 @@ static Widget create_menu_bar(Widget parent)
     set_menu_accelerator(view_zoom_out, "Ctrl<Key>minus", "Ctrl+Minus");
     set_menu_accelerator(view_zoom_reset, "Ctrl<Key>0", "Ctrl+0");
     XtVaCreateManagedWidget("viewSep1", xmSeparatorGadgetClass, view_menu, NULL);
-    Widget view_restore = create_menu_item(view_menu, "viewRestoreSession", "Restore Session");
 
     Widget help_menu = XmCreatePulldownMenu(menu_bar, xm_name("helpMenu"), NULL, 0);
     XmString help_label = make_string("Help");
@@ -5669,11 +5916,13 @@ static Widget create_menu_bar(Widget parent)
     XtVaSetValues(file_new_window, XmNmnemonic, 'N', NULL);
     XtVaSetValues(file_new_tab, XmNmnemonic, 'T', NULL);
     XtVaSetValues(file_close_tab, XmNmnemonic, 'C', NULL);
+    XtVaSetValues(file_open_file, XmNmnemonic, 'O', NULL);
     XtVaSetValues(file_exit, XmNmnemonic, 'X', NULL);
 
     set_menu_accelerator(file_new_window, "Ctrl<Key>N", "Ctrl+N");
     set_menu_accelerator(file_new_tab, "Ctrl<Key>T", "Ctrl+T");
     set_menu_accelerator(file_close_tab, "Ctrl<Key>W", "Ctrl+W");
+    set_menu_accelerator(file_open_file, "Ctrl<Key>O", "Ctrl+O");
     set_menu_accelerator(file_exit, "Alt<Key>F4", "Alt+F4");
 
     XtVaSetValues(nav_back, XmNmnemonic, 'B', NULL);
@@ -5682,21 +5931,23 @@ static Widget create_menu_bar(Widget parent)
     XtVaSetValues(nav_open_url, XmNmnemonic, 'O', NULL);
     set_menu_accelerator(nav_back, "Alt<Key>osfLeft", "Alt+Left");
     set_menu_accelerator(nav_forward, "Alt<Key>osfRight", "Alt+Right");
+    Widget nav_restore = create_menu_item(nav_menu, "navRestoreSession", "Restore Session");
     set_menu_accelerator(nav_reload, "Ctrl<Key>R", "Ctrl+R");
     set_menu_accelerator(nav_open_url, "Ctrl<Key>L", "Ctrl+L");
 
     XtAddCallback(file_new_window, XmNactivateCallback, on_new_window, NULL);
     XtAddCallback(file_new_tab, XmNactivateCallback, on_new_tab, NULL);
     XtAddCallback(file_close_tab, XmNactivateCallback, on_close_tab, NULL);
+    XtAddCallback(file_open_file, XmNactivateCallback, on_open_file_menu, NULL);
     XtAddCallback(nav_open_url, XmNactivateCallback, on_enter_url, NULL);
     XtAddCallback(file_exit, XmNactivateCallback, on_menu_exit, g_app);
     XtAddCallback(nav_back, XmNactivateCallback, on_go_back_menu, NULL);
     XtAddCallback(nav_forward, XmNactivateCallback, on_go_forward_menu, NULL);
     XtAddCallback(nav_reload, XmNactivateCallback, on_reload_menu, NULL);
+    XtAddCallback(nav_restore, XmNactivateCallback, on_restore_session, NULL);
     XtAddCallback(view_zoom_in, XmNactivateCallback, on_zoom_in, NULL);
     XtAddCallback(view_zoom_out, XmNactivateCallback, on_zoom_out, NULL);
     XtAddCallback(view_zoom_reset, XmNactivateCallback, on_zoom_reset, NULL);
-    XtAddCallback(view_restore, XmNactivateCallback, on_restore_session, NULL);
     XtAddCallback(help_view, XmNactivateCallback, on_help_view, NULL);
     XtAddCallback(help_about, XmNactivateCallback, on_help_about, NULL);
 

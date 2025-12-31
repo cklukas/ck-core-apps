@@ -45,6 +45,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <filesystem>
 
 extern "C" {
 #include "../shared/about_dialog.h"
@@ -124,6 +125,8 @@ static SessionData *g_session_data = NULL;
 static bool g_session_loaded = false;
 static bool g_force_disable_gpu = false;
 static bool g_cef_initialized = false;
+static bool g_shutdown_requested = false;
+static int g_shutdown_pending_browsers = 0;
 
 struct BrowserTab {
     Widget page = NULL;
@@ -156,7 +159,7 @@ struct BrowserTab {
     Widget devtools_shell = NULL;
     Widget devtools_area = NULL;
     CefRefPtr<CefBrowser> devtools_browser;
-    CefRefPtr<CefClient> devtools_client;
+    CefRefPtr<DevToolsClient> devtools_client;
     int devtools_inspect_x = 0;
     int devtools_inspect_y = 0;
     bool devtools_show_scheduled = false;
@@ -379,6 +382,9 @@ static void ensure_home_button_menu();
 static void on_home_button_press(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch);
 static void on_home_menu_set_blank(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_home_menu_use_current(Widget w, XtPointer client_data, XtPointer call_data);
+static int count_open_browsers();
+static void on_cef_browser_closed(const char *tag);
+static void begin_shutdown_sequence(const char *reason);
 static void focus_url_field_timer(XtPointer client_data, XtIntervalId *id);
 static bool has_opengl_support();
 static void apply_gpu_switches();
@@ -777,6 +783,11 @@ class BrowserClient : public CefClient,
     if (tab_ && tab_->browser == browser) {
       tab_->browser = nullptr;
     }
+    on_cef_browser_closed("browser");
+  }
+
+  void detach_tab() {
+    tab_ = nullptr;
   }
 
   void OnAddressChange(CefRefPtr<CefBrowser> browser,
@@ -1002,6 +1013,11 @@ class DevToolsClient : public CefClient, public CefLifeSpanHandler {
       tab_->devtools_shell = NULL;
       tab_->devtools_area = NULL;
     }
+    on_cef_browser_closed("devtools");
+  }
+
+  void detach_tab() {
+    tab_ = nullptr;
   }
 
  private:
@@ -1013,13 +1029,12 @@ static void wm_delete_cb(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
     (void)call_data;
-    XtAppContext app = (XtAppContext)client_data;
     capture_session_state("wm delete");
     if (g_session_data && g_toplevel) {
         session_save(g_toplevel, g_session_data, g_subprocess_path);
     }
     save_last_session_file("wm delete");
-    XtAppSetExitFlag(app);
+    begin_shutdown_sequence("wm delete");
 }
 
 static bool alloc_rgb_pixel(Display *display, int screen, unsigned char r, unsigned char g, unsigned char b, Pixel *out_pixel)
@@ -2721,7 +2736,56 @@ static void close_tab_browser(BrowserTab *tab)
     }
     CefRefPtr<CefBrowserHost> host = tab->browser->GetHost();
     if (host) {
+        if (host->HasDevTools()) {
+            host->CloseDevTools();
+        }
         host->CloseBrowser(true);
+    }
+}
+
+static int count_open_browsers()
+{
+    int pending = 0;
+    for (const auto &tab : g_browser_tabs) {
+        if (tab->browser) pending++;
+        if (tab->devtools_browser) pending++;
+    }
+    return pending;
+}
+
+static void on_cef_browser_closed(const char *tag)
+{
+    if (!g_shutdown_requested) return;
+    if (g_shutdown_pending_browsers > 0) {
+        g_shutdown_pending_browsers--;
+    }
+    fprintf(stderr,
+            "[ck-browser] %s closed, pending=%d\n",
+            tag ? tag : "browser",
+            g_shutdown_pending_browsers);
+    if (g_shutdown_pending_browsers <= 0 && g_app) {
+        fprintf(stderr, "[ck-browser] shutdown complete, exiting main loop\n");
+        XtAppSetExitFlag(g_app);
+    }
+}
+
+static void begin_shutdown_sequence(const char *reason)
+{
+    if (g_shutdown_requested) return;
+    g_shutdown_requested = true;
+    g_shutdown_pending_browsers = count_open_browsers();
+    fprintf(stderr,
+            "[ck-browser] begin shutdown reason=%s pending=%d\n",
+            reason ? reason : "(null)",
+            g_shutdown_pending_browsers);
+    if (g_shutdown_pending_browsers == 0) {
+        if (g_app) {
+            XtAppSetExitFlag(g_app);
+        }
+        return;
+    }
+    for (const auto &tab : g_browser_tabs) {
+        close_tab_browser(tab.get());
     }
 }
 
@@ -3711,6 +3775,19 @@ static void on_home_menu_use_current(Widget w, XtPointer client_data, XtPointer 
     save_homepage_file(g_homepage_url, "home menu current");
 }
 
+static void detach_tab_clients(BrowserTab *tab)
+{
+    if (!tab) return;
+    if (tab->client) {
+        tab->client->detach_tab();
+        tab->client = nullptr;
+    }
+    if (tab->devtools_client) {
+        tab->devtools_client->detach_tab();
+        tab->devtools_client = nullptr;
+    }
+}
+
 static void remove_tab_from_collection(BrowserTab *tab)
 {
     if (!tab) return;
@@ -3719,6 +3796,8 @@ static void remove_tab_from_collection(BrowserTab *tab)
                                return entry.get() == tab;
                            });
     if (it != g_browser_tabs.end()) {
+        BrowserTab *match = it->get();
+        detach_tab_clients(match);
         g_browser_tabs.erase(it);
     }
 }
@@ -5514,13 +5593,13 @@ static void on_menu_exit(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
     (void)call_data;
-    XtAppContext app = (XtAppContext)client_data;
+    (void)client_data;
     capture_session_state("menu exit");
     if (g_session_data && g_toplevel) {
         session_save(g_toplevel, g_session_data, g_subprocess_path);
     }
     save_last_session_file("menu exit");
-    XtAppSetExitFlag(app);
+    begin_shutdown_sequence("menu exit");
 }
 
 static Widget create_menu_bar(Widget parent)
@@ -5855,6 +5934,31 @@ static char *xm_name(const char *name)
     return const_cast<char *>(name ? name : "");
 }
 
+static bool build_path_from_dir(const char *dir, const char *suffix, char *buffer, size_t buffer_len)
+{
+    if (!buffer || buffer_len == 0) return false;
+    buffer[0] = '\0';
+    if (!dir || dir[0] == '\0') return false;
+    size_t dir_len = strnlen(dir, PATH_MAX);
+    if (suffix && suffix[0]) {
+        size_t suffix_len = strlen(suffix);
+        if (dir_len + 1 + suffix_len + 1 > buffer_len) {
+            return false;
+        }
+        memcpy(buffer, dir, dir_len);
+        buffer[dir_len] = '/';
+        memcpy(buffer + dir_len + 1, suffix, suffix_len);
+        buffer[dir_len + 1 + suffix_len] = '\0';
+    } else {
+        if (dir_len + 1 > buffer_len) {
+            return false;
+        }
+        memcpy(buffer, dir, dir_len);
+        buffer[dir_len] = '\0';
+    }
+    return true;
+}
+
 static void build_cwd_path(char *buffer, size_t buffer_len, const char *suffix)
 {
     if (!buffer || buffer_len == 0) return;
@@ -5863,19 +5967,8 @@ static void build_cwd_path(char *buffer, size_t buffer_len, const char *suffix)
         buffer[0] = '\0';
         return;
     }
-    if (suffix && suffix[0]) {
-        size_t cwd_len = strnlen(cwd, sizeof(cwd));
-        size_t suffix_len = strlen(suffix);
-        if (cwd_len + 1 + suffix_len + 1 > buffer_len) {
-            buffer[0] = '\0';
-            return;
-        }
-        memcpy(buffer, cwd, cwd_len);
-        buffer[cwd_len] = '/';
-        memcpy(buffer + cwd_len + 1, suffix, suffix_len);
-        buffer[cwd_len + 1 + suffix_len] = '\0';
-    } else {
-        snprintf(buffer, buffer_len, "%s", cwd);
+    if (!build_path_from_dir(cwd, suffix, buffer, buffer_len)) {
+        buffer[0] = '\0';
     }
 }
 
@@ -5965,6 +6058,40 @@ static void dump_cef_env_and_args(int argc, char *argv[])
         const char *val = getenv(*env);
         fprintf(stderr, "  %s=%s\n", *env, val ? val : "(unset)");
     }
+}
+
+static bool find_existing_path(char *buffer, size_t buffer_len, const char *suffix)
+{
+    if (!buffer || buffer_len == 0 || !suffix || suffix[0] == '\0') return false;
+    buffer[0] = '\0';
+    char candidate[PATH_MAX];
+    char cwd[PATH_MAX];
+    if (getcwd(cwd, sizeof(cwd))) {
+        if (build_path_from_dir(cwd, suffix, candidate, sizeof(candidate)) &&
+            dir_has_files(candidate)) {
+            strncpy(buffer, candidate, buffer_len);
+            buffer[buffer_len - 1] = '\0';
+            return true;
+        }
+    }
+    char exe_path[PATH_MAX];
+    get_exe_path(exe_path, sizeof(exe_path));
+    if (exe_path[0] != '\0') {
+        std::filesystem::path parent = std::filesystem::path(exe_path).parent_path();
+        std::filesystem::path previous;
+        while (!parent.empty() && parent != previous) {
+            std::string base = parent.string();
+            if (build_path_from_dir(base.c_str(), suffix, candidate, sizeof(candidate)) &&
+                dir_has_files(candidate)) {
+                strncpy(buffer, candidate, buffer_len);
+                buffer[buffer_len - 1] = '\0';
+                return true;
+            }
+            previous = parent;
+            parent = parent.parent_path();
+        }
+    }
+    return false;
 }
 
 static bool parse_startup_url_arg(int argc, char *argv[], std::string *out_url)
@@ -6066,10 +6193,20 @@ int main(int argc, char *argv[])
     fprintf(stderr, "[ck-browser] homepage URL=%s\n",
             g_homepage_url.empty() ? "(empty)" : g_homepage_url.c_str());
 
-    build_cwd_path(g_resources_path, sizeof(g_resources_path), "third_party/cef/resources");
-    build_cwd_path(g_locales_path, sizeof(g_locales_path), "third_party/cef/locales");
+    if (!find_existing_path(g_resources_path, sizeof(g_resources_path),
+                            "third_party/cef/resources")) {
+        build_cwd_path(g_resources_path, sizeof(g_resources_path), "third_party/cef/resources");
+    }
+    if (!find_existing_path(g_locales_path, sizeof(g_locales_path),
+                            "third_party/cef/locales")) {
+        build_cwd_path(g_locales_path, sizeof(g_locales_path), "third_party/cef/locales");
+    }
     if (!dir_has_files(g_locales_path)) {
-        build_cwd_path(g_locales_path, sizeof(g_locales_path), "third_party/cef/resources/locales");
+        if (!find_existing_path(g_locales_path, sizeof(g_locales_path),
+                                "third_party/cef/resources/locales")) {
+            build_cwd_path(g_locales_path, sizeof(g_locales_path),
+                           "third_party/cef/resources/locales");
+        }
     }
     get_exe_path(g_subprocess_path, sizeof(g_subprocess_path));
     fprintf(stderr, "[ck-browser] resource_path=%s locales_path=%s subprocess=%s\n",
@@ -6267,15 +6404,17 @@ int main(int argc, char *argv[])
     XtAppMainLoop(app);
     LOG_ENTER("main loop finished, beginning shutdown");
     save_last_session_file("main loop exit");
-    LOG_ENTER("saved session; closing %zu tabs", g_browser_tabs.size());
-    for (const auto &tab : g_browser_tabs) {
-        close_tab_browser(tab.get());
-    }
-    g_browser_tabs.clear();
+    LOG_ENTER("saved session; shutdown requested=%d pending=%d",
+              g_shutdown_requested ? 1 : 0,
+              g_shutdown_pending_browsers);
     g_current_tab = NULL;
     LOG_ENTER("freeing session data %p", (void *)g_session_data);
     session_data_free(g_session_data);
     g_session_data = NULL;
+    for (const auto &tab : g_browser_tabs) {
+        detach_tab_clients(tab.get());
+    }
+    g_browser_tabs.clear();
     LOG_ENTER("about to call CefShutdown");
     CefShutdown();
     return 0;

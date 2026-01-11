@@ -83,6 +83,7 @@ extern "C" {
 #include <include/wrapper/cef_helpers.h>
 
 #include "browser_tab.h"
+#include "tab_manager.h"
 
 #include "browser_ui_bridge.h"
 
@@ -218,8 +219,6 @@ struct BookmarkManagerDeleteGroupDialogData {
     BookmarkGroup *selected_target_group = NULL;
 };
 
-static std::vector<std::unique_ptr<BrowserTab>> g_browser_tabs;
-static BrowserTab *g_current_tab = NULL;
 static std::unique_ptr<BookmarkGroup> g_bookmark_root;
 static BookmarkGroup *g_selected_bookmark_group = NULL;
 static Widget g_bookmarks_menu = NULL;
@@ -228,7 +227,7 @@ static std::vector<Widget> g_bookmark_group_cascade_widgets;
 static std::vector<Widget> g_bookmark_group_submenu_widgets;
 static std::vector<Widget> g_bookmark_group_separator_widgets;
 static std::vector<Pixmap> g_bookmark_menu_icon_pixmaps;
-static const char *kInitialBrowserUrl = "https://www.wikipedia.org";
+const char *kInitialBrowserUrl = "https://www.wikipedia.org";
 static const char *kBookmarksFileName = "bookmarks.html";
 static char g_bookmarks_file_path[PATH_MAX] = "";
 static bool g_bookmarks_path_ready = false;
@@ -241,8 +240,8 @@ void select_tab_page(BrowserTab *tab);
 static bool is_url_parseable(const std::string &url);
 static void show_devtools_for_tab_impl(BrowserTab *tab, int inspect_x, int inspect_y);
 static void start_devtools_browser_cb(XtPointer client_data, XtIntervalId *id);
-static char *xm_name(const char *name);
-static void on_tab_destroyed(Widget w, XtPointer client_data, XtPointer call_data);
+char *xm_name(const char *name);
+void on_tab_destroyed(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_tab_selection_changed(Widget w, XtPointer client_data, XtPointer call_data);
 BrowserTab *get_selected_tab();
 bool is_tab_selected(const BrowserTab *tab);
@@ -358,7 +357,7 @@ static void focus_motif_widget(Widget widget);
 static void browser_set_focus(BrowserTab *tab, bool focus);
 static void on_url_focus(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_url_button_press(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch);
-static void on_browser_area_button_press(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch);
+void on_browser_area_button_press(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch);
 static Widget pick_adjacent_tab_page(Widget current_page);
 void clear_tab_favicon(BrowserTab *tab);
 std::string extract_host_from_url(const std::string &url);
@@ -386,12 +385,6 @@ void request_favicon_download(BrowserTab *tab, const char *reason);
 static void theme_color_request_timer_cb(XtPointer client_data, XtIntervalId *id);
 void schedule_theme_color_request(BrowserTab *tab, int delay_ms);
 void open_url_in_new_tab(const std::string &url, bool select);
-static int count_tabs_with_base_title(const char *base_title);
-static BrowserTab *create_tab_page(Widget tab_stack,
-                                   const char *name,
-                                   const char *title,
-                                   const char *base_title,
-                                   const char *initial_url);
 static void capture_session_state(const char *reason);
 static void save_last_session_file(const char *reason);
 static void restore_last_session_from_file(const char *reason);
@@ -414,46 +407,7 @@ static void focus_url_field_timer(XtPointer client_data, XtIntervalId *id);
 static void on_add_bookmark_menu(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_open_bookmark_manager_menu(Widget w, XtPointer client_data, XtPointer call_data);
 
-class DevToolsClient : public CefClient, public CefLifeSpanHandler {
- public:
-  explicit DevToolsClient(BrowserTab *tab) : tab_(tab) {}
-
-  CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
-
-  void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
-    CEF_REQUIRE_UI_THREAD();
-    fprintf(stderr, "[ck-browser] DevToolsClient::OnAfterCreated tab=%p browser=%p\n",
-            (void *)tab_, (void *)browser.get());
-    if (tab_) {
-      tab_->devtools_browser = browser;
-      resize_devtools_to_area(tab_, "devtools created");
-    }
-  }
-
-  void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
-    CEF_REQUIRE_UI_THREAD();
-    fprintf(stderr, "[ck-browser] DevToolsClient::OnBeforeClose tab=%p browser=%p\n",
-            (void *)tab_, (void *)browser.get());
-    (void)browser;
-    if (!tab_) return;
-    tab_->devtools_browser = nullptr;
-    tab_->devtools_client = nullptr;
-    if (tab_->devtools_shell) {
-      XtDestroyWidget(tab_->devtools_shell);
-      tab_->devtools_shell = NULL;
-      tab_->devtools_area = NULL;
-    }
-    BrowserApp::instance().notify_browser_closed("devtools");
-  }
-
-  void detach_tab() {
-    tab_ = nullptr;
-  }
-
- private:
-  BrowserTab *tab_ = NULL;
-  IMPLEMENT_REFCOUNTING(DevToolsClient);
-};
+BrowserTab::~BrowserTab() = default;
 
 static void wm_delete_cb(Widget w, XtPointer client_data, XtPointer call_data)
 {
@@ -565,8 +519,9 @@ static void capture_session_state(const char *reason)
     if (active_idx < 0) active_idx = 0;
     session_data_set_int(g_session_data, "active_tab", active_idx);
 
+    const auto &tabs = TabManager::instance().tabs();
     int count = 0;
-    for (const auto &entry : g_browser_tabs) {
+    for (const auto &entry : tabs) {
         BrowserTab *tab = entry.get();
         if (!tab) continue;
         char key[64];
@@ -645,8 +600,9 @@ static void save_last_session_file(const char *reason)
     FILE *fp = fopen(path, "w");
     if (!fp) return;
     fprintf(fp, "# ck-browser last session\n");
+    const auto &tabs = TabManager::instance().tabs();
     int count = 0;
-    for (const auto &entry : g_browser_tabs) {
+    for (const auto &entry : tabs) {
         BrowserTab *tab = entry.get();
         if (!tab) continue;
         const char *url = display_url_for_tab(tab);
@@ -689,8 +645,9 @@ static void restore_last_session_from_file(const char *reason)
             reason ? reason : "(null)", path, (int)urls.size());
 
     std::vector<Widget> existing_pages;
-    existing_pages.reserve(g_browser_tabs.size());
-    for (const auto &entry : g_browser_tabs) {
+    const auto &tabs = TabManager::instance().tabs();
+    existing_pages.reserve(tabs.size());
+    for (const auto &entry : tabs) {
         BrowserTab *tab = entry.get();
         if (tab && tab->page) {
             existing_pages.push_back(tab->page);
@@ -702,7 +659,7 @@ static void restore_last_session_from_file(const char *reason)
 
     if (urls.empty()) {
         const char *fallback = g_homepage_url.empty() ? kInitialBrowserUrl : g_homepage_url.c_str();
-        BrowserTab *tab_home = create_tab_page(g_tab_stack, "tabWelcome", "Welcome", "Welcome", fallback);
+        BrowserTab *tab_home = TabManager::instance().createTab(g_tab_stack, "tabWelcome", "Welcome", "Welcome", fallback);
         schedule_tab_browser_creation(tab_home);
         XmTabStackSelectTab(tab_home->page, False);
         set_current_tab(tab_home);
@@ -717,7 +674,7 @@ static void restore_last_session_from_file(const char *reason)
         idx++;
         char name[32];
         snprintf(name, sizeof(name), "tabRest%d", idx);
-        BrowserTab *tab = create_tab_page(g_tab_stack, name, url.c_str(), "Session", url.c_str());
+        BrowserTab *tab = TabManager::instance().createTab(g_tab_stack, name, url.c_str(), "Session", url.c_str());
         schedule_tab_browser_creation(tab);
         created.push_back(tab);
     }
@@ -763,7 +720,7 @@ static void restore_tabs_from_session_data(SessionData *data)
         snprintf(name, sizeof(name), "tabSess%d", i + 1);
         char title[256];
         snprintf(title, sizeof(title), "%s", normalized.c_str());
-        BrowserTab *tab = create_tab_page(g_tab_stack, name, title, "Session", normalized.c_str());
+        BrowserTab *tab = TabManager::instance().createTab(g_tab_stack, name, title, "Session", normalized.c_str());
         schedule_tab_browser_creation(tab);
         created.push_back(tab);
     }
@@ -1181,7 +1138,8 @@ void update_tab_label(BrowserTab *tab, const char *text)
     int available_width = (int)tabbox_width;
     if (available_width <= 0) available_width = 400;
 
-    size_t tab_count = g_browser_tabs.empty() ? 1u : g_browser_tabs.size();
+    const auto &tabs = TabManager::instance().tabs();
+    size_t tab_count = tabs.empty() ? 1u : tabs.size();
     int per_tab = available_width / (int)tab_count;
     int max_label_width = per_tab - 36;
     if (max_label_width < 80) max_label_width = 80;
@@ -1261,7 +1219,7 @@ void update_tab_label(BrowserTab *tab, const char *text)
 void update_all_tab_labels(const char *reason)
 {
     (void)reason;
-    for (const auto &entry : g_browser_tabs) {
+    for (const auto &entry : TabManager::instance().tabs()) {
         BrowserTab *tab = entry.get();
         if (!tab) continue;
         const char *label = tab->title_full.empty()
@@ -1276,13 +1234,13 @@ void open_url_in_new_tab(const std::string &url, bool select)
     if (url.empty() || !g_tab_stack) return;
     BrowserApp::instance().notify_new_tab_request(url, select);
     const char *base = "New Tab";
-    int count = count_tabs_with_base_title(base);
+    int count = TabManager::instance().countTabsWithBaseTitle(base);
     char name[32];
     snprintf(name, sizeof(name), "tabNew%d", count + 1);
     char tab_title[64];
     snprintf(tab_title, sizeof(tab_title), "%s (%d)", base, count + 1);
 
-    BrowserTab *tab = create_tab_page(g_tab_stack, name, tab_title, base, url.c_str());
+    BrowserTab *tab = TabManager::instance().createTab(g_tab_stack, name, tab_title, base, url.c_str());
     schedule_tab_browser_creation(tab);
     if (select) {
         XmTabStackSelectTab(tab->page, True);
@@ -1361,7 +1319,9 @@ static void poll_zoom_levels()
     if ((tick % 20) != 0) {  // ~200ms
         return;
     }
-    for (const auto &entry : g_browser_tabs) {
+    const auto &tabs = TabManager::instance().tabs();
+    BrowserTab *current_tab = TabManager::instance().currentTab();
+    for (const auto &entry : tabs) {
         BrowserTab *tab = entry.get();
         if (!tab || !tab->browser) continue;
         CefRefPtr<CefBrowserHost> host = tab->browser->GetHost();
@@ -1371,7 +1331,7 @@ static void poll_zoom_levels()
         if (diff < 0) diff = -diff;
         if (diff > 1e-6) {
             tab->zoom_level = current;
-            if (tab == g_current_tab) {
+            if (tab == current_tab) {
                 update_zoom_controls(tab);
             }
         }
@@ -1385,7 +1345,7 @@ static void set_tab_zoom_level(BrowserTab *tab, double level)
     if (!host) return;
     host->SetZoomLevel(level);
     tab->zoom_level = level;
-    if (tab == g_current_tab) {
+    if (tab == TabManager::instance().currentTab()) {
         update_zoom_controls(tab);
     }
 }
@@ -1429,7 +1389,7 @@ static void on_zoom_out(Widget w, XtPointer client_data, XtPointer call_data)
 static bool tab_is_alive(const BrowserTab *tab)
 {
     if (!tab) return false;
-    for (const auto &entry : g_browser_tabs) {
+    for (const auto &entry : TabManager::instance().tabs()) {
         if (entry.get() == tab) return true;
     }
     return false;
@@ -1867,7 +1827,7 @@ class FaviconDownloadCallback : public CefDownloadImageCallback {
                            png_bytes.empty() ? NULL : png_bytes.data(),
                            png_bytes.size());
     if (apply_favicon_to_tab_from_raw(tab_, raw, pixel_w, pixel_h, toolbar_size_, window_size_, toolbar_bg_pixel_)) {
-      if (tab_ == g_current_tab) {
+      if (tab_ == TabManager::instance().currentTab()) {
         update_favicon_controls(tab_);
       }
     }
@@ -1914,7 +1874,7 @@ void request_favicon_download(BrowserTab *tab, const char *reason)
                                           toolbar_size,
                                           window_size,
                                           bg_pixel)) {
-            if (tab == g_current_tab) {
+            if (tab == TabManager::instance().currentTab()) {
                 update_favicon_controls(tab);
             }
             return;
@@ -2018,7 +1978,7 @@ clear_tab_favicon(BrowserTab *tab)
     tab->favicon_window_mask = None;
     tab->favicon_window_size = 0;
     tab->favicon_url.clear();
-    if (tab == g_current_tab) {
+    if (tab == TabManager::instance().currentTab()) {
         update_favicon_controls(tab);
     }
 }
@@ -2081,7 +2041,7 @@ void load_url_for_tab(BrowserTab *tab, const std::string &url)
             frame->LoadURL(normalized);
         }
     }
-    if (tab == g_current_tab && g_url_field) {
+    if (tab == TabManager::instance().currentTab() && g_url_field) {
         XmTextFieldSetString(g_url_field, const_cast<char *>(tab->pending_url.c_str()));
     }
 }
@@ -2261,7 +2221,7 @@ static void close_tab_browser(BrowserTab *tab)
 static int count_open_browsers()
 {
     int pending = 0;
-    for (const auto &tab : g_browser_tabs) {
+    for (const auto &tab : TabManager::instance().tabs()) {
         if (tab->browser) pending++;
         if (tab->devtools_browser) pending++;
     }
@@ -2299,7 +2259,7 @@ static void begin_shutdown_sequence(const char *reason)
         }
         return;
     }
-    for (const auto &tab : g_browser_tabs) {
+    for (const auto &tab : TabManager::instance().tabs()) {
         close_tab_browser(tab.get());
     }
 }
@@ -2369,7 +2329,7 @@ static void on_tab_stack_resize(Widget w, XtPointer client_data, XtPointer call_
     update_all_tab_labels("tab stack resize");
 }
 
-static void on_browser_resize(Widget w, XtPointer client_data, XtPointer call_data)
+void on_browser_resize(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
     (void)call_data;
@@ -2474,7 +2434,7 @@ static void on_reload(Widget w, XtPointer client_data, XtPointer call_data)
     if (tab->loading) {
         tab->browser->StopLoad();
         tab->loading = false;
-        if (tab == g_current_tab) {
+        if (tab == TabManager::instance().currentTab()) {
             update_reload_button_for_tab(tab);
         }
     } else {
@@ -2748,7 +2708,7 @@ BrowserTab *get_selected_tab()
 
 BrowserTab *get_current_tab()
 {
-    return g_current_tab;
+    return TabManager::instance().currentTab();
 }
 
 bool is_tab_selected(const BrowserTab *tab)
@@ -2855,7 +2815,7 @@ show_invalid_url_dialog(const char *text)
     XtManageChild(dialog);
 }
 
-static void on_browser_area_button_press(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch)
+void on_browser_area_button_press(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch)
 {
     (void)w;
     (void)event;
@@ -3362,7 +3322,7 @@ static void on_home_menu_use_current(Widget w, XtPointer client_data, XtPointer 
     save_homepage_file(g_homepage_url, "home menu current");
 }
 
-static void detach_tab_clients(BrowserTab *tab)
+void detach_tab_clients(BrowserTab *tab)
 {
     if (!tab) return;
     if (tab->client) {
@@ -3375,88 +3335,6 @@ static void detach_tab_clients(BrowserTab *tab)
     }
 }
 
-static void remove_tab_from_collection(BrowserTab *tab)
-{
-    if (!tab) return;
-    auto it = std::find_if(g_browser_tabs.begin(), g_browser_tabs.end(),
-                           [tab](const std::unique_ptr<BrowserTab> &entry) {
-                               return entry.get() == tab;
-                           });
-    if (it != g_browser_tabs.end()) {
-        BrowserTab *match = it->get();
-        detach_tab_clients(match);
-        g_browser_tabs.erase(it);
-    }
-}
-
-static int count_tabs_with_base_title(const char *base_title)
-{
-    if (!base_title) return 0;
-    int matches = 0;
-    for (const auto &tab : g_browser_tabs) {
-        if (tab->base_title == base_title) {
-            matches++;
-        }
-    }
-    return matches;
-}
-
-static BrowserTab *create_tab_page(Widget tab_stack,
-                                   const char *name,
-                                   const char *title,
-                                   const char *base_title,
-                                   const char *initial_url)
-{
-    Widget page = XmCreateForm(tab_stack, (String)name, NULL, 0);
-    XtVaSetValues(page,
-                  XmNfractionBase, 100,
-                  XmNtopAttachment, XmATTACH_FORM,
-                  XmNbottomAttachment, XmATTACH_FORM,
-                  XmNleftAttachment, XmATTACH_FORM,
-                  XmNrightAttachment, XmATTACH_FORM,
-                  XmNmarginWidth, 0,
-                  XmNmarginHeight, 0,
-                  XmNborderWidth, 0,
-                  NULL);
-    auto tab = std::make_unique<BrowserTab>();
-    BrowserTab *tab_ptr = tab.get();
-    tab_ptr->page = page;
-    tab_ptr->base_title = base_title ? base_title : "";
-    tab_ptr->title_full = title ? title : "";
-    tab_ptr->pending_url = normalize_url(initial_url ? initial_url : kInitialBrowserUrl);
-    tab_ptr->current_url.clear();
-    tab_ptr->status_message.clear();
-    tab_ptr->security_status.clear();
-    update_tab_security_status(tab_ptr);
-    XtVaSetValues(page, XmNuserData, tab_ptr, NULL);
-    XtAddCallback(page, XmNdestroyCallback, on_tab_destroyed, tab_ptr);
-    update_tab_label(tab_ptr, title);
-
-    Widget browser_area = XmCreateDrawingArea(page, xm_name("browserView"), NULL, 0);
-    XtVaSetValues(browser_area,
-                  XmNtopAttachment, XmATTACH_FORM,
-                  XmNbottomAttachment, XmATTACH_FORM,
-                  XmNleftAttachment, XmATTACH_FORM,
-                  XmNrightAttachment, XmATTACH_FORM,
-                  XmNresizePolicy, XmRESIZE_ANY,
-                  XmNtraversalOn, True,
-                  XmNnavigationType, XmTAB_GROUP,
-                  XmNleftOffset, 0,
-                  XmNrightOffset, 0,
-                  XmNbottomOffset, 0,
-                  XmNtopOffset, 0,
-                  NULL);
-    XtAddCallback(browser_area, XmNresizeCallback, on_browser_resize, tab_ptr);
-    XtAddEventHandler(browser_area, ButtonPressMask, False, on_browser_area_button_press, tab_ptr);
-    XtManageChild(browser_area);
-    tab_ptr->browser_area = browser_area;
-
-    XtManageChild(page);
-    g_browser_tabs.push_back(std::move(tab));
-    update_all_tab_labels("create_tab_page");
-    return tab_ptr;
-}
-
 static void on_new_tab(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
@@ -3465,13 +3343,13 @@ static void on_new_tab(Widget w, XtPointer client_data, XtPointer call_data)
     if (!g_tab_stack) return;
 
     const char *base = "New Tab";
-    int count = count_tabs_with_base_title(base);
+    int count = TabManager::instance().countTabsWithBaseTitle(base);
     char name[32];
     snprintf(name, sizeof(name), "tabNew%d", count + 1);
     char tab_title[64];
     snprintf(tab_title, sizeof(tab_title), "%s (%d)", base, count + 1);
 
-    BrowserTab *tab = create_tab_page(g_tab_stack, name, tab_title, base, kInitialBrowserUrl);
+    BrowserTab *tab = TabManager::instance().createTab(g_tab_stack, name, tab_title, base, kInitialBrowserUrl);
     schedule_tab_browser_creation(tab);
     XmTabStackSelectTab(tab->page, True);
     set_current_tab(tab);
@@ -3516,8 +3394,8 @@ static void on_close_tab(Widget w, XtPointer client_data, XtPointer call_data)
 
 void set_current_tab(BrowserTab *tab)
 {
-    BrowserTab *previous = g_current_tab;
-    g_current_tab = tab;
+    BrowserTab *previous = TabManager::instance().currentTab();
+    TabManager::instance().setCurrentTab(tab);
     if (previous && previous != tab) {
         apply_tab_theme_colors(previous, false);
     }
@@ -3584,13 +3462,13 @@ static void on_tab_selection_changed(Widget w, XtPointer client_data, XtPointer 
     }
 }
 
-static void on_tab_destroyed(Widget w, XtPointer client_data, XtPointer call_data)
+void on_tab_destroyed(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
     (void)call_data;
     BrowserTab *tab = (BrowserTab *)client_data;
     if (!tab) return;
-    bool was_current = (g_current_tab == tab);
+    bool was_current = (TabManager::instance().currentTab() == tab);
     if (was_current) {
         Widget next = g_tab_stack ? XmTabStackGetSelectedTab(g_tab_stack) : NULL;
         BrowserTab *next_tab = get_tab_for_widget(next);
@@ -3617,7 +3495,7 @@ static void on_tab_destroyed(Widget w, XtPointer client_data, XtPointer call_dat
         }
     }
     close_tab_browser(tab);
-    remove_tab_from_collection(tab);
+    TabManager::instance().removeTab(tab);
     update_all_tab_labels("tab destroyed");
 }
 
@@ -6269,7 +6147,7 @@ static Widget create_status_bar(Widget parent)
     return status_form;
 }
 
-static char *xm_name(const char *name)
+char *xm_name(const char *name)
 {
     return const_cast<char *>(name ? name : "");
 }
@@ -6373,7 +6251,7 @@ int run_browser_ui_loop(int argc, char *argv[], const BrowserPreflightState &pre
     } else {
         const char *first_url = has_startup_url ? startup_url.c_str()
                                                 : (g_homepage_url.empty() ? kInitialBrowserUrl : g_homepage_url.c_str());
-        BrowserTab *tab_home = create_tab_page(tab_stack, "tabWelcome", "Welcome", "Welcome", first_url);
+        BrowserTab *tab_home = TabManager::instance().createTab(tab_stack, "tabWelcome", "Welcome", "Welcome", first_url);
         schedule_tab_browser_creation(tab_home);
         XmTabStackSelectTab(tab_home->page, False);
         set_current_tab(tab_home);
@@ -6405,14 +6283,11 @@ int run_browser_ui_loop(int argc, char *argv[], const BrowserPreflightState &pre
     LOG_ENTER("saved session; shutdown requested=%d pending=%d",
               g_shutdown_requested ? 1 : 0,
               g_shutdown_pending_browsers);
-    g_current_tab = NULL;
+    TabManager::instance().setCurrentTab(nullptr);
     LOG_ENTER("freeing session data %p", (void *)g_session_data);
     session_data_free(g_session_data);
     g_session_data = NULL;
-    for (const auto &tab : g_browser_tabs) {
-        detach_tab_clients(tab.get());
-    }
-    g_browser_tabs.clear();
+    TabManager::instance().clearTabs();
     return 0;
 }
 void update_security_controls(BrowserTab *tab);

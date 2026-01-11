@@ -53,8 +53,16 @@
   - [x] Identify the remaining BrowserClient-only helpers that should move into `BrowserApp` by introducing BrowserApp handlers for load, status, title, favicon, loading state, and focus.
 - [x] Surface events (new tab request, load finished) through a small interface so UI modules can react without depending on Xm.
 
-## Phase 2 – `TabManager`
+-## Phase 2 – `TabManager`
 - [ ] Move `BrowserTab` state, tab creation/destruction, navigation buttons, reload/stop logic, zoom helpers, and favicon updates into `tab_manager.*`.
+  - [x] Move tab cleanup helpers (detach/remove/clear) into `TabManager` so `ck-browser.cpp` no longer knows about the old globals.
+  - [x] Create `tab_manager.h`/`tab_manager.cpp` that owns the `BrowserTab` data structures and exposes helpers like `createTab`, `closeTab`, `selectTab`, and `getCurrentTab`.
+  - [x] Move the Xm widget creation helper (`create_tab_page`) and label updates into `TabManager` so the module owns the tab data lifecycle (added `TabManager::createTab` and rerouted callers).
+  - [x] Relocate the implementation of `create_tab_page` into `tab_manager.cpp` so it no longer lives inside `ck-browser.cpp`.
+  - [ ] Delegate tab selection (`set_current_tab`/`select_tab_page`) to `TabManager` so event code talks through the manager.
+  - [ ] Move toolbar/tab-stack helpers (`schedule_tab_browser_creation`, menu callbacks) into `TabManager` once the basic creation/selection APIs are in place.
+  - [ ] Relocate navigation/reload handling, zoom controls, and favicon/icon cache updates into `TabManager` methods so BrowserApp can manipulate tabs through a clean interface.
+  - [ ] Wire the new `TabManager` API into `BrowserApp`, BrowserClient, and UI callbacks, keeping the old globals behind the manager.
 - [ ] Provide APIs such as `loadUrl`, `openNewTab`, `currentTab`, and `selectTab` so `BrowserApp` and UI builders can work with tabs via a clean interface.
 - [ ] Keep toolbox helpers (status text, URL field updates, toolbar icon management) here instead of in the main file.
 

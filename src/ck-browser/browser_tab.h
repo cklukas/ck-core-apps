@@ -6,9 +6,14 @@
 
 #include <include/cef_browser.h>
 #include <include/cef_client.h>
+#include <include/wrapper/cef_helpers.h>
 
+#include <cstdio>
 #include <string>
 #include <vector>
+
+#include "browser_app.h"
+#include "browser_ui_bridge.h"
 
 class DevToolsClient;
 
@@ -52,6 +57,50 @@ struct BrowserTab {
     bool devtools_show_scheduled = false;
     bool loading = false;
     std::string current_host;
+    ~BrowserTab();
+};
+
+void detach_tab_clients(BrowserTab *tab);
+
+class DevToolsClient : public CefClient, public CefLifeSpanHandler {
+ public:
+  explicit DevToolsClient(BrowserTab *tab) : tab_(tab) {}
+
+  CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
+
+  void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
+    CEF_REQUIRE_UI_THREAD();
+    fprintf(stderr, "[ck-browser] DevToolsClient::OnAfterCreated tab=%p browser=%p\n",
+            (void *)tab_, (void *)browser.get());
+    if (tab_) {
+      tab_->devtools_browser = browser;
+      resize_devtools_to_area(tab_, "devtools created");
+    }
+  }
+
+  void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
+    CEF_REQUIRE_UI_THREAD();
+    fprintf(stderr, "[ck-browser] DevToolsClient::OnBeforeClose tab=%p browser=%p\n",
+            (void *)tab_, (void *)browser.get());
+    (void)browser;
+    if (!tab_) return;
+    tab_->devtools_browser = nullptr;
+    tab_->devtools_client = nullptr;
+    if (tab_->devtools_shell) {
+      XtDestroyWidget(tab_->devtools_shell);
+      tab_->devtools_shell = NULL;
+      tab_->devtools_area = NULL;
+    }
+    BrowserApp::instance().notify_browser_closed("devtools");
+  }
+
+  void detach_tab() {
+    tab_ = NULL;
+  }
+
+ private:
+  BrowserTab *tab_ = NULL;
+  IMPLEMENT_REFCOUNTING(DevToolsClient);
 };
 
 #endif // CK_BROWSER_BROWSER_TAB_H

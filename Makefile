@@ -104,7 +104,8 @@ $(BIN_DIR)/ck-browser: src/ck-browser/ck-browser.cpp \
 	$(CC) $(CFLAGS) $(CDE_CFLAGS) -c src/shared/session_utils.c -o $(BUILD_DIR)/ck-browser-session_utils.o
 	$(CC) $(CFLAGS) $(CDE_CFLAGS) -c src/shared/config_utils.c -o $(BUILD_DIR)/ck-browser-config_utils.o
 	$(CXX) $(CXXFLAGS) $(CDE_CFLAGS) $(CEF_CFLAGS) $(CEF_WRAPPER_CFLAGS) -c src/ck-browser/browser_app.cpp -o $(BUILD_DIR)/ck-browser-browser_app.o
-	$(CXX) $(CXXFLAGS) $(CDE_CFLAGS) $(CEF_CFLAGS) $(CEF_WRAPPER_CFLAGS) src/ck-browser/ck-browser.cpp $(BUILD_DIR)/ck-browser-about_dialog.o $(BUILD_DIR)/ck-browser-session_utils.o $(BUILD_DIR)/ck-browser-config_utils.o $(BUILD_DIR)/ck-browser-browser_app.o $(CEF_WRAPPER_LIB) -o $@ $(CDE_LDFLAGS) $(CEF_LDFLAGS) $(CEF_RPATH) $(CDE_LIBS) $(CEF_LIBS)
+	$(CXX) $(CXXFLAGS) $(CDE_CFLAGS) $(CEF_CFLAGS) $(CEF_WRAPPER_CFLAGS) -c src/ck-browser/tab_manager.cpp -o $(BUILD_DIR)/ck-browser-tab_manager.o
+	$(CXX) $(CXXFLAGS) $(CDE_CFLAGS) $(CEF_CFLAGS) $(CEF_WRAPPER_CFLAGS) src/ck-browser/ck-browser.cpp $(BUILD_DIR)/ck-browser-about_dialog.o $(BUILD_DIR)/ck-browser-session_utils.o $(BUILD_DIR)/ck-browser-config_utils.o $(BUILD_DIR)/ck-browser-browser_app.o $(BUILD_DIR)/ck-browser-tab_manager.o $(CEF_WRAPPER_LIB) -o $@ $(CDE_LDFLAGS) $(CEF_LDFLAGS) $(CEF_RPATH) $(CDE_LIBS) $(CEF_LIBS)
 
 # ck-nibbles (Motif/X11 game, with CDE session dependency)
 $(BIN_DIR)/ck-nibbles: src/games/ck-nibbles/ck-nibbles.c src/shared/about_dialog.c src/shared/about_dialog.h src/shared/session_utils.c src/shared/session_utils.h | $(BIN_DIR)

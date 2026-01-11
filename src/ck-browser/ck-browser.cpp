@@ -82,6 +82,10 @@ extern "C" {
 #include <include/internal/cef_linux.h>
 #include <include/wrapper/cef_helpers.h>
 
+#include "browser_tab.h"
+
+#include "browser_ui_bridge.h"
+
 static void log_function_entry(const char *func, const char *fmt, ...)
 {
     if (!func || !fmt) return;
@@ -276,21 +280,21 @@ static const char *kBookmarksFileName = "bookmarks.html";
 static char g_bookmarks_file_path[PATH_MAX] = "";
 static bool g_bookmarks_path_ready = false;
 static time_t g_bookmarks_file_mtime = 0;
-static std::string normalize_url(const char *input);
+std::string normalize_url(const char *input);
 static const char *display_url_for_tab(const BrowserTab *tab);
-static void update_url_field_for_tab(BrowserTab *tab);
+void update_url_field_for_tab(BrowserTab *tab);
 static void load_url_for_tab(BrowserTab *tab, const std::string &url);
-static bool is_devtools_url(const std::string &url);
+bool is_devtools_url(const std::string &url);
 static bool is_url_parseable(const std::string &url);
-static void show_devtools_for_tab(BrowserTab *tab, int inspect_x, int inspect_y);
+void show_devtools_for_tab(BrowserTab *tab, int inspect_x, int inspect_y);
 static void start_devtools_browser_cb(XtPointer client_data, XtIntervalId *id);
 static char *xm_name(const char *name);
 static void on_tab_destroyed(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_tab_selection_changed(Widget w, XtPointer client_data, XtPointer call_data);
 static void initialize_cef_browser_cb(XtPointer client_data, XtIntervalId *id);
-static BrowserTab *get_selected_tab();
-static bool is_tab_selected(const BrowserTab *tab);
-static void set_current_tab(BrowserTab *tab);
+BrowserTab *get_selected_tab();
+bool is_tab_selected(const BrowserTab *tab);
+void set_current_tab(BrowserTab *tab);
 static void schedule_tab_browser_creation(BrowserTab *tab);
 static void on_back(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_forward(Widget w, XtPointer client_data, XtPointer call_data);
@@ -303,10 +307,10 @@ static void on_reload_menu(Widget w, XtPointer client_data, XtPointer call_data)
 static void on_open_file_menu(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_file_open_dialog_ok(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_file_open_dialog_cancel(Widget w, XtPointer client_data, XtPointer call_data);
-static void set_status_label_text(const char *text);
-static void update_navigation_buttons(BrowserTab *tab);
-static void update_tab_label(BrowserTab *tab, const char *text);
-static void update_all_tab_labels(const char *reason);
+void set_status_label_text(const char *text);
+void update_navigation_buttons(BrowserTab *tab);
+void update_tab_label(BrowserTab *tab, const char *text);
+void update_all_tab_labels(const char *reason);
 static void log_widget_size(const char *context, Widget widget);
 static void on_main_window_resize(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_tab_stack_resize(Widget w, XtPointer client_data, XtPointer call_data);
@@ -316,10 +320,10 @@ static void poll_zoom_levels();
 static void on_zoom_reset(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_zoom_in(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_zoom_out(Widget w, XtPointer client_data, XtPointer call_data);
-static bool route_url_through_ck_browser(CefRefPtr<CefBrowser> browser,
-                                         const std::string &url,
-                                         bool allow_existing_tab);
-static void log_popup_features(const CefPopupFeatures &features);
+bool route_url_through_ck_browser(CefRefPtr<CefBrowser> browser,
+                                  const std::string &url,
+                                  bool allow_existing_tab);
+void log_popup_features(const CefPopupFeatures &features);
 static BookmarkGroup *ensure_bookmark_groups();
 static BookmarkGroup *add_bookmark_group(BookmarkGroup *parent, const char *name);
 static void collect_bookmark_groups(BookmarkGroup *group,
@@ -372,7 +376,7 @@ static void clear_tab_favicon(BrowserTab *tab);
 static std::string extract_host_from_url(const std::string &url);
 static void show_invalid_url_dialog(const char *text);
 static void set_reload_button_label(const char *text);
-static void update_reload_button_for_tab(BrowserTab *tab);
+void update_reload_button_for_tab(BrowserTab *tab);
 static void write_netscape_bookmarks(FILE *f, BookmarkGroup *root);
 static void write_group_contents(FILE *f, BookmarkGroup *group, int indent);
 static void parse_netscape_bookmarks(const std::string &content, BookmarkGroup *root);
@@ -430,15 +434,15 @@ static void ensure_tab_default_colors(BrowserTab *tab);
 static bool alloc_rgb_pixel(Display *display, int screen, unsigned char r, unsigned char g, unsigned char b, Pixel *out_pixel);
 static void pick_contrast_color(unsigned char bg_r, unsigned char bg_g, unsigned char bg_b,
                                 unsigned char *out_r, unsigned char *out_g, unsigned char *out_b);
-static void apply_tab_theme_colors(BrowserTab *tab, bool active);
+void apply_tab_theme_colors(BrowserTab *tab, bool active);
 static void attach_tab_handlers_cb(XtPointer client_data, XtIntervalId *id);
-static void update_favicon_controls(BrowserTab *tab);
-static void request_favicon_download(BrowserTab *tab, const char *reason);
+void update_favicon_controls(BrowserTab *tab);
+void request_favicon_download(BrowserTab *tab, const char *reason);
 static void request_tab_theme_color(BrowserTab *tab);
 static void theme_color_request_timer_cb(XtPointer client_data, XtIntervalId *id);
-static void schedule_theme_color_request(BrowserTab *tab, int delay_ms);
-static void spawn_new_browser_window(const std::string &url);
-static void open_url_in_new_tab(const std::string &url, bool select);
+void schedule_theme_color_request(BrowserTab *tab, int delay_ms);
+void spawn_new_browser_window(const std::string &url);
+void open_url_in_new_tab(const std::string &url, bool select);
 static int count_tabs_with_base_title(const char *base_title);
 static BrowserTab *create_tab_page(Widget tab_stack,
                                    const char *name,
@@ -448,14 +452,13 @@ static BrowserTab *create_tab_page(Widget tab_stack,
 static void capture_session_state(const char *reason);
 static void save_last_session_file(const char *reason);
 static void restore_last_session_from_file(const char *reason);
-static std::string load_homepage_file();
+std::string load_homepage_file();
 static void save_homepage_file(const std::string &url, const char *reason);
 static void wm_save_yourself_cb(Widget w, XtPointer client_data, XtPointer call_data);
 static void restore_tabs_from_session_data(SessionData *data);
 static void on_restore_session(Widget w, XtPointer client_data, XtPointer call_data);
-static const char *window_disposition_name(cef_window_open_disposition_t disposition);
 static void on_new_window(Widget w, XtPointer client_data, XtPointer call_data);
-static void resize_devtools_to_area(BrowserTab *tab, const char *reason);
+void resize_devtools_to_area(BrowserTab *tab, const char *reason);
 static void on_devtools_area_resize(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_devtools_shell_wm_delete(Widget w, XtPointer client_data, XtPointer call_data);
 static void ensure_home_button_menu();
@@ -463,622 +466,11 @@ static void on_home_button_press(Widget w, XtPointer client_data, XEvent *event,
 static void on_home_menu_set_blank(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_home_menu_use_current(Widget w, XtPointer client_data, XtPointer call_data);
 static int count_open_browsers();
-static void on_cef_browser_closed(const char *tag);
+void on_cef_browser_closed(const char *tag);
 static void begin_shutdown_sequence(const char *reason);
 static void focus_url_field_timer(XtPointer client_data, XtIntervalId *id);
 static void on_add_bookmark_menu(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_open_bookmark_manager_menu(Widget w, XtPointer client_data, XtPointer call_data);
-
-class BrowserClient : public CefClient,
-                      public CefLifeSpanHandler,
-                      public CefDisplayHandler,
-                      public CefFocusHandler,
-                      public CefLoadHandler,
-                      public CefRequestHandler,
-                      public CefContextMenuHandler {
- public:
-  explicit BrowserClient(BrowserTab *tab) : tab_(tab) {}
-
-  CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override {
-    return this;
-  }
-
-  CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override {
-    return this;
-  }
-
-  CefRefPtr<CefDisplayHandler> GetDisplayHandler() override {
-    return this;
-  }
-
-  CefRefPtr<CefFocusHandler> GetFocusHandler() override {
-    return this;
-  }
-
-  CefRefPtr<CefLoadHandler> GetLoadHandler() override {
-    return this;
-  }
-
-  CefRefPtr<CefRequestHandler> GetRequestHandler() override {
-    return this;
-  }
-
-  void OnBeforeContextMenu(CefRefPtr<CefBrowser> browser,
-                           CefRefPtr<CefFrame> frame,
-                           CefRefPtr<CefContextMenuParams> params,
-                           CefRefPtr<CefMenuModel> model) override {
-	    CEF_REQUIRE_UI_THREAD();
-	    (void)browser;
-	    (void)frame;
-	    if (!params || !model) return;
-	    last_context_x_ = params->GetXCoord();
-	    last_context_y_ = params->GetYCoord();
-	    std::string link_url = params->GetLinkUrl().ToString();
-	    last_context_link_url_ = link_url;
-	    default_open_link_new_tab_cmd_ = -1;
-	    default_open_link_new_window_cmd_ = -1;
-	    inspect_element_cmds_.clear();
-	    fprintf(stderr,
-	            "[ck-browser] OnBeforeContextMenu tab=%s (%p) link_url=%s\n",
-	            tab_ ? (tab_->base_title.empty() ? "Tab" : tab_->base_title.c_str()) : "(none)",
-	            (void *)tab_,
-	            link_url.c_str());
-
-	    auto simplify_label = [](const std::string &s) -> std::string {
-	      std::string out;
-	      out.reserve(s.size());
-	      for (unsigned char uc : s) {
-	        char c = (char)uc;
-	        if (c == '&') continue;  // Motif/Chromium accelerator markers (e.g. I&nspect)
-	        if (c >= 'A' && c <= 'Z') out.push_back((char)(c - 'A' + 'a'));
-	        else out.push_back(c);
-	      }
-	      return out;
-	    };
-
-	    std::function<void(CefRefPtr<CefMenuModel>, int)> scan_menu =
-	        [&](CefRefPtr<CefMenuModel> m, int depth) {
-	          if (!m) return;
-	          size_t count = m->GetCount();
-	          for (size_t i = 0; i < count; ++i) {
-	            int cmd = m->GetCommandIdAt(i);
-	            CefString label = m->GetLabelAt(i);
-	            std::string text = label.ToString();
-	            std::string lower = simplify_label(text);
-	            fprintf(stderr,
-	                    "[ck-browser] context menu item depth=%d idx=%zu cmd=%d label='%s' lower='%s'\n",
-	                    depth,
-	                    i,
-	                    cmd,
-	                    text.c_str(),
-	                    lower.c_str());
-	            if (cmd >= 0) {
-	              if (lower.find("inspect") != std::string::npos ||
-	                  lower.find("developer tools") != std::string::npos ||
-	                  lower.find("devtools") != std::string::npos) {
-	                inspect_element_cmds_.push_back(cmd);
-	              }
-	              if (lower.find("open link in new tab") != std::string::npos) {
-	                default_open_link_new_tab_cmd_ = cmd;
-	              } else if (lower.find("open link in new window") != std::string::npos) {
-	                default_open_link_new_window_cmd_ = cmd;
-	              }
-	            }
-	            if (m->GetTypeAt(i) == MENUITEMTYPE_SUBMENU) {
-	              CefRefPtr<CefMenuModel> sub = m->GetSubMenuAt(i);
-	              scan_menu(sub, depth + 1);
-	            }
-	          }
-	        };
-
-	    scan_menu(model, 0);
-	    if (!inspect_element_cmds_.empty()) {
-	      fprintf(stderr,
-	              "[ck-browser] context menu inspect/devtools cmd ids (%zu):",
-	              inspect_element_cmds_.size());
-	      for (size_t i = 0; i < inspect_element_cmds_.size(); ++i) {
-	        fprintf(stderr, " %d", inspect_element_cmds_[i]);
-	      }
-	      fprintf(stderr, "\n");
-	    }
-
-	    if (link_url.empty()) return;
-
-	    fprintf(stderr,
-	            "[ck-browser] context menu default cmd ids: new_tab=%d new_window=%d\n",
-	            default_open_link_new_tab_cmd_,
-	            default_open_link_new_window_cmd_);
-
-	    model->InsertItemAt(0, 26500, "Open Link in New Tab (CK)");
-	    model->InsertItemAt(1, 26501, "Open Link in New Window (CK)");
-	    model->InsertSeparatorAt(2);
-	  }
-
-	  bool OnContextMenuCommand(CefRefPtr<CefBrowser> browser,
-	                            CefRefPtr<CefFrame> frame,
-	                            CefRefPtr<CefContextMenuParams> params,
-	                            int command_id,
-	                            EventFlags event_flags) override {
-	    CEF_REQUIRE_UI_THREAD();
-	    (void)browser;
-	    (void)frame;
-	    (void)event_flags;
-	    if (!params) return false;
-	    std::string link_url = params->GetLinkUrl().ToString();
-	    fprintf(stderr,
-	            "[ck-browser] OnContextMenuCommand tab=%s (%p) cmd=%d url=%s\n",
-	            tab_ ? (tab_->base_title.empty() ? "Tab" : tab_->base_title.c_str()) : "(none)",
-	            (void *)tab_,
-	            command_id,
-	            link_url.c_str());
-	    bool is_inspect = false;
-	    for (int cmd : inspect_element_cmds_) {
-	      if (cmd == command_id) {
-	        is_inspect = true;
-	        break;
-	      }
-	    }
-	    if (is_inspect) {
-	      fprintf(stderr,
-	              "[ck-browser] intercept Inspect Element cmd=%d at (%d,%d)\n",
-	              command_id,
-	              last_context_x_,
-	              last_context_y_);
-	      if (tab_) {
-	        show_devtools_for_tab(tab_, last_context_x_, last_context_y_);
-	      }
-	      return true;
-	    }
-	    if (link_url.empty()) link_url = last_context_link_url_;
-	    if (link_url.empty()) return (command_id == 26500 || command_id == 26501 ||
-	                                  command_id == default_open_link_new_tab_cmd_ ||
-	                                  command_id == default_open_link_new_window_cmd_);
-	    link_url = normalize_url(link_url.c_str());
-	    if (link_url.empty()) return (command_id == 26500 || command_id == 26501 ||
-	                                  command_id == default_open_link_new_tab_cmd_ ||
-	                                  command_id == default_open_link_new_window_cmd_);
-
-	    if (command_id == 26501 || command_id == default_open_link_new_window_cmd_) {
-	      spawn_new_browser_window(link_url);
-	      return true;
-	    }
-	    if (command_id == 26500 || command_id == default_open_link_new_tab_cmd_) {
-	      open_url_in_new_tab(link_url, true);
-	      return true;
-	    }
-	    return false;
-	  }
-
-  void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
-    CEF_REQUIRE_UI_THREAD();
-    if (tab_) {
-      tab_->browser = browser;
-    }
-  }
-
-  void OnLoadStart(CefRefPtr<CefBrowser> browser,
-                   CefRefPtr<CefFrame> frame,
-                   TransitionType transition_type) override {
-    CEF_REQUIRE_UI_THREAD();
-    (void)browser;
-    (void)transition_type;
-    if (!tab_ || !frame || !frame->IsMain()) return;
-    std::string url = frame->GetURL().ToString();
-    if (url.empty()) return;
-    tab_->pending_url = url;
-    std::string host = extract_host_from_url(url);
-    if (host != tab_->current_host) {
-      tab_->current_host = host;
-      clear_tab_favicon(tab_);
-    }
-    tab_->loading = true;
-    tab_->theme_color_retry_count = 0;
-    tab_->theme_color_ready_retry_count = 0;
-    if (tab_ == g_current_tab) {
-      update_url_field_for_tab(tab_);
-      update_reload_button_for_tab(tab_);
-    }
-  }
-
-  void OnLoadEnd(CefRefPtr<CefBrowser> browser,
-                 CefRefPtr<CefFrame> frame,
-                 int httpStatusCode) override {
-    CEF_REQUIRE_UI_THREAD();
-    (void)httpStatusCode;
-    if (!tab_ || !browser || !frame || !frame->IsMain()) return;
-  }
-
-  bool OnOpenURLFromTab(CefRefPtr<CefBrowser> browser,
-                        CefRefPtr<CefFrame> frame,
-                        const CefString& target_url,
-                        cef_window_open_disposition_t target_disposition,
-                        bool user_gesture) override {
-    CEF_REQUIRE_UI_THREAD();
-    (void)browser;
-    (void)frame;
-    (void)user_gesture;
-    std::string url = target_url.ToString();
-    fprintf(stderr,
-            "[ck-browser] OnOpenURLFromTab tab=%s (%p) disposition=%d(%s) user_gesture=%d url=%s\n",
-            tab_ ? (tab_->base_title.empty() ? "Tab" : tab_->base_title.c_str()) : "(none)",
-            (void *)tab_,
-            (int)target_disposition,
-            window_disposition_name(target_disposition),
-            user_gesture ? 1 : 0,
-            url.c_str());
-    if (url.empty()) return false;
-    if (is_devtools_url(url)) {
-      fprintf(stderr, "[ck-browser] devtools url allowed (OnOpenURLFromTab)\n");
-      return false;
-    }
-    url = normalize_url(url.c_str());
-    if (url.empty()) return true;
-    bool load_in_current = (target_disposition == CEF_WOD_CURRENT_TAB ||
-                            target_disposition == CEF_WOD_SWITCH_TO_TAB ||
-                            target_disposition == CEF_WOD_SINGLETON_TAB);
-    return route_url_through_ck_browser(browser, url, load_in_current);
-  }
-
-  bool OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
-                      CefRefPtr<CefFrame> frame,
-                      CefRefPtr<CefRequest> request,
-                      bool user_gesture,
-                      bool is_redirect) override {
-    CEF_REQUIRE_UI_THREAD();
-    (void)user_gesture;
-    (void)is_redirect;
-    if (!frame || frame->IsMain() || !request) return false;
-    std::string url = request->GetURL();
-#if defined(TRANSITION_AUTO_SUBFRAME) && defined(TRANSITION_MANUAL_SUBFRAME)
-    int transition = request->GetTransitionType();
-    const int kSubframeMask = TRANSITION_AUTO_SUBFRAME | TRANSITION_MANUAL_SUBFRAME;
-    if (transition & kSubframeMask) return false;
-#endif
-    if (url.empty()) return false;
-    std::string frame_name = frame->GetName();
-    fprintf(stderr,
-            "[ck-browser] OnBeforeBrowse intercepted subframe name=%s method=%s url=%s\n",
-            frame_name.empty() ? "(frame)" : frame_name.c_str(),
-            request->GetMethod().ToString().c_str(),
-            url.c_str());
-    return false;
-  }
-
-  bool OnBeforePopup(CefRefPtr<CefBrowser> browser,
-                     CefRefPtr<CefFrame> frame,
-                     int popup_id,
-                     const CefString& target_url,
-                     const CefString& target_frame_name,
-                     cef_window_open_disposition_t target_disposition,
-                     bool user_gesture,
-                     const CefPopupFeatures& popupFeatures,
-                     CefWindowInfo& windowInfo,
-                     CefRefPtr<CefClient>& client,
-                     CefBrowserSettings& settings,
-                     CefRefPtr<CefDictionaryValue>& extra_info,
-                     bool* no_javascript_access) override {
-    CEF_REQUIRE_UI_THREAD();
-    (void)browser;
-    (void)frame;
-    (void)popup_id;
-    (void)target_frame_name;
-    (void)user_gesture;
-    (void)windowInfo;
-    (void)client;
-    (void)settings;
-    (void)extra_info;
-    (void)no_javascript_access;
-
-    std::string url = target_url.ToString();
-    std::string frame_name = target_frame_name.ToString();
-    fprintf(stderr,
-            "[ck-browser] OnBeforePopup tab=%s (%p) popup_id=%d disposition=%d(%s) user_gesture=%d frame_name=%s url=%s\n",
-            tab_ ? (tab_->base_title.empty() ? "Tab" : tab_->base_title.c_str()) : "(none)",
-            (void *)tab_,
-            popup_id,
-            (int)target_disposition,
-            window_disposition_name(target_disposition),
-            user_gesture ? 1 : 0,
-            frame_name.c_str(),
-            url.c_str());
-    fprintf(stderr,
-            "[ck-browser] OnBeforePopup features x=%d(xSet=%d) y=%d(ySet=%d) w=%d(wSet=%d) h=%d(hSet=%d) isPopup=%d\n",
-            popupFeatures.x,
-            popupFeatures.xSet,
-            popupFeatures.y,
-            popupFeatures.ySet,
-            popupFeatures.width,
-            popupFeatures.widthSet,
-            popupFeatures.height,
-            popupFeatures.heightSet,
-            popupFeatures.isPopup);
-    log_popup_features(popupFeatures);
-    if (url.empty()) {
-      return false;
-    }
-    if (is_devtools_url(url)) {
-      fprintf(stderr, "[ck-browser] devtools url allowed (OnBeforePopup)\n");
-      return false;
-    }
-    url = normalize_url(url.c_str());
-    if (url.empty()) {
-      return true;
-    }
-
-    bool is_small_popup = (popupFeatures.widthSet && popupFeatures.heightSet &&
-                           popupFeatures.width > 0 && popupFeatures.height > 0 &&
-                           popupFeatures.width <= 640 && popupFeatures.height <= 480);
-    bool prefer_native_popup = popupFeatures.isPopup || is_small_popup;
-    if (prefer_native_popup) {
-      fprintf(stderr,
-              "[ck-browser] OnBeforePopup letting native popup (native=%d width=%d height=%d)\n",
-              prefer_native_popup ? 1 : 0,
-              popupFeatures.width,
-              popupFeatures.height);
-      return false;
-    }
-    if (target_disposition == CEF_WOD_NEW_WINDOW ||
-        target_disposition == CEF_WOD_OFF_THE_RECORD ||
-        target_disposition == CEF_WOD_NEW_POPUP ||
-        target_disposition == CEF_WOD_NEW_FOREGROUND_TAB ||
-        target_disposition == CEF_WOD_NEW_BACKGROUND_TAB) {
-      return route_url_through_ck_browser(browser, url, false);
-    }
-    return false;
-  }
-
-  bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
-                                CefRefPtr<CefFrame> frame,
-                                CefProcessId source_process,
-                                CefRefPtr<CefProcessMessage> message) override {
-    CEF_REQUIRE_UI_THREAD();
-    (void)browser;
-    (void)frame;
-    (void)source_process;
-    if (!tab_ || !message) return false;
-    std::string name = message->GetName().ToString();
-    if (name != "ck_theme_color") return false;
-    CefRefPtr<CefListValue> args = message->GetArgumentList();
-    if (!args || args->GetSize() < 6) return true;
-    fprintf(stderr,
-            "[ck-browser] theme color args size=%zu types=%d,%d,%d,%d,%d,%d\n",
-            args->GetSize(),
-            args->GetType(0),
-            args->GetType(1),
-            args->GetType(2),
-            args->GetType(3),
-            args->GetType(4),
-            args->GetType(5));
-    fprintf(stderr,
-            "[ck-browser] theme color raw values r=%d g=%d b=%d source='%s' raw='%s' ready_raw='%s'\n",
-            args->GetInt(0),
-            args->GetInt(1),
-            args->GetInt(2),
-            args->GetString(3).ToString().c_str(),
-            args->GetString(4).ToString().c_str(),
-            args->GetString(5).ToString().c_str());
-    int r = args->GetInt(0);
-    int g = args->GetInt(1);
-    int b = args->GetInt(2);
-    std::string source;
-    CefString source_val = args->GetString(3);
-    if (!source_val.empty()) {
-        source = source_val.ToString();
-    }
-    std::string raw_color;
-    CefString raw_val = args->GetString(4);
-    if (!raw_val.empty()) {
-        raw_color = raw_val.ToString();
-    }
-    std::string ready_state;
-    CefString ready_val = args->GetString(5);
-    if (!ready_val.empty()) {
-        ready_state = ready_val.ToString();
-    }
-    bool ready_complete = (ready_state == "complete" || ready_state == "interactive");
-    std::string frame_url = frame ? frame->GetURL().ToString() : std::string();
-    if (frame_url.empty()) frame_url = "(none)";
-    fprintf(stderr,
-            "[ck-browser] theme color tab=%s (%p) frame=%s url=%s rgb=%d,%d,%d source=%s raw='%s' readyState=%s\n",
-            tab_->base_title.empty() ? "Tab" : tab_->base_title.c_str(),
-            (void *)tab_,
-            frame_url.c_str(),
-            tab_->pending_url.empty() ? "(none)" : tab_->pending_url.c_str(),
-            r, g, b,
-            source.empty() ? "unknown" : source.c_str(),
-            raw_color.empty() ? "(empty)" : raw_color.c_str(),
-            ready_state.empty() ? "unknown" : ready_state.c_str());
-    if (!ready_complete) {
-      if (tab_->theme_color_ready_retry_count < kThemeColorReadyRetryLimit) {
-        schedule_theme_color_request(tab_, 250);
-        tab_->theme_color_ready_retry_count++;
-        fprintf(stderr,
-                "[ck-browser] theme color readyState not complete, retry %d for tab=%s\n",
-                tab_->theme_color_ready_retry_count,
-                tab_->base_title.empty() ? "Tab" : tab_->base_title.c_str());
-      } else {
-        fprintf(stderr,
-                "[ck-browser] theme color readyState retry limit reached for tab=%s\n",
-                tab_->base_title.empty() ? "Tab" : tab_->base_title.c_str());
-      }
-      return true;
-    }
-    if (r < 0) r = 0;
-    if (g < 0) g = 0;
-    if (b < 0) b = 0;
-    if (r > 255) r = 255;
-    if (g > 255) g = 255;
-    if (b > 255) b = 255;
-    tab_->theme_r = (unsigned char)r;
-    tab_->theme_g = (unsigned char)g;
-    tab_->theme_b = (unsigned char)b;
-    tab_->has_theme_color = true;
-    if (tab_ == g_current_tab) {
-      apply_tab_theme_colors(tab_, true);
-    }
-    tab_->theme_color_ready_retry_count = 0;
-    bool fallback = (source.empty() || source == "fallback" || raw_color.empty() || raw_color == "#ffffff");
-    if (fallback && tab_) {
-      if (tab_->theme_color_retry_count < kThemeColorRetryLimit) {
-        schedule_theme_color_request(tab_, 250);
-        tab_->theme_color_retry_count++;
-        fprintf(stderr,
-                "[ck-browser] theme color fallback detected, retry %d for tab=%s\n",
-                tab_->theme_color_retry_count,
-                tab_->base_title.empty() ? "Tab" : tab_->base_title.c_str());
-      } else {
-        fprintf(stderr,
-                "[ck-browser] theme color fallback retry limit reached for tab=%s\n",
-                tab_->base_title.empty() ? "Tab" : tab_->base_title.c_str());
-      }
-    } else if (!fallback && tab_) {
-      tab_->theme_color_retry_count = 0;
-      tab_->theme_color_ready_retry_count = 0;
-    }
-    return true;
-  }
-
-  bool DoClose(CefRefPtr<CefBrowser> browser) override {
-    CEF_REQUIRE_UI_THREAD();
-    (void)browser;
-    return false;
-  }
-
-  void OnBeforeClose(CefRefPtr<CefBrowser> browser) override {
-    CEF_REQUIRE_UI_THREAD();
-    if (tab_ && tab_->browser == browser) {
-      tab_->browser = nullptr;
-    }
-    on_cef_browser_closed("browser");
-  }
-
-  void detach_tab() {
-    tab_ = nullptr;
-  }
-
-  void OnAddressChange(CefRefPtr<CefBrowser> browser,
-                       CefRefPtr<CefFrame> frame,
-                       const CefString &url) override {
-    CEF_REQUIRE_UI_THREAD();
-    (void)browser;
-    if (!tab_ || !frame || !frame->IsMain()) return;
-    tab_->current_url = url.ToString();
-    update_tab_security_status(tab_);
-    if (tab_ == g_current_tab) {
-      update_security_controls(tab_);
-    }
-    if (tab_ == g_current_tab && g_url_field) {
-      XmTextFieldSetString(g_url_field, const_cast<char *>(tab_->current_url.c_str()));
-    }
-  }
-
-  void OnStatusMessage(CefRefPtr<CefBrowser> browser, const CefString &value) override {
-    CEF_REQUIRE_UI_THREAD();
-    (void)browser;
-    if (!tab_) return;
-    std::string message = value.ToString();
-    if (message == "Ready") {
-      message.clear();
-    }
-    tab_->status_message = message;
-    if (is_tab_selected(tab_) && g_current_tab != tab_) {
-        set_current_tab(tab_);
-    }
-    bool is_current = (tab_ == g_current_tab);
-    fprintf(stderr, "[ck-browser] OnStatusMessage for tab %s (%p): incoming='%s' stored='%s' (current=%s)\n",
-            tab_->base_title.empty() ? "Tab" : tab_->base_title.c_str(),
-            (void *)tab_,
-            message.c_str(),
-            tab_->status_message.c_str(),
-            is_current ? "yes" : "no");
-    if (is_current) {
-      set_status_label_text(tab_->status_message.c_str());
-    }
-  }
-
-  void OnTitleChange(CefRefPtr<CefBrowser> browser,
-                     const CefString &title) override {
-    CEF_REQUIRE_UI_THREAD();
-    (void)browser;
-    if (!tab_) return;
-    std::string new_title = title.ToString();
-    if (new_title.empty()) {
-      new_title = tab_->base_title.empty() ? "New Tab" : tab_->base_title;
-    }
-    update_tab_label(tab_, new_title.c_str());
-    update_all_tab_labels("title change");
-  }
-
-  void OnFaviconURLChange(CefRefPtr<CefBrowser> browser,
-                          const std::vector<CefString> &icon_urls) override {
-    CEF_REQUIRE_UI_THREAD();
-    (void)browser;
-    if (!tab_) return;
-    if (icon_urls.empty()) return;
-    tab_->favicon_url = icon_urls[0].ToString();
-    if (tab_->favicon_url.empty()) return;
-    fprintf(stderr, "[ck-browser] OnFaviconURLChange tab=%s (%p) url=%s\n",
-            tab_->base_title.empty() ? "Tab" : tab_->base_title.c_str(),
-            (void *)tab_,
-            tab_->favicon_url.c_str());
-    request_favicon_download(tab_, "OnFaviconURLChange");
-    if (tab_ == g_current_tab) {
-      update_favicon_controls(tab_);
-    }
-  }
-
-  void OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
-                            bool isLoading,
-                            bool canGoBack,
-                            bool canGoForward) override {
-    CEF_REQUIRE_UI_THREAD();
-    (void)browser;
-    if (!tab_) return;
-    tab_->can_go_back = canGoBack;
-    tab_->can_go_forward = canGoForward;
-    tab_->loading = isLoading;
-    if (!isLoading) {
-      update_tab_security_status(tab_);
-      if (tab_ == g_current_tab) {
-        update_security_controls(tab_);
-      }
-      if (!tab_->current_url.empty() && tab_->current_url == tab_->pending_url) {
-        schedule_theme_color_request(tab_, 50);
-        fprintf(stderr,
-                "[ck-browser] scheduling theme color request (loading finished) url=%s ready_state=complete\n",
-                tab_->pending_url.c_str());
-      } else {
-        fprintf(stderr,
-                "[ck-browser] skipping theme color request because current_url=%s pending_url=%s\n",
-                tab_->current_url.empty() ? "(none)" : tab_->current_url.c_str(),
-                tab_->pending_url.empty() ? "(none)" : tab_->pending_url.c_str());
-      }
-    }
-    if (tab_ == g_current_tab) {
-      update_navigation_buttons(tab_);
-      update_reload_button_for_tab(tab_);
-    }
-  }
-
-  void OnGotFocus(CefRefPtr<CefBrowser> browser) override {
-    CEF_REQUIRE_UI_THREAD();
-    (void)browser;
-    if (!tab_) return;
-    if (is_tab_selected(tab_)) {
-      focus_browser_area(tab_);
-    }
-  }
-
- private:
-	  BrowserTab *tab_ = NULL;
-	  int default_open_link_new_tab_cmd_ = -1;
-	  int default_open_link_new_window_cmd_ = -1;
-	  std::vector<int> inspect_element_cmds_;
-	  int last_context_x_ = 0;
-	  int last_context_y_ = 0;
-	  std::string last_context_link_url_;
-	  IMPLEMENT_REFCOUNTING(BrowserClient);
-};
 
 class CkCefApp : public CefApp, public CefRenderProcessHandler {
  public:
@@ -1436,7 +828,7 @@ static void ensure_tab_default_colors(BrowserTab *tab)
     tab->tab_default_colors_initialized = true;
 }
 
-static void apply_tab_theme_colors(BrowserTab *tab, bool active)
+void apply_tab_theme_colors(BrowserTab *tab, bool active)
 {
     if (!tab || !tab->page) return;
     ensure_tab_default_colors(tab);
@@ -1522,7 +914,7 @@ static void ensure_parent_dir_exists(const char *path)
     mkdir(dir, 0700);
 }
 
-static std::string load_homepage_file()
+std::string load_homepage_file()
 {
     char path[PATH_MAX];
     config_build_path(path, sizeof(path), "ck-browser.homepage");
@@ -1719,7 +1111,7 @@ static void cef_message_pump(XtPointer client_data, XtIntervalId *id)
     XtAppAddTimeOut(g_app, 10, cef_message_pump, NULL);
 }
 
-static std::string normalize_url(const char *input)
+std::string normalize_url(const char *input)
 {
     if (!input || input[0] == '\0') return std::string();
     std::string normalized(input);
@@ -1756,26 +1148,7 @@ static bool is_url_parseable(const std::string &url)
     return CefParseURL(cef_url, parts);
 }
 
-static const char *window_disposition_name(cef_window_open_disposition_t disposition)
-{
-    switch (disposition) {
-        case CEF_WOD_UNKNOWN: return "UNKNOWN";
-        case CEF_WOD_CURRENT_TAB: return "CURRENT_TAB";
-        case CEF_WOD_SINGLETON_TAB: return "SINGLETON_TAB";
-        case CEF_WOD_NEW_FOREGROUND_TAB: return "NEW_FOREGROUND_TAB";
-        case CEF_WOD_NEW_BACKGROUND_TAB: return "NEW_BACKGROUND_TAB";
-        case CEF_WOD_NEW_POPUP: return "NEW_POPUP";
-        case CEF_WOD_NEW_WINDOW: return "NEW_WINDOW";
-        case CEF_WOD_SAVE_TO_DISK: return "SAVE_TO_DISK";
-        case CEF_WOD_OFF_THE_RECORD: return "OFF_THE_RECORD";
-        case CEF_WOD_IGNORE_ACTION: return "IGNORE_ACTION";
-        case CEF_WOD_SWITCH_TO_TAB: return "SWITCH_TO_TAB";
-        case CEF_WOD_NEW_PICTURE_IN_PICTURE: return "NEW_PICTURE_IN_PICTURE";
-        default: return "OTHER";
-    }
-}
-
-static bool is_devtools_url(const std::string &url)
+bool is_devtools_url(const std::string &url)
 {
     if (url.empty()) return false;
     return (url.rfind("chrome-devtools://", 0) == 0) || (url.rfind("devtools://", 0) == 0);
@@ -1852,7 +1225,7 @@ static void start_devtools_browser_cb(XtPointer client_data, XtIntervalId *id)
     }
 }
 
-static void show_devtools_for_tab(BrowserTab *tab, int inspect_x, int inspect_y)
+void show_devtools_for_tab(BrowserTab *tab, int inspect_x, int inspect_y)
 {
     if (!tab || !tab->browser || !g_toplevel) return;
     CefRefPtr<CefBrowserHost> host = tab->browser->GetHost();
@@ -1929,7 +1302,7 @@ static void show_devtools_for_tab(BrowserTab *tab, int inspect_x, int inspect_y)
     }
 }
 
-static void resize_devtools_to_area(BrowserTab *tab, const char *reason)
+void resize_devtools_to_area(BrowserTab *tab, const char *reason)
 {
     if (!tab || !tab->devtools_browser || !tab->devtools_area) return;
     CefRefPtr<CefBrowserHost> host = tab->devtools_browser->GetHost();
@@ -2001,14 +1374,14 @@ static const char *display_url_for_tab(const BrowserTab *tab)
     return kInitialBrowserUrl;
 }
 
-static void update_url_field_for_tab(BrowserTab *tab)
+void update_url_field_for_tab(BrowserTab *tab)
 {
     if (!g_url_field) return;
     const char *value = display_url_for_tab(tab);
     XmTextFieldSetString(g_url_field, const_cast<char *>(value ? value : ""));
 }
 
-static void set_status_label_text(const char *text)
+void set_status_label_text(const char *text)
 {
     if (!g_status_message_label) return;
     const char *display = text ? text : "";
@@ -2026,7 +1399,7 @@ static void set_security_label_text(const char *text)
     XmStringFree(xm_text);
 }
 
-static void update_security_controls(BrowserTab *tab)
+void update_security_controls(BrowserTab *tab)
 {
     if (!tab) {
         set_security_label_text("Security: None");
@@ -2083,7 +1456,7 @@ static std::string content_status_to_short_text(cef_ssl_content_status_t status)
     return joined;
 }
 
-static void update_tab_security_status(BrowserTab *tab)
+void update_tab_security_status(BrowserTab *tab)
 {
     if (!tab) return;
     std::string url = tab->current_url.empty() ? tab->pending_url : tab->current_url;
@@ -2122,7 +1495,7 @@ static void update_tab_security_status(BrowserTab *tab)
     tab->security_status = "Security: TLS (Valid)";
 }
 
-static void update_tab_label(BrowserTab *tab, const char *text)
+void update_tab_label(BrowserTab *tab, const char *text)
 {
     if (!tab || !tab->page) return;
     const char *label = (text && text[0]) ? text : (tab->base_title.empty() ? "New Tab" : tab->base_title.c_str());
@@ -2215,7 +1588,7 @@ static void update_tab_label(BrowserTab *tab, const char *text)
     XmStringFree(xm_label);
 }
 
-static void update_all_tab_labels(const char *reason)
+void update_all_tab_labels(const char *reason)
 {
     (void)reason;
     for (const auto &entry : g_browser_tabs) {
@@ -2228,7 +1601,7 @@ static void update_all_tab_labels(const char *reason)
     }
 }
 
-static void spawn_new_browser_window(const std::string &url)
+void spawn_new_browser_window(const std::string &url)
 {
     if (g_subprocess_path[0] == '\0') {
         fprintf(stderr, "[ck-browser] spawn_new_browser_window: missing executable path\n");
@@ -2250,7 +1623,7 @@ static void spawn_new_browser_window(const std::string &url)
     fprintf(stderr, "[ck-browser] spawn_new_browser_window pid=%ld\n", (long)pid);
 }
 
-static void open_url_in_new_tab(const std::string &url, bool select)
+void open_url_in_new_tab(const std::string &url, bool select)
 {
     if (!g_tab_stack) return;
     const char *base = "New Tab";
@@ -2285,7 +1658,7 @@ log_popup_features(const CefPopupFeatures &features)
             features.isPopup);
 }
 
-static bool
+bool
 route_url_through_ck_browser(CefRefPtr<CefBrowser> browser,
                              const std::string &url,
                              bool allow_existing_tab)
@@ -2326,7 +1699,7 @@ static void log_widget_size(const char *context, Widget widget)
     fprintf(stderr, "[ck-browser] %s size %dx%d\n", context, (int)width, (int)height);
 }
 
-static void update_navigation_buttons(BrowserTab *tab)
+void update_navigation_buttons(BrowserTab *tab)
 {
     if (g_back_button) {
         XtSetSensitive(g_back_button, tab && tab->can_go_back);
@@ -2901,7 +2274,7 @@ class FaviconDownloadCallback : public CefDownloadImageCallback {
   IMPLEMENT_REFCOUNTING(FaviconDownloadCallback);
 };
 
-static void request_favicon_download(BrowserTab *tab, const char *reason)
+void request_favicon_download(BrowserTab *tab, const char *reason)
 {
     if (!tab || !tab->browser) return;
     if (tab->favicon_url.empty()) return;
@@ -2957,7 +2330,7 @@ static void request_favicon_download(BrowserTab *tab, const char *reason)
                         new FaviconDownloadCallback(tab, toolbar_size, window_size, bg_pixel));
 }
 
-static void update_favicon_controls(BrowserTab *tab)
+void update_favicon_controls(BrowserTab *tab)
 {
     const char *tab_label = tab ? (tab->base_title.empty() ? "Tab" : tab->base_title.c_str()) : "(none)";
     const char *host = tab ? tab->current_host.c_str() : "(none)";
@@ -3006,14 +2379,14 @@ set_reload_button_label(const char *text)
     XmStringFree(xm_label);
 }
 
-static void
+void
 update_reload_button_for_tab(BrowserTab *tab)
 {
     bool loading = tab && tab->loading;
     set_reload_button_label(loading ? "Stop" : "Reload");
 }
 
-static void
+void
 clear_tab_favicon(BrowserTab *tab)
 {
     fprintf(stderr,
@@ -3043,7 +2416,7 @@ clear_tab_favicon(BrowserTab *tab)
     }
 }
 
-static std::string
+std::string
 extract_host_from_url(const std::string &url)
 {
     size_t scheme = url.find("://");
@@ -3124,7 +2497,7 @@ static void theme_color_request_timer_cb(XtPointer client_data, XtIntervalId *id
     request_tab_theme_color(tab);
 }
 
-static void schedule_theme_color_request(BrowserTab *tab, int delay_ms)
+void schedule_theme_color_request(BrowserTab *tab, int delay_ms)
 {
     if (!tab) {
         fprintf(stderr,
@@ -3297,7 +2670,7 @@ static int count_open_browsers()
     return pending;
 }
 
-static void on_cef_browser_closed(const char *tag)
+void on_cef_browser_closed(const char *tag)
 {
     if (!g_shutdown_requested) return;
     if (g_shutdown_pending_browsers > 0) {
@@ -3596,7 +2969,7 @@ static bool create_cef_browser_for_tab(BrowserTab *tab)
     browser_settings.chrome_status_bubble = STATE_DISABLED;
     const std::string initial = tab->pending_url.empty() ? kInitialBrowserUrl : tab->pending_url;
     CefString cef_url(initial);
-    tab->client = new BrowserClient(tab);
+    tab->client = create_browser_client(tab);
     tab->browser = CefBrowserHost::CreateBrowserSync(window_info,
                                                      tab->client,
                                                      cef_url,
@@ -3701,14 +3074,19 @@ static BrowserTab *get_tab_for_widget(Widget page)
     return tab;
 }
 
-static BrowserTab *get_selected_tab()
+BrowserTab *get_selected_tab()
 {
     if (!g_tab_stack) return NULL;
     Widget selected = XmTabStackGetSelectedTab(g_tab_stack);
     return get_tab_for_widget(selected);
 }
 
-static bool is_tab_selected(const BrowserTab *tab)
+BrowserTab *get_current_tab()
+{
+    return g_current_tab;
+}
+
+bool is_tab_selected(const BrowserTab *tab)
 {
     if (!tab || !g_tab_stack) return false;
     Widget selected = XmTabStackGetSelectedTab(g_tab_stack);
@@ -3737,7 +3115,7 @@ static void browser_set_focus(BrowserTab *tab, bool focus)
     host->SetFocus(focus ? 1 : 0);
 }
 
-static void focus_browser_area(BrowserTab *tab)
+void focus_browser_area(BrowserTab *tab)
 {
     if (!tab || !tab->browser_area) return;
     if (g_url_field) {
@@ -4323,7 +3701,7 @@ static void detach_tab_clients(BrowserTab *tab)
 {
     if (!tab) return;
     if (tab->client) {
-        tab->client->detach_tab();
+        detach_browser_client(tab->client);
         tab->client = nullptr;
     }
     if (tab->devtools_client) {
@@ -4471,7 +3849,7 @@ static void on_close_tab(Widget w, XtPointer client_data, XtPointer call_data)
     XtDestroyWidget(selected);
 }
 
-static void set_current_tab(BrowserTab *tab)
+void set_current_tab(BrowserTab *tab)
 {
     BrowserTab *previous = g_current_tab;
     g_current_tab = tab;
@@ -7231,7 +6609,7 @@ static char *xm_name(const char *name)
     return const_cast<char *>(name ? name : "");
 }
 
-static bool parse_startup_url_arg(int argc, char *argv[], std::string *out_url)
+bool parse_startup_url_arg(int argc, char *argv[], std::string *out_url)
 {
     if (!out_url) return false;
     out_url->clear();
@@ -7253,17 +6631,26 @@ static bool parse_startup_url_arg(int argc, char *argv[], std::string *out_url)
     return !out_url->empty();
 }
 
-int ck_browser_run(int argc, char *argv[])
+int start_ui_and_cef_loop(int argc, char *argv[], BrowserApp &app_controller)
 {
-    BrowserApp &app_controller = BrowserApp::instance();
-    g_homepage_url = load_homepage_file();
+    if (!g_cef_app) {
+        g_cef_app = new CkCefApp();
+    }
+
+    BrowserPreflightState preflight;
+    int preflight_exit = app_controller.run_cef_preflight(argc, argv, g_cef_app, &preflight);
+    if (preflight_exit >= 0) {
+        return preflight_exit;
+    }
+
+    g_homepage_url = preflight.homepage_url;
     if (g_homepage_url.empty()) {
         g_homepage_url = kInitialBrowserUrl;
     }
     fprintf(stderr, "[ck-browser] homepage URL=%s\n",
             g_homepage_url.empty() ? "(empty)" : g_homepage_url.c_str());
 
-    BrowserPaths cef_paths = app_controller.discover_cef_paths();
+    BrowserPaths cef_paths = preflight.cef_paths;
     char resources_path[PATH_MAX] = "";
     char locales_path[PATH_MAX] = "";
     char subprocess_path[PATH_MAX] = "";
@@ -7284,46 +6671,10 @@ int ck_browser_run(int argc, char *argv[])
             locales_path[0] ? locales_path : "(none)",
             subprocess_path[0] ? subprocess_path : "(none)");
 
-    bool force_disable_gpu = !app_controller.has_opengl_support();
-    if (force_disable_gpu) {
-        fprintf(stderr,
-                "[ck-browser] OpenGL stack missing (libGL), forcing --disable-gpu + software fallback\n");
-    } else {
-        fprintf(stderr, "[ck-browser] OpenGL stack present, GPU acceleration enabled\n");
-    }
-    app_controller.apply_gpu_switches(force_disable_gpu);
-
-    g_session_data = app_controller.prepare_session(argc, argv);
-
-    if (!g_cef_app) {
-        g_cef_app = new CkCefApp();
-    }
-
-    std::vector<char *> cef_argv;
-    app_controller.build_cef_argv(argc, argv, &cef_argv);
-    fprintf(stderr, "[ck-browser] cef args:");
-    for (int i = 0; i < (int)cef_argv.size(); ++i) {
-        fprintf(stderr, " %s", cef_argv[i] ? cef_argv[i] : "(null)");
-    }
-    fprintf(stderr, "\n");
-    CefMainArgs main_args((int)cef_argv.size(), cef_argv.data());
-    if (force_disable_gpu) {
-        app_controller.apply_gpu_switches(force_disable_gpu);
-    }
-    fprintf(stderr, "[ck-browser] calling cef_execute_process\n");
-    int exit_code = CefExecuteProcess(main_args, g_cef_app, nullptr);
-    fprintf(stderr, "[ck-browser] cef_execute_process result=%d\n", exit_code);
-    if (exit_code >= 0) {
-        return exit_code;
-    }
-
-    std::string startup_url;
-    bool has_startup_url = parse_startup_url_arg(argc, argv, &startup_url);
-    std::string cache_suffix;
-    (void)app_controller.parse_cache_suffix_arg(argc, argv, &cache_suffix);
-    if (cache_suffix.empty() && has_startup_url) {
-        cache_suffix = std::to_string((long)getpid());
-    }
+    g_session_data = preflight.session_data;
+    bool has_startup_url = preflight.has_startup_url;
+    std::string startup_url = preflight.startup_url;
+    std::string cache_suffix = preflight.cache_suffix;
 
     XtAppContext app;
     Widget toplevel = XtVaAppInitialize(&app, "CkBrowser", NULL, 0,
@@ -7431,33 +6782,13 @@ int ck_browser_run(int argc, char *argv[])
     if (subprocess_path[0] != '\0') {
         CefString(&settings.browser_subprocess_path) = subprocess_path;
     }
-    char cache_base[PATH_MAX];
-    app_controller.build_cwd_path(cache_base, sizeof(cache_base), "build/ck-browser-cache");
-    char cache_path[PATH_MAX];
-    if (cache_base[0] == '\0') {
-        cache_path[0] = '\0';
-    } else if (!cache_suffix.empty()) {
-        size_t base_len = strnlen(cache_base, sizeof(cache_base));
-        size_t suffix_len = cache_suffix.size();
-        if (base_len + 1 + suffix_len + 1 <= sizeof(cache_path)) {
-            memcpy(cache_path, cache_base, base_len);
-            cache_path[base_len] = '-';
-            memcpy(cache_path + base_len + 1, cache_suffix.c_str(), suffix_len);
-            cache_path[base_len + 1 + suffix_len] = '\0';
-        } else {
-            strncpy(cache_path, cache_base, sizeof(cache_path));
-            cache_path[sizeof(cache_path) - 1] = '\0';
-        }
-    } else {
-        strncpy(cache_path, cache_base, sizeof(cache_path));
-        cache_path[sizeof(cache_path) - 1] = '\0';
-    }
-    if (cache_path[0] != '\0') {
-        mkdir(cache_path, 0755);
+    std::string cache_path = app_controller.build_cache_path(cache_suffix);
+    if (!cache_path.empty()) {
         CefString(&settings.root_cache_path) = cache_path;
-        fprintf(stderr, "[ck-browser] root_cache_path=%s\n", cache_path);
+        fprintf(stderr, "[ck-browser] root_cache_path=%s\n", cache_path.c_str());
     }
     app_controller.report_cef_resource_status(resources_path, selected_locales ? selected_locales : "");
+    CefMainArgs main_args((int)preflight.cef_argv.size(), preflight.cef_argv.data());
     app_controller.dump_cef_env_and_args(main_args.argc, main_args.argv);
     fprintf(stderr, "[ck-browser] calling CefInitialize\n");
     bool cef_ok = CefInitialize(main_args, settings, g_cef_app, nullptr);

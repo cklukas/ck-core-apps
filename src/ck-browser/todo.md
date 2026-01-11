@@ -10,18 +10,22 @@
   - [ ] Move CEF entry points (`main`, `initialize_cef`, `CkCefApp`, `BrowserClient`) into the new class, leaving only bootstrap in `ck-browser.cpp`.
     - [x] Introduce `BrowserApp::run_main` delegating from `main()` as a first step toward moving the `ck_browser_run` body.
     - [x] Move `main()` into `browser_app.cpp`, keeping `ck-browser.cpp` free of the program entry point.
-    - [ ] Migrate the `ck_browser_run` body itself into `BrowserApp::run_main`, leaving only a thin bootstrap in `ck-browser.cpp`.
+    - [x] Migrate the `ck_browser_run` body itself into `BrowserApp::run_main`, leaving only a thin bootstrap in `ck-browser.cpp`.
       - [x] Identify all static helpers/state used inside `ck_browser_run` and lift the necessary declarations into a private namespace or header so `browser_app.cpp` can call them without global leakage.
         - Preflight/build helpers: `load_homepage_file`, `save_homepage_file`, `normalize_url`, `parse_startup_url_arg`, `parse_cache_suffix_arg`, `find_existing_path`, `build_cwd_path`, `build_path_from_dir`, `get_exe_path`, `dir_has_files`, `has_opengl_support`, `apply_gpu_switches`, `build_cef_argv`, `dump_cef_env_and_args`, `report_cef_resource_status`.
         - Session/glue: `session_parse_argument`, `session_data_create/free`, `session_load`, `session_apply_geometry`, `session_data_get_int`, `restore_tabs_from_session_data`, `save_last_session_file`, `capture_session_state`, globals `g_session_data`, `g_session_loaded`.
         - UI/bootstrap: `create_menu_bar`, `create_toolbar`, `create_status_bar`, tab stack creation, timers `attach_tab_handlers_cb`, `bookmark_file_monitor_timer_cb`, WM callbacks (`wm_delete_cb`, `wm_save_yourself_cb`, `on_main_window_resize`), and initial tab creation (`create_tab_page`, `schedule_tab_browser_creation`, `set_current_tab`).
         - Lifecycle/teardown: `rebuild_bookmarks_menu_items`, `detach_tab_clients`, `g_browser_tabs`, `g_current_tab`, `g_cef_app`, `g_cef_initialized`, `g_shutdown_requested`, `g_shutdown_pending_browsers`.
       - [x] Localize preflight-only state (`resources_path`, `locales_path`, `subprocess_path`, GPU disable flag) within the run flow to reduce global coupling.
-      - [ ] Move the CEF preflight/setup portion (homepage load, path discovery, GPU toggle, session prep, CEF argv/build, `CefExecuteProcess`) into `browser_app.cpp`, keeping UI creation callbacks reachable via forward declarations.
-      - [ ] Move the Xt/GUI bootstrap and shutdown sequence into a helper callable from `browser_app.cpp` (e.g., `start_ui_and_cef_loop`), leaving `ck-browser.cpp` to export only that helper and UI-specific statics.
-      - [ ] Remove the old `ck_browser_run` definition from `ck-browser.cpp` once the class-owned flow builds and links.
+      - [x] Move the CEF preflight/setup portion (homepage load, path discovery, GPU toggle, session prep, CEF argv/build, `CefExecuteProcess`) into `browser_app.cpp`, keeping UI creation callbacks reachable via forward declarations.
+      - [x] Move the Xt/GUI bootstrap and shutdown sequence into a helper callable from `browser_app.cpp` (e.g., `start_ui_and_cef_loop`), leaving `ck-browser.cpp` to export only that helper and UI-specific statics.
+      - [x] Remove the old `ck_browser_run` definition from `ck-browser.cpp` once the class-owned flow builds and links.
     - [ ] Relocate the `CkCefApp` implementation into `browser_app.cpp` with any necessary forward declarations in the header.
+      - [ ] Identify renderer-client responsibilities (theme-color messaging, devtools IPC) that CkCefApp currently handles and outline how they surface through BrowserApp.
+      - [ ] Add helper declarations for the static utilities CkCefApp relies on so they can be invoked from `browser_app.cpp`.
     - [ ] Relocate the `BrowserClient` implementation into `browser_app.cpp` and expose only the minimal hooks needed by the UI layer (e.g., to show devtools or spawn windows).
+      - [x] Catalog the functions and globals BrowserClient accesses (`show_devtools_for_tab`, `replacement tab creation`, `route_url_through_ck_browser`, `normalize_url`, `spawn_new_browser_window`, `open_url_in_new_tab`, `log_popup_features`, `is_devtools_url`, `extract_host_from_url`, `clear_tab_favicon`, `update_url_field_for_tab`, `update_navigation_buttons`, `update_reload_button_for_tab`, `schedule_theme_color_request`, `apply_tab_theme_colors`, `request_favicon_download`, `update_favicon_controls`, `update_tab_security_status`, `update_security_controls`, `is_tab_selected`, `focus_browser_area`, `set_current_tab`, `update_tab_label`, `update_all_tab_labels`, `set_status_label_text`, `route_url_through_ck_browser`, `g_current_tab`, `g_url_field`, `get_selected_tab`).
+      - [ ] Create a lightweight interface layer (either in a shared header or via BrowserApp methods) that allows BrowserClient to perform the actions it needs without dragging Xm-specific statics into `browser_app.cpp`.
     - [ ] Move CEF initialization/shutdown helpers (current `CefExecuteProcess`/`CefInitialize`/`CefShutdown` flow) into `BrowserApp`, keeping UI callbacks injectable.
     - [ ] Isolate `BrowserClient` and `CkCefApp` definitions into `browser_app.cpp`, with clear `OnBeforePopup`, `OnBeforeBrowse`, and renderer handler wiring.
     - [ ] Make `initialize_cef_browser_cb` and tab scheduling helpers members or friends so they do not rely on scattered globals.
@@ -36,6 +40,7 @@
       - [x] Move GPU capability detection/toggling (`has_opengl_support`, `apply_gpu_switches`) behind `BrowserApp::configure_gpu()` invoked before CEF init.
       - [x] Wrap session argument parsing (`session_parse_argument`) and session state creation (`session_data_create`) into a `prepare_session()` helper that can be invoked before Xt/CEF startup.
       - [x] Relocate CEF argument filtering (`build_cef_argv`, cache suffix parsing) and logging (`dump_cef_env_and_args`) into a `build_cef_args()` helper that produces `CefMainArgs` for both sub- and main processes.
+      - [x] Centralize cache path construction into `BrowserApp::build_cache_path` so `ck_browser_run` can focus on UI configuration.
     - [ ] Once dependencies are mapped, pull the runtime orchestration (XtApp setup, widget creation, main loop, shutdown) into a helper that BrowserApp can invoke after CEF initialization.
 - [ ] Convert the existing global helper functions used only by CEF callbacks into private methods inside `BrowserApp`.
 - [ ] Surface events (new tab request, load finished) through a small interface so UI modules can react without depending on Xm.

@@ -5,10 +5,27 @@
 #include <string>
 #include <vector>
 
+template <typename T> class CefRefPtr;
+class CefApp;
+class CkCefApp;
+
+extern CefRefPtr<CkCefApp> g_cef_app;
+class BrowserClient;
+struct BrowserTab;
 struct BrowserPaths {
     std::string resources_path;
     std::string locales_path;
     std::string subprocess_path;
+};
+struct BrowserPreflightState {
+    std::string homepage_url;
+    BrowserPaths cef_paths;
+    bool force_disable_gpu = false;
+    SessionData *session_data = nullptr;
+    bool has_startup_url = false;
+    std::string startup_url;
+    std::string cache_suffix;
+    std::vector<char *> cef_argv;
 };
 struct SessionData;
 
@@ -33,11 +50,16 @@ public:
     bool has_opengl_support() const;
     void apply_gpu_switches(bool disable_gpu) const;
     SessionData *prepare_session(int &argc, char **argv) const;
+    std::string build_cache_path(const std::string &suffix) const;
+    int run_cef_preflight(int argc, char *argv[], CefRefPtr<CefApp> cef_app, BrowserPreflightState *state) const;
 
 private:
     BrowserApp() = default;
 };
 
-int ck_browser_run(int argc, char *argv[]);
+int start_ui_and_cef_loop(int argc, char *argv[], BrowserApp &app_controller);
+
+CefRefPtr<BrowserClient> create_browser_client(BrowserTab *tab);
+void detach_browser_client(const CefRefPtr<BrowserClient> &client);
 
 #endif // CK_BROWSER_BROWSER_APP_H

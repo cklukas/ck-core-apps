@@ -39,7 +39,7 @@
 #include <sys/stat.h>
 #include <stdarg.h>
 #include <system_error>
-#include <ctime>
+#include <cmath>
 #include <algorithm>
 #include <functional>
 #include <list>
@@ -47,6 +47,8 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <iterator>
+#include <array>
 #include <filesystem>
 
 extern "C" {
@@ -162,6 +164,7 @@ struct BrowserTab {
     unsigned char theme_b = 0;
     int theme_color_retry_count = 0;
     bool theme_color_retry_scheduled = false;
+    int theme_color_ready_retry_count = 0;
     Widget devtools_shell = NULL;
     Widget devtools_area = NULL;
     CefRefPtr<CefBrowser> devtools_browser;
@@ -185,6 +188,7 @@ struct FaviconCacheEntry {
 static const size_t kFaviconCacheLimit = 500;
 static const time_t kFaviconCacheTTL_SECONDS = 6 * 60 * 60;
 static const int kThemeColorRetryLimit = 3;
+static const int kThemeColorReadyRetryLimit = 6;
 static std::unordered_map<std::string, FaviconCacheEntry> g_favicon_cache;
 static std::list<std::string> g_favicon_cache_order;
 
@@ -208,6 +212,7 @@ struct BookmarkDialogContext {
     Widget dialog = NULL;
     Widget name_field = NULL;
     Widget add_to_menu_checkbox = NULL;
+    Widget url_field = NULL;
     std::vector<BookmarkGroup *> group_entries;
     BookmarkEntry *editing_entry = NULL;
     BookmarkGroup *editing_group = NULL;
@@ -222,6 +227,8 @@ struct BookmarkManagerContext {
     Widget open_button = NULL;
     Widget edit_button = NULL;
     Widget delete_button = NULL;
+    Widget rename_group_button = NULL;
+    Widget delete_group_button = NULL;
     std::vector<BookmarkGroup *> group_entries;
     std::vector<BookmarkEntry *> entry_items;
     std::vector<Widget> bookmark_entry_widgets;
@@ -231,6 +238,30 @@ struct BookmarkManagerContext {
     BookmarkEntry *selected_entry = NULL;
 };
 
+struct BookmarkManagerNewGroupDialogData {
+    BookmarkManagerContext *ctx = NULL;
+    Widget dialog = NULL;
+    Widget text_field = NULL;
+};
+
+struct BookmarkManagerRenameGroupDialogData {
+    BookmarkManagerContext *ctx = NULL;
+    BookmarkGroup *group = NULL;
+    Widget dialog = NULL;
+    Widget text_field = NULL;
+};
+
+struct BookmarkManagerDeleteGroupDialogData {
+    BookmarkManagerContext *ctx = NULL;
+    BookmarkGroup *group = NULL;
+    Widget dialog = NULL;
+    Widget move_target_list = NULL;
+    Widget delete_option = NULL;
+    Widget move_option = NULL;
+    std::vector<BookmarkGroup *> target_entries;
+    BookmarkGroup *selected_target_group = NULL;
+};
+
 static std::vector<std::unique_ptr<BrowserTab>> g_browser_tabs;
 static BrowserTab *g_current_tab = NULL;
 static bool g_cef_message_pump_started = false;
@@ -238,6 +269,9 @@ static std::unique_ptr<BookmarkGroup> g_bookmark_root;
 static BookmarkGroup *g_selected_bookmark_group = NULL;
 static Widget g_bookmarks_menu = NULL;
 static std::vector<Widget> g_bookmark_menu_items;
+static std::vector<Widget> g_bookmark_group_cascade_widgets;
+static std::vector<Widget> g_bookmark_group_submenu_widgets;
+static std::vector<Widget> g_bookmark_group_separator_widgets;
 static std::vector<Pixmap> g_bookmark_menu_icon_pixmaps;
 static const char *kInitialBrowserUrl = "https://www.wikipedia.org";
 static const char *kBookmarksFileName = "bookmarks.html";
@@ -247,6 +281,7 @@ static time_t g_bookmarks_file_mtime = 0;
 static std::string normalize_url(const char *input);
 static const char *display_url_for_tab(const BrowserTab *tab);
 static void update_url_field_for_tab(BrowserTab *tab);
+static void load_url_for_tab(BrowserTab *tab, const std::string &url);
 static bool is_devtools_url(const std::string &url);
 static bool is_url_parseable(const std::string &url);
 static void show_devtools_for_tab(BrowserTab *tab, int inspect_x, int inspect_y);
@@ -283,6 +318,10 @@ static void poll_zoom_levels();
 static void on_zoom_reset(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_zoom_in(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_zoom_out(Widget w, XtPointer client_data, XtPointer call_data);
+static bool route_url_through_ck_browser(CefRefPtr<CefBrowser> browser,
+                                         const std::string &url,
+                                         bool allow_existing_tab);
+static void log_popup_features(const CefPopupFeatures &features);
 static BookmarkGroup *ensure_bookmark_groups();
 static BookmarkGroup *add_bookmark_group(BookmarkGroup *parent, const char *name);
 static void collect_bookmark_groups(BookmarkGroup *group,
@@ -291,6 +330,20 @@ static void collect_bookmark_groups(BookmarkGroup *group,
                                     int depth);
 static void collect_bookmark_menu_entries(BookmarkGroup *group,
                                           std::vector<BookmarkEntry *> &entries);
+static void clear_bookmark_group_submenus();
+static Widget add_bookmark_menu_entry(Widget parent,
+                                      BookmarkEntry *entry,
+                                      Pixel menu_bg,
+                                      const char *accel = NULL,
+                                      const char *accel_text = NULL);
+static void build_bookmark_group_menu_recursive(BookmarkGroup *group,
+                                                Widget parent_menu,
+                                                Pixel menu_bg);
+static void create_bookmark_group_submenus(BookmarkGroup *root, Pixel menu_bg);
+static BookmarkGroup *find_parent_group(BookmarkGroup *root, BookmarkGroup *target);
+static bool is_group_descendant_or_same(BookmarkGroup *candidate, BookmarkGroup *ancestor);
+static void move_all_bookmarks_from_subtree(BookmarkGroup *source, BookmarkGroup *target);
+static void remove_bookmark_group_from_parent(BookmarkGroup *parent, BookmarkGroup *group);
 static void rebuild_bookmarks_menu_items();
 static void on_bookmark_menu_activate(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_bookmark_dialog_save(Widget w, XtPointer client_data, XtPointer call_data);
@@ -299,6 +352,8 @@ static void show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry = NUL
 static void bookmark_dialog_group_list_selection_cb(Widget w, XtPointer client_data, XtPointer call_data);
 static void bookmark_dialog_populate_group_list(BookmarkDialogContext *ctx, Widget list, BookmarkGroup *group, int depth);
 static BookmarkEntry *find_bookmark_by_url(BookmarkGroup *group, const std::string &url, BookmarkGroup **out_group);
+static BookmarkGroup *find_bookmark_parent_group(BookmarkGroup *group, BookmarkEntry *entry);
+static std::unique_ptr<BookmarkEntry> detach_bookmark_entry_from_group(BookmarkGroup *group, BookmarkEntry *entry);
 static void save_bookmarks_to_file();
 static std::unique_ptr<BookmarkGroup> load_bookmarks_from_file();
 static void ensure_path_directory(const char *path);
@@ -333,8 +388,22 @@ static void bookmark_manager_update_entry_list(BookmarkManagerContext *ctx);
 static void bookmark_manager_group_selection_cb(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_bookmark_manager_open(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_bookmark_manager_edit(Widget w, XtPointer client_data, XtPointer call_data);
+static void on_bookmark_manager_new_group(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_bookmark_manager_delete(Widget w, XtPointer client_data, XtPointer call_data);
+static void on_bookmark_manager_rename_group(Widget w, XtPointer client_data, XtPointer call_data);
+static void on_bookmark_manager_delete_group(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_bookmark_manager_cancel(Widget w, XtPointer client_data, XtPointer call_data);
+static void bookmark_manager_rename_group_confirm_cb(Widget button, XtPointer client_data, XtPointer call_data);
+static void bookmark_manager_rename_group_cancel_cb(Widget button, XtPointer client_data, XtPointer call_data);
+static void bookmark_manager_delete_group_confirm_cb(Widget button, XtPointer client_data, XtPointer call_data);
+static void bookmark_manager_delete_group_cancel_cb(Widget button, XtPointer client_data, XtPointer call_data);
+static void bookmark_manager_delete_group_toggle_cb(Widget widget, XtPointer client_data, XtPointer call_data);
+static void bookmark_manager_delete_group_target_selection_cb(Widget widget, XtPointer client_data, XtPointer call_data);
+static void bookmark_manager_populate_move_target_list(BookmarkManagerDeleteGroupDialogData *data, BookmarkGroup *group, int depth);
+static void bookmark_manager_new_group_confirm_cb(Widget dialog, XtPointer client_data, XtPointer call_data);
+static void bookmark_manager_new_group_cancel_cb(Widget dialog, XtPointer client_data, XtPointer call_data);
+static void bookmark_manager_refresh_group_list(BookmarkManagerContext *ctx, BookmarkGroup *preferred_group);
+static void update_bookmark_manager_group_controls(BookmarkManagerContext *ctx);
 static void show_bookmark_manager_dialog();
 static void set_security_label_text(const char *text);
 static void update_security_controls(BrowserTab *tab);
@@ -608,6 +677,7 @@ class BrowserClient : public CefClient,
     }
     tab_->loading = true;
     tab_->theme_color_retry_count = 0;
+    tab_->theme_color_ready_retry_count = 0;
     if (tab_ == g_current_tab) {
       update_url_field_for_tab(tab_);
       update_reload_button_for_tab(tab_);
@@ -647,23 +717,34 @@ class BrowserClient : public CefClient,
     }
     url = normalize_url(url.c_str());
     if (url.empty()) return true;
+    bool load_in_current = (target_disposition == CEF_WOD_CURRENT_TAB ||
+                            target_disposition == CEF_WOD_SWITCH_TO_TAB ||
+                            target_disposition == CEF_WOD_SINGLETON_TAB);
+    return route_url_through_ck_browser(browser, url, load_in_current);
+  }
 
-    if (target_disposition == CEF_WOD_NEW_WINDOW ||
-        target_disposition == CEF_WOD_OFF_THE_RECORD) {
-      spawn_new_browser_window(url);
-      return true;
-    }
-
-    if (target_disposition == CEF_WOD_NEW_FOREGROUND_TAB) {
-      open_url_in_new_tab(url, true);
-      return true;
-    }
-
-    if (target_disposition == CEF_WOD_NEW_BACKGROUND_TAB) {
-      open_url_in_new_tab(url, false);
-      return true;
-    }
-
+  bool OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
+                      CefRefPtr<CefFrame> frame,
+                      CefRefPtr<CefRequest> request,
+                      bool user_gesture,
+                      bool is_redirect) override {
+    CEF_REQUIRE_UI_THREAD();
+    (void)user_gesture;
+    (void)is_redirect;
+    if (!frame || frame->IsMain() || !request) return false;
+    std::string url = request->GetURL();
+#if defined(TRANSITION_AUTO_SUBFRAME) && defined(TRANSITION_MANUAL_SUBFRAME)
+    int transition = request->GetTransitionType();
+    const int kSubframeMask = TRANSITION_AUTO_SUBFRAME | TRANSITION_MANUAL_SUBFRAME;
+    if (transition & kSubframeMask) return false;
+#endif
+    if (url.empty()) return false;
+    std::string frame_name = frame->GetName();
+    fprintf(stderr,
+            "[ck-browser] OnBeforeBrowse intercepted subframe name=%s method=%s url=%s\n",
+            frame_name.empty() ? "(frame)" : frame_name.c_str(),
+            request->GetMethod().ToString().c_str(),
+            url.c_str());
     return false;
   }
 
@@ -686,7 +767,6 @@ class BrowserClient : public CefClient,
     (void)popup_id;
     (void)target_frame_name;
     (void)user_gesture;
-    (void)popupFeatures;
     (void)windowInfo;
     (void)client;
     (void)settings;
@@ -716,6 +796,7 @@ class BrowserClient : public CefClient,
             popupFeatures.height,
             popupFeatures.heightSet,
             popupFeatures.isPopup);
+    log_popup_features(popupFeatures);
     if (url.empty()) {
       return false;
     }
@@ -728,23 +809,25 @@ class BrowserClient : public CefClient,
       return true;
     }
 
+    bool is_small_popup = (popupFeatures.widthSet && popupFeatures.heightSet &&
+                           popupFeatures.width > 0 && popupFeatures.height > 0 &&
+                           popupFeatures.width <= 640 && popupFeatures.height <= 480);
+    bool prefer_native_popup = popupFeatures.isPopup || is_small_popup;
+    if (prefer_native_popup) {
+      fprintf(stderr,
+              "[ck-browser] OnBeforePopup letting native popup (native=%d width=%d height=%d)\n",
+              prefer_native_popup ? 1 : 0,
+              popupFeatures.width,
+              popupFeatures.height);
+      return false;
+    }
     if (target_disposition == CEF_WOD_NEW_WINDOW ||
-        target_disposition == CEF_WOD_OFF_THE_RECORD) {
-      spawn_new_browser_window(url);
-      return true;
+        target_disposition == CEF_WOD_OFF_THE_RECORD ||
+        target_disposition == CEF_WOD_NEW_POPUP ||
+        target_disposition == CEF_WOD_NEW_FOREGROUND_TAB ||
+        target_disposition == CEF_WOD_NEW_BACKGROUND_TAB) {
+      return route_url_through_ck_browser(browser, url, false);
     }
-
-    if (target_disposition == CEF_WOD_NEW_POPUP ||
-        target_disposition == CEF_WOD_NEW_FOREGROUND_TAB) {
-      open_url_in_new_tab(url, true);
-      return true;
-    }
-
-    if (target_disposition == CEF_WOD_NEW_BACKGROUND_TAB) {
-      open_url_in_new_tab(url, false);
-      return true;
-    }
-
     return false;
   }
 
@@ -761,6 +844,23 @@ class BrowserClient : public CefClient,
     if (name != "ck_theme_color") return false;
     CefRefPtr<CefListValue> args = message->GetArgumentList();
     if (!args || args->GetSize() < 6) return true;
+    fprintf(stderr,
+            "[ck-browser] theme color args size=%zu types=%d,%d,%d,%d,%d,%d\n",
+            args->GetSize(),
+            args->GetType(0),
+            args->GetType(1),
+            args->GetType(2),
+            args->GetType(3),
+            args->GetType(4),
+            args->GetType(5));
+    fprintf(stderr,
+            "[ck-browser] theme color raw values r=%d g=%d b=%d source='%s' raw='%s' ready_raw='%s'\n",
+            args->GetInt(0),
+            args->GetInt(1),
+            args->GetInt(2),
+            args->GetString(3).ToString().c_str(),
+            args->GetString(4).ToString().c_str(),
+            args->GetString(5).ToString().c_str());
     int r = args->GetInt(0);
     int g = args->GetInt(1);
     int b = args->GetInt(2);
@@ -793,6 +893,18 @@ class BrowserClient : public CefClient,
             raw_color.empty() ? "(empty)" : raw_color.c_str(),
             ready_state.empty() ? "unknown" : ready_state.c_str());
     if (!ready_complete) {
+      if (tab_->theme_color_ready_retry_count < kThemeColorReadyRetryLimit) {
+        schedule_theme_color_request(tab_, 250);
+        tab_->theme_color_ready_retry_count++;
+        fprintf(stderr,
+                "[ck-browser] theme color readyState not complete, retry %d for tab=%s\n",
+                tab_->theme_color_ready_retry_count,
+                tab_->base_title.empty() ? "Tab" : tab_->base_title.c_str());
+      } else {
+        fprintf(stderr,
+                "[ck-browser] theme color readyState retry limit reached for tab=%s\n",
+                tab_->base_title.empty() ? "Tab" : tab_->base_title.c_str());
+      }
       return true;
     }
     if (r < 0) r = 0;
@@ -808,6 +920,7 @@ class BrowserClient : public CefClient,
     if (tab_ == g_current_tab) {
       apply_tab_theme_colors(tab_, true);
     }
+    tab_->theme_color_ready_retry_count = 0;
     bool fallback = (source.empty() || source == "fallback" || raw_color.empty() || raw_color == "#ffffff");
     if (fallback && tab_) {
       if (tab_->theme_color_retry_count < kThemeColorRetryLimit) {
@@ -819,11 +932,12 @@ class BrowserClient : public CefClient,
                 tab_->base_title.empty() ? "Tab" : tab_->base_title.c_str());
       } else {
         fprintf(stderr,
-                "[ck-browser] theme color retry limit reached for tab=%s\n",
+                "[ck-browser] theme color fallback retry limit reached for tab=%s\n",
                 tab_->base_title.empty() ? "Tab" : tab_->base_title.c_str());
       }
     } else if (!fallback && tab_) {
       tab_->theme_color_retry_count = 0;
+      tab_->theme_color_ready_retry_count = 0;
     }
     return true;
   }
@@ -932,10 +1046,17 @@ class BrowserClient : public CefClient,
       if (tab_ == g_current_tab) {
         update_security_controls(tab_);
       }
-      schedule_theme_color_request(tab_, 50);
-      fprintf(stderr,
-              "[ck-browser] scheduling theme color request (loading finished) url=%s ready_state=complete\n",
-              tab_->pending_url.c_str());
+      if (!tab_->current_url.empty() && tab_->current_url == tab_->pending_url) {
+        schedule_theme_color_request(tab_, 50);
+        fprintf(stderr,
+                "[ck-browser] scheduling theme color request (loading finished) url=%s ready_state=complete\n",
+                tab_->pending_url.c_str());
+      } else {
+        fprintf(stderr,
+                "[ck-browser] skipping theme color request because current_url=%s pending_url=%s\n",
+                tab_->current_url.empty() ? "(none)" : tab_->current_url.c_str(),
+                tab_->pending_url.empty() ? "(none)" : tab_->pending_url.c_str());
+      }
     }
     if (tab_ == g_current_tab) {
       update_navigation_buttons(tab_);
@@ -975,6 +1096,12 @@ class CkCefApp : public CefApp, public CefRenderProcessHandler {
     (void)source_process;
     if (!frame || !message) return false;
     std::string name = message->GetName().ToString();
+    fprintf(stderr,
+            "[ck-renderer] got message=%s frame=%s url=%s\n",
+            name.c_str(),
+            frame->IsMain() ? "main" : "sub",
+            frame->GetURL().ToString().c_str());
+    fflush(stderr);
     if (name != "ck_request_theme_color") return false;
 
     CefRefPtr<CefV8Context> ctx = frame->GetV8Context();
@@ -983,56 +1110,153 @@ class CkCefApp : public CefApp, public CefRenderProcessHandler {
 
     CefRefPtr<CefV8Value> retval;
     CefRefPtr<CefV8Exception> exception;
-    const char *code =
-        "(function(){"
-        "function norm(c){"
-        "  var d=document.createElement('div');"
-        "  d.style.color=c;"
-        "  (document.body||document.documentElement).appendChild(d);"
-        "  var s=getComputedStyle(d).color||'';"
-        "  d.remove();"
-        "  var m=s.match(/rgba?\\((\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)/);"
-        "  if(m) return [parseInt(m[1]),parseInt(m[2]),parseInt(m[3])];"
-        "  return null;"
-        "}"
-        "var c='';"
-        "var source='fallback';"
-        "var meta=document.querySelector('meta[name=\"theme-color\"]');"
-        "if(meta&&meta.content){"
-        "  c=meta.content;"
-        "  source='meta';"
-        "}"
-        "if(!c){"
-        "  var e=document.documentElement;"
-        "  var cs=getComputedStyle(e);"
-        "  var candidate=(cs&&cs.backgroundColor)||'';"
-        "  if(candidate){"
-        "    c=candidate;"
-        "    source='html';"
-        "  }"
-        "}"
-        "if(!c&&document.body){"
-        "  var cs2=getComputedStyle(document.body);"
-        "  var candidate2=(cs2&&cs2.backgroundColor)||'';"
-        "  if(candidate2){"
-        "    c=candidate2;"
-        "    source='body';"
-        "  }"
-        "}"
-        "var used=c||'#ffffff';"
-        "if(!c){"
-        "  source='fallback';"
-        "}"
-        "var rgb=norm(used)||[255,255,255];"
-        "rgb.push(source);"
-        "rgb.push(used);"
-        "rgb.push(document.readyState||'unknown');"
-        "return rgb;"
-        "})()";
+
+    #include <string_view>
+
+const char *code = R"JS(
+(function(){
+  function parseColorString(value){
+    if(!value) return null;
+    var text=String(value).trim();
+    if(!text) return null;
+    var hex=text.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+    if(hex){
+      var digits=hex[1];
+      if(digits.length===3){
+        digits=digits[0]+digits[0]+digits[1]+digits[1]+digits[2]+digits[2];
+      }
+      return [
+        parseInt(digits.slice(0,2),16),
+        parseInt(digits.slice(2,4),16),
+        parseInt(digits.slice(4,6),16)
+      ];
+    }
+    var rgb=text.match(/^rgba?\(([^)]+)\)/i);
+    if(rgb){
+      var parts=rgb[1].split(',').map(function(p){ return p.trim(); });
+      if(parts.length>=3){
+        var r=parseInt(parts[0],10), g=parseInt(parts[1],10), b=parseInt(parts[2],10);
+        if(!isNaN(r)&&!isNaN(g)&&!isNaN(b)) return [r,g,b];
+      }
+    }
+    return null;
+  }
+
+  function norm(c){
+    var parsed=parseColorString(c);
+    if(parsed) return parsed;
+    var d=document.createElement('div');
+    d.style.color=String(c||'');
+    (document.body||document.documentElement).appendChild(d);
+    var s=getComputedStyle(d).color||'';
+    if(d.parentNode) d.parentNode.removeChild(d);
+    var m=s.match(/rgba?\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+    if(m) return [parseInt(m[1],10),parseInt(m[2],10),parseInt(m[3],10)];
+    return null;
+  }
+
+  function isTransparent(value){
+    if(value==null) return true;
+    var s=String(value).trim().toLowerCase();
+    if(!s) return true;
+    if(s==='transparent') return true;
+    if(s.indexOf('rgba(')===0){
+      var inner=s.slice(5,-1).split(',');
+      if(inner.length===4){
+        var a=parseFloat(inner[3]);
+        return !isFinite(a) ? false : a<=0;
+      }
+    }
+    if(s.indexOf('/')!==-1 && s.indexOf('rgb')===0){
+      var slash=s.split('/');
+      if(slash.length===2){
+        var a2=parseFloat(slash[1]);
+        if(isFinite(a2)) return a2<=0;
+      }
+    }
+    return false;
+  }
+
+  var logs=[];
+  logs.push('readyState:'+(document.readyState||'unknown'));
+
+  var chosen = { value: null, source: 'fallback' };
+
+  function consider(value, sourceLabel){
+    if(chosen.value!=null) return;
+    if(value==null) return;
+    var v=String(value).trim();
+    if(!v) return;
+    if(isTransparent(v)) {
+      logs.push(sourceLabel+' ignored (transparent)');
+      return;
+    }
+    chosen.value=v;
+    chosen.source=sourceLabel;
+  }
+
+  var meta=document.querySelector('meta[name="theme-color"]');
+  if(meta && meta.content!=null) {
+    logs.push('meta='+meta.content);
+    consider(meta.content,'meta');
+  }
+
+  var htmlBg=getComputedStyle(document.documentElement).backgroundColor||'';
+  logs.push('htmlBackground:'+htmlBg);
+  consider(htmlBg,'html');
+
+  if(document.body){
+    var bodyBg=getComputedStyle(document.body).backgroundColor||'';
+    logs.push('bodyBackground:'+bodyBg);
+    consider(bodyBg,'body');
+  }
+
+  var used = (chosen.value!=null) ? chosen.value : '#ffffff';
+  var source = chosen.source;
+
+  var rgb = norm(used) || [255,255,255];
+  logs.push('used='+used);
+
+  if(window.console && console.log){
+    console.log('[ck-theme-color] '+logs.join(' | '));
+  }
+
+  rgb.push(source);
+  rgb.push(used);
+  rgb.push(document.readyState||'unknown');
+  return rgb;
+})()
+)JS";
+
+
 
     bool ok = ctx->Eval(code, "ck_theme_color.js", 1, retval, exception);
-    ctx->Exit();
+    const char *result_type = "null";
+    if (retval) {
+      if (retval->IsArray()) {
+        result_type = "array";
+      } else if (retval->IsString()) {
+        result_type = "string";
+      } else {
+        result_type = "other";
+      }
+    }
+    fprintf(stderr,
+            "[ck-renderer] Eval ok=%d resultType=%s hasException=%d\n",
+            ok ? 1 : 0,
+            result_type,
+            exception ? 1 : 0);
+    if (exception) {
+      fprintf(stderr,
+              "[ck-renderer] JS exception: %s @ %s:%d\n",
+              exception->GetMessage().ToString().c_str(),
+              exception->GetScriptResourceName().ToString().c_str(),
+              exception->GetLineNumber());
+    }
+    fflush(stderr);
+
     if (!ok || !retval || !retval->IsArray()) {
+      ctx->Exit();
       return true;
     }
 
@@ -1040,23 +1264,53 @@ class CkCefApp : public CefApp, public CefRenderProcessHandler {
     CefRefPtr<CefV8Value> v0 = retval->GetValue(0);
     CefRefPtr<CefV8Value> v1 = retval->GetValue(1);
     CefRefPtr<CefV8Value> v2 = retval->GetValue(2);
-    if (v0 && v0->IsInt()) r = v0->GetIntValue();
-    if (v1 && v1->IsInt()) g = v1->GetIntValue();
-    if (v2 && v2->IsInt()) b = v2->GetIntValue();
+    auto extract_number = [](CefRefPtr<CefV8Value> value, int fallback) {
+      if (!value) {
+        fprintf(stderr,
+                "[ck-renderer] extract_number: value is null, returning fallback=%d\n",
+                fallback);
+        return fallback;
+      }
+      if (value->IsInt()) return value->GetIntValue();
+      if (value->IsDouble()) return (int)std::round(value->GetDoubleValue());
+      if (value->IsBool()) return value->GetBoolValue() ? 1 : 0;
+      if (value->IsString()) {
+        try {
+          double parsed = std::stod(value->GetStringValue().ToString());
+          return (int)std::round(parsed);
+        } catch (...) {
+          return fallback;
+        }
+      }
+      return fallback;
+    };
+    r = extract_number(v0, r);
+    g = extract_number(v1, g);
+    b = extract_number(v2, b);
     std::string source_str;
     CefRefPtr<CefV8Value> v3 = retval->GetValue(3);
     if (v3 && v3->IsString()) {
-      source_str = v3->GetStringValue();
+        // log the actual string
+        fprintf(stderr,
+                "[ck-renderer] theme color raw source string='%s' (v3)\n",
+                v3->GetStringValue().ToString().c_str());
+      source_str = v3->GetStringValue().ToString();
     }
     std::string raw_str;
     CefRefPtr<CefV8Value> v4 = retval->GetValue(4);
     if (v4 && v4->IsString()) {
-      raw_str = v4->GetStringValue();
+        fprintf(stderr,
+                "[ck-renderer] theme color raw color string='%s' (v4)\n",
+                v4->GetStringValue().ToString().c_str());
+      raw_str = v4->GetStringValue().ToString();
     }
     std::string ready_state;
     CefRefPtr<CefV8Value> v5 = retval->GetValue(5);
     if (v5 && v5->IsString()) {
-      ready_state = v5->GetStringValue();
+        fprintf(stderr,
+                "[ck-renderer] theme color ready state string='%s' (v5)\n",
+                v5->GetStringValue().ToString().c_str());
+      ready_state = v5->GetStringValue().ToString();
     }
     fprintf(stderr,
             "[ck-browser] renderer theme color rgb=%d,%d,%d source=%s raw='%s' readyState=%s\n",
@@ -1072,6 +1326,9 @@ class CkCefApp : public CefApp, public CefRenderProcessHandler {
     if (r > 255) r = 255;
     if (g > 255) g = 255;
     if (b > 255) b = 255;
+
+    ctx->Exit();
+
 
     CefRefPtr<CefProcessMessage> reply = CefProcessMessage::Create("ck_theme_color");
     CefRefPtr<CefListValue> args = reply->GetArgumentList();
@@ -2038,6 +2295,55 @@ static void open_url_in_new_tab(const std::string &url, bool select)
     }
 }
 
+static void
+log_popup_features(const CefPopupFeatures &features)
+{
+    fprintf(stderr,
+            "[ck-browser] popup features x=%d(xSet=%d) y=%d(ySet=%d) "
+            "w=%d(wSet=%d) h=%d(hSet=%d) isPopup=%d\n",
+            features.x,
+            features.xSet,
+            features.y,
+            features.ySet,
+            features.width,
+            features.widthSet,
+            features.height,
+            features.heightSet,
+            features.isPopup);
+}
+
+static bool
+route_url_through_ck_browser(CefRefPtr<CefBrowser> browser,
+                             const std::string &url,
+                             bool allow_existing_tab)
+{
+    if (url.empty()) return false;
+    std::string normalized = normalize_url(url.c_str());
+    if (normalized.empty()) return false;
+    fprintf(stderr,
+            "[ck-browser] route_url_through_ck_browser url=%s normalized=%s allow_existing=%d\n",
+            url.c_str(),
+            normalized.c_str(),
+            allow_existing_tab ? 1 : 0);
+    if (browser) {
+        CefRefPtr<CefBrowserHost> host = browser->GetHost();
+        if (host) {
+            host->SetFocus(true);
+        }
+    }
+    if (allow_existing_tab) {
+        BrowserTab *tab = get_selected_tab();
+        if (tab && tab->browser) {
+            load_url_for_tab(tab, normalized);
+            XmTabStackSelectTab(tab->page, True);
+            set_current_tab(tab);
+            return true;
+        }
+    }
+    open_url_in_new_tab(normalized, true);
+    return true;
+}
+
 static void log_widget_size(const char *context, Widget widget)
 {
     if (!context || !widget) return;
@@ -2847,8 +3153,27 @@ static void theme_color_request_timer_cb(XtPointer client_data, XtIntervalId *id
 
 static void schedule_theme_color_request(BrowserTab *tab, int delay_ms)
 {
-    if (!tab || !g_app) return;
-    if (tab->theme_color_retry_scheduled) return;
+    if (!tab) {
+        fprintf(stderr,
+                "[ck-browser] schedule_theme_color_request skipped (no tab) delay=%d\n",
+                delay_ms);
+        return;
+    }
+    if (!g_app) {
+        fprintf(stderr,
+                "[ck-browser] schedule_theme_color_request skipped (no app context) tab=%s delay=%d\n",
+                tab->base_title.empty() ? "Tab" : tab->base_title.c_str(),
+                delay_ms);
+        return;
+    }
+    if (tab->theme_color_retry_scheduled) {
+        fprintf(stderr,
+                "[ck-browser] schedule_theme_color_request already pending tab=%s delay=%d pending=%s\n",
+                tab->base_title.empty() ? "Tab" : tab->base_title.c_str(),
+                delay_ms,
+                tab->pending_url.empty() ? "(none)" : tab->pending_url.c_str());
+        return;
+    }
     tab->theme_color_retry_scheduled = true;
     fprintf(stderr,
             "[ck-browser] schedule_theme_color_request tab=%s delay=%d pending=%s\n",
@@ -4413,6 +4738,53 @@ bookmark_manager_group_selection_cb(Widget w, XtPointer client_data, XtPointer c
     }
     ctx->selected_group = ctx->group_entries[cbs->item_position - 1];
     bookmark_manager_update_entry_list(ctx);
+    update_bookmark_manager_group_controls(ctx);
+}
+
+static void
+update_bookmark_manager_group_controls(BookmarkManagerContext *ctx)
+{
+    if (!ctx) return;
+    BookmarkGroup *selected = ctx->selected_group;
+    bool enable = selected && selected != g_bookmark_root.get();
+    if (ctx->rename_group_button) {
+        XtSetSensitive(ctx->rename_group_button, enable);
+    }
+    if (ctx->delete_group_button) {
+        XtSetSensitive(ctx->delete_group_button, enable);
+    }
+}
+
+static void
+bookmark_manager_refresh_group_list(BookmarkManagerContext *ctx, BookmarkGroup *preferred_group)
+{
+    if (!ctx || !ctx->group_list) return;
+    BookmarkGroup *root = ensure_bookmark_groups();
+    if (!root) return;
+    ctx->group_entries.clear();
+    XmListDeleteAllItems(ctx->group_list);
+    std::vector<std::string> labels;
+    collect_bookmark_groups(root, ctx->group_entries, labels, 0);
+    int select_pos = -1;
+    for (size_t i = 0; i < ctx->group_entries.size(); ++i) {
+        XmString xm_label = make_string(labels[i].c_str());
+        XmListAddItemUnselected(ctx->group_list, xm_label, (int)i + 1);
+        XmStringFree(xm_label);
+        if (preferred_group && ctx->group_entries[i] == preferred_group) {
+            select_pos = (int)i + 1;
+        }
+    }
+    if (select_pos < 0 && !ctx->group_entries.empty()) {
+        select_pos = 1;
+    }
+    if (select_pos > 0) {
+        XmListSelectPos(ctx->group_list, select_pos, False);
+        ctx->selected_group = ctx->group_entries[select_pos - 1];
+    } else {
+        ctx->selected_group = NULL;
+    }
+    bookmark_manager_update_entry_list(ctx);
+    update_bookmark_manager_group_controls(ctx);
 }
 
 static void
@@ -4443,7 +4815,129 @@ on_bookmark_manager_edit(Widget w, XtPointer client_data, XtPointer call_data)
     BookmarkEntry *entry = ctx->selected_entry;
     BookmarkGroup *group = ctx->selected_group ? ctx->selected_group : ensure_bookmark_groups();
     close_bookmark_manager_dialog(ctx);
-    show_add_bookmark_dialog(get_selected_tab(), entry, group);
+  show_add_bookmark_dialog(get_selected_tab(), entry, group);
+}
+
+static void
+on_bookmark_manager_new_group(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)call_data;
+    BookmarkManagerContext *ctx = (BookmarkManagerContext *)client_data;
+    if (!ctx || !g_toplevel) return;
+    Widget dialog = XmCreateFormDialog(g_toplevel, xm_name("bookmarkManagerNewFolderDialog"), NULL, 0);
+    XmString title = make_string("New Bookmark Folder");
+    XtVaSetValues(dialog,
+                  XmNtitle, "New Bookmark Folder",
+                  XmNdialogTitle, title,
+                  XmNautoUnmanage, False,
+                  XmNmarginWidth, 12,
+                  XmNmarginHeight, 12,
+                  NULL);
+    XmStringFree(title);
+
+    XmString label_text = make_string("Folder name:");
+    Widget label = XmCreateLabelGadget(dialog, xm_name("bookmarkManagerNewFolderLabel"), NULL, 0);
+    XtVaSetValues(label,
+                  XmNlabelString, label_text,
+                  XmNalignment, XmALIGNMENT_BEGINNING,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNtopOffset, 6,
+                  XmNleftOffset, 6,
+                  XmNrightOffset, 6,
+                  NULL);
+    XmStringFree(label_text);
+    XtManageChild(label);
+
+    Widget text_field = XmCreateTextField(dialog, xm_name("bookmarkManagerNewFolderField"), NULL, 0);
+    XtVaSetValues(text_field,
+                  XmNcolumns, 36,
+                  XmNeditable, True,
+                  XmNtopAttachment, XmATTACH_WIDGET,
+                  XmNtopWidget, label,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNleftOffset, 6,
+                  XmNrightOffset, 6,
+                  XmNtopOffset, 4,
+                  NULL);
+    XtManageChild(text_field);
+
+    Widget button_row = XmCreateRowColumn(dialog, xm_name("bookmarkManagerNewFolderButtons"), NULL, 0);
+    XtVaSetValues(button_row,
+                  XmNorientation, XmHORIZONTAL,
+                  XmNpacking, XmPACK_TIGHT,
+                  XmNspacing, 10,
+                  XmNtopAttachment, XmATTACH_WIDGET,
+                  XmNtopWidget, text_field,
+                  XmNtopOffset, 12,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  XmNbottomOffset, 6,
+                  NULL);
+    XtManageChild(button_row);
+
+    XmString ok_label = make_string("Create");
+    Widget ok_button = XmCreatePushButtonGadget(button_row, xm_name("bookmarkManagerNewFolderOk"), NULL, 0);
+    XtVaSetValues(ok_button, XmNlabelString, ok_label, NULL);
+    XmStringFree(ok_label);
+    XtAddCallback(ok_button, XmNactivateCallback, bookmark_manager_new_group_confirm_cb,
+                  new BookmarkManagerNewGroupDialogData{ctx, dialog, text_field});
+    XtManageChild(ok_button);
+
+    XmString cancel_label = make_string("Cancel");
+    Widget cancel_button = XmCreatePushButtonGadget(button_row, xm_name("bookmarkManagerNewFolderCancel"), NULL, 0);
+    XtVaSetValues(cancel_button, XmNlabelString, cancel_label, NULL);
+    XmStringFree(cancel_label);
+    XtAddCallback(cancel_button, XmNactivateCallback, bookmark_manager_new_group_cancel_cb,
+                  new BookmarkManagerNewGroupDialogData{ctx, dialog, text_field});
+    XtManageChild(cancel_button);
+
+    XtManageChild(dialog);
+}
+
+static void
+bookmark_manager_new_group_confirm_cb(Widget button, XtPointer client_data, XtPointer call_data)
+{
+    (void)button;
+    (void)call_data;
+    BookmarkManagerNewGroupDialogData *data = (BookmarkManagerNewGroupDialogData *)client_data;
+    if (!data || !data->ctx) {
+        delete data;
+        return;
+    }
+    char *value = XmTextFieldGetString(data->text_field);
+    std::string name = value ? value : "";
+    if (value) XtFree(value);
+    if (!name.empty()) {
+        BookmarkGroup *parent = data->ctx->selected_group ? data->ctx->selected_group : ensure_bookmark_groups();
+        BookmarkGroup *new_group = add_bookmark_group(parent, name.c_str());
+        fprintf(stderr,
+                "[ck-browser] bookmark manager created new group name='%s' parent='%s'\n",
+                name.c_str(),
+                parent ? parent->name.c_str() : "(root)");
+        bookmark_manager_refresh_group_list(data->ctx, new_group ? new_group : parent);
+    }
+    if (data->dialog) {
+        XtDestroyWidget(data->dialog);
+    }
+    delete data;
+}
+
+static void
+bookmark_manager_new_group_cancel_cb(Widget button, XtPointer client_data, XtPointer call_data)
+{
+    (void)button;
+    (void)call_data;
+    BookmarkManagerNewGroupDialogData *data = (BookmarkManagerNewGroupDialogData *)client_data;
+    if (!data) return;
+    if (data->dialog) {
+        XtDestroyWidget(data->dialog);
+    }
+    delete data;
 }
 
 static void
@@ -4478,6 +4972,362 @@ on_bookmark_manager_delete(Widget w, XtPointer client_data, XtPointer call_data)
     bookmark_manager_update_entry_list(ctx);
     rebuild_bookmarks_menu_items();
     save_bookmarks_to_file();
+}
+
+static void
+on_bookmark_manager_rename_group(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)call_data;
+    BookmarkManagerContext *ctx = (BookmarkManagerContext *)client_data;
+    if (!ctx || !ctx->selected_group || ctx->selected_group == g_bookmark_root.get()) return;
+    BookmarkManagerRenameGroupDialogData *data = new BookmarkManagerRenameGroupDialogData();
+    data->ctx = ctx;
+    data->group = ctx->selected_group;
+    Widget dialog = XmCreateFormDialog(g_toplevel, xm_name("bookmarkManagerRenameFolderDialog"), NULL, 0);
+    XmString title = make_string("Rename Bookmark Folder");
+    XtVaSetValues(dialog,
+                  XmNautoUnmanage, False,
+                  XmNmarginWidth, 8,
+                  XmNmarginHeight, 8,
+                  XmNtitle, "Rename Bookmark Folder",
+                  XmNdialogTitle, title,
+                  NULL);
+    XmStringFree(title);
+    data->dialog = dialog;
+
+    Widget column = XmCreateRowColumn(dialog, xm_name("bookmarkManagerRenameColumn"), NULL, 0);
+    XtVaSetValues(column,
+                  XmNorientation, XmVERTICAL,
+                  XmNpacking, XmPACK_TIGHT,
+                  XmNspacing, 6,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  NULL);
+    XtManageChild(column);
+
+    XmString label_text = make_string("Folder Name:");
+    Widget name_label = XmCreateLabelGadget(column, xm_name("bookmarkManagerRenameLabel"), NULL, 0);
+    XtVaSetValues(name_label,
+                  XmNlabelString, label_text,
+                  XmNalignment, XmALIGNMENT_BEGINNING,
+                  NULL);
+    XmStringFree(label_text);
+    XtManageChild(name_label);
+
+    Widget name_field = XmCreateTextField(column, xm_name("bookmarkManagerRenameField"), NULL, 0);
+    XtVaSetValues(name_field,
+                  XmNcolumns, 40,
+                  XmNeditable, True,
+                  XmNvalue, "",
+                  NULL);
+    const char *current_name = ctx->selected_group->name.empty() ? "" : ctx->selected_group->name.c_str();
+    XmTextFieldSetString(name_field, const_cast<char *>(current_name));
+    data->text_field = name_field;
+    XtManageChild(name_field);
+
+    Widget button_row = XmCreateRowColumn(column, xm_name("bookmarkManagerRenameButtons"), NULL, 0);
+    XtVaSetValues(button_row,
+                  XmNorientation, XmHORIZONTAL,
+                  XmNpacking, XmPACK_TIGHT,
+                  XmNspacing, 10,
+                  XmNalignment, XmALIGNMENT_CENTER,
+                  NULL);
+    XtManageChild(button_row);
+
+    XmString rename_label = make_string("Rename");
+    Widget rename_button = XmCreatePushButtonGadget(button_row, xm_name("bookmarkManagerRenameConfirm"), NULL, 0);
+    XtVaSetValues(rename_button, XmNlabelString, rename_label, NULL);
+    XmStringFree(rename_label);
+    XtAddCallback(rename_button, XmNactivateCallback, bookmark_manager_rename_group_confirm_cb, data);
+    XtManageChild(rename_button);
+
+    XmString cancel_label = make_string("Cancel");
+    Widget cancel_button = XmCreatePushButtonGadget(button_row, xm_name("bookmarkManagerRenameCancel"), NULL, 0);
+    XtVaSetValues(cancel_button, XmNlabelString, cancel_label, NULL);
+    XmStringFree(cancel_label);
+    XtAddCallback(cancel_button, XmNactivateCallback, bookmark_manager_rename_group_cancel_cb, data);
+    XtManageChild(cancel_button);
+
+    XtManageChild(dialog);
+}
+
+static void
+bookmark_manager_rename_group_confirm_cb(Widget button, XtPointer client_data, XtPointer call_data)
+{
+    (void)button;
+    (void)call_data;
+    BookmarkManagerRenameGroupDialogData *data = (BookmarkManagerRenameGroupDialogData *)client_data;
+    if (!data || !data->ctx || !data->group) {
+        delete data;
+        return;
+    }
+    char *value = NULL;
+    if (data->text_field) {
+        value = XmTextFieldGetString(data->text_field);
+    }
+    std::string name = value ? value : "";
+    if (value) XtFree(value);
+    if (!name.empty()) {
+        data->group->name = name;
+        g_selected_bookmark_group = data->group;
+        fprintf(stderr, "[ck-browser] bookmark manager renamed group to '%s'\n", name.c_str());
+        rebuild_bookmarks_menu_items();
+        save_bookmarks_to_file();
+        bookmark_manager_refresh_group_list(data->ctx, data->group);
+    }
+    if (data->dialog) {
+        XtDestroyWidget(data->dialog);
+    }
+    delete data;
+}
+
+static void
+bookmark_manager_rename_group_cancel_cb(Widget button, XtPointer client_data, XtPointer call_data)
+{
+    (void)button;
+    (void)call_data;
+    BookmarkManagerRenameGroupDialogData *data = (BookmarkManagerRenameGroupDialogData *)client_data;
+    if (!data) return;
+    if (data->dialog) {
+        XtDestroyWidget(data->dialog);
+    }
+    delete data;
+}
+
+static void
+bookmark_manager_populate_move_target_list(BookmarkManagerDeleteGroupDialogData *data,
+                                          BookmarkGroup *group,
+                                          int depth)
+{
+    if (!data || !group) return;
+    if (is_group_descendant_or_same(group, data->group)) return;
+    std::string indent(depth * 2, ' ');
+    std::string label = indent + (group->name.empty() ? "Bookmarks" : group->name);
+    XmString xm_label = make_string(label.c_str());
+    XmListAddItemUnselected(data->move_target_list, xm_label, (int)data->target_entries.size() + 1);
+    XmStringFree(xm_label);
+    data->target_entries.push_back(group);
+    for (const auto &child : group->children) {
+        bookmark_manager_populate_move_target_list(data, child.get(), depth + 1);
+    }
+}
+
+static void
+bookmark_manager_delete_group_toggle_cb(Widget widget, XtPointer client_data, XtPointer call_data)
+{
+    (void)widget;
+    (void)call_data;
+    BookmarkManagerDeleteGroupDialogData *data = (BookmarkManagerDeleteGroupDialogData *)client_data;
+    if (!data || !data->move_target_list) return;
+    Boolean move_selected = False;
+    if (data->move_option) {
+        XtVaGetValues(data->move_option, XmNset, &move_selected, NULL);
+    }
+    XtSetSensitive(data->move_target_list, move_selected);
+}
+
+static void
+bookmark_manager_delete_group_target_selection_cb(Widget widget, XtPointer client_data, XtPointer call_data)
+{
+    (void)widget;
+    BookmarkManagerDeleteGroupDialogData *data = (BookmarkManagerDeleteGroupDialogData *)client_data;
+    if (!data || !call_data) return;
+    XmListCallbackStruct *cbs = (XmListCallbackStruct *)call_data;
+    if (!cbs) return;
+    int pos = cbs->item_position - 1;
+    if (pos < 0 || pos >= (int)data->target_entries.size()) return;
+    data->selected_target_group = data->target_entries[pos];
+}
+
+static void
+bookmark_manager_delete_group_confirm_cb(Widget button, XtPointer client_data, XtPointer call_data)
+{
+    (void)button;
+    (void)call_data;
+    BookmarkManagerDeleteGroupDialogData *data = (BookmarkManagerDeleteGroupDialogData *)client_data;
+    if (!data || !data->ctx || !data->group) {
+        delete data;
+        return;
+    }
+    BookmarkGroup *group = data->group;
+    BookmarkGroup *root = ensure_bookmark_groups();
+    if (!root) {
+        delete data;
+        return;
+    }
+    BookmarkGroup *parent = find_parent_group(root, group);
+    if (!parent) {
+        delete data;
+        return;
+    }
+    Boolean move_selected = False;
+    BookmarkGroup *move_target = NULL;
+    if (data->move_option) {
+        XtVaGetValues(data->move_option, XmNset, &move_selected, NULL);
+    }
+    if (move_selected && data->selected_target_group) {
+        move_target = data->selected_target_group;
+        move_all_bookmarks_from_subtree(group, move_target);
+    } else {
+        move_selected = False;
+    }
+    remove_bookmark_group_from_parent(parent, group);
+    BookmarkGroup *new_selected = parent ? parent : root;
+    g_selected_bookmark_group = new_selected;
+    std::string action = "deleted";
+    if (move_selected && move_target) {
+        std::string target_name = move_target->name.empty() ? "(unnamed)" : move_target->name;
+        action = "moved bookmarks to '" + target_name + "'";
+    }
+    fprintf(stderr,
+            "[ck-browser] bookmark manager %s folder name='%s'\n",
+            action.c_str(),
+            group->name.empty() ? "(unnamed)" : group->name.c_str());
+    rebuild_bookmarks_menu_items();
+    save_bookmarks_to_file();
+    bookmark_manager_refresh_group_list(data->ctx, new_selected);
+    if (data->dialog) {
+        XtDestroyWidget(data->dialog);
+    }
+    delete data;
+}
+
+static void
+bookmark_manager_delete_group_cancel_cb(Widget button, XtPointer client_data, XtPointer call_data)
+{
+    (void)button;
+    (void)call_data;
+    BookmarkManagerDeleteGroupDialogData *data = (BookmarkManagerDeleteGroupDialogData *)client_data;
+    if (!data) return;
+    if (data->dialog) {
+        XtDestroyWidget(data->dialog);
+    }
+    delete data;
+}
+
+static void
+on_bookmark_manager_delete_group(Widget w, XtPointer client_data, XtPointer call_data)
+{
+    (void)w;
+    (void)call_data;
+    BookmarkManagerContext *ctx = (BookmarkManagerContext *)client_data;
+    if (!ctx || !ctx->selected_group || ctx->selected_group == g_bookmark_root.get()) return;
+    BookmarkManagerDeleteGroupDialogData *data = new BookmarkManagerDeleteGroupDialogData();
+    data->ctx = ctx;
+    data->group = ctx->selected_group;
+    BookmarkGroup *root = ensure_bookmark_groups();
+    if (!root) {
+        delete data;
+        return;
+    }
+    Widget dialog = XmCreateFormDialog(g_toplevel, xm_name("bookmarkManagerDeleteFolderDialog"), NULL, 0);
+    XmString title = make_string("Delete Bookmark Folder");
+    XtVaSetValues(dialog,
+                  XmNautoUnmanage, False,
+                  XmNmarginWidth, 8,
+                  XmNmarginHeight, 8,
+                  XmNtitle, "Delete Bookmark Folder",
+                  XmNdialogTitle, title,
+                  NULL);
+    XmStringFree(title);
+    data->dialog = dialog;
+
+    Widget column = XmCreateRowColumn(dialog, xm_name("bookmarkManagerDeleteColumn"), NULL, 0);
+    XtVaSetValues(column,
+                  XmNorientation, XmVERTICAL,
+                  XmNpacking, XmPACK_TIGHT,
+                  XmNspacing, 8,
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_FORM,
+                  NULL);
+    XtManageChild(column);
+
+    std::string prompt = "Delete folder '" + (ctx->selected_group->name.empty() ? "(unnamed)" : ctx->selected_group->name) + "'";
+    XmString prompt_str = make_string(prompt.c_str());
+    Widget prompt_label = XmCreateLabelGadget(column, xm_name("bookmarkManagerDeletePrompt"), NULL, 0);
+    XtVaSetValues(prompt_label,
+                  XmNlabelString, prompt_str,
+                  XmNalignment, XmALIGNMENT_BEGINNING,
+                  NULL);
+    XmStringFree(prompt_str);
+    XtManageChild(prompt_label);
+
+    Widget radio_box = XmCreateRadioBox(column, xm_name("bookmarkManagerDeleteRadio"), NULL, 0);
+    XtManageChild(radio_box);
+
+    XmString delete_label = make_string("Delete folder and all bookmarks");
+    Widget delete_toggle = XmCreateToggleButton(radio_box, xm_name("bookmarkManagerDeleteOption"), NULL, 0);
+    XtVaSetValues(delete_toggle,
+                  XmNlabelString, delete_label,
+                  XmNset, True,
+                  NULL);
+    XmStringFree(delete_label);
+    XtAddCallback(delete_toggle, XmNvalueChangedCallback, bookmark_manager_delete_group_toggle_cb, data);
+    data->delete_option = delete_toggle;
+    XtManageChild(delete_toggle);
+
+    XmString move_label = make_string("Move bookmarks to another folder");
+    Widget move_toggle = XmCreateToggleButton(radio_box, xm_name("bookmarkManagerDeleteMoveOption"), NULL, 0);
+    XtVaSetValues(move_toggle,
+                  XmNlabelString, move_label,
+                  XmNset, False,
+                  NULL);
+    XmStringFree(move_label);
+    XtAddCallback(move_toggle, XmNvalueChangedCallback, bookmark_manager_delete_group_toggle_cb, data);
+    data->move_option = move_toggle;
+    XtManageChild(move_toggle);
+
+    Widget list_frame = XmCreateFrame(column, xm_name("bookmarkManagerDeleteTargetFrame"), NULL, 0);
+    XtManageChild(list_frame);
+    Widget list = XmCreateScrolledList(list_frame, xm_name("bookmarkManagerDeleteTargetList"), NULL, 0);
+    XtVaSetValues(list,
+                  XmNscrollingPolicy, XmAUTOMATIC,
+                  XmNlistSizePolicy, XmCONSTANT,
+                  XmNvisibleItemCount, 6,
+                  NULL);
+    XtAddCallback(list, XmNbrowseSelectionCallback, bookmark_manager_delete_group_target_selection_cb, data);
+    data->move_target_list = list;
+    XtManageChild(list);
+
+    bookmark_manager_populate_move_target_list(data, root, 0);
+    if (!data->target_entries.empty()) {
+        data->selected_target_group = data->target_entries[0];
+        XmListSelectPos(list, 1, False);
+        XmListSetPos(list, 1);
+    } else if (data->move_option) {
+        XtSetSensitive(data->move_option, False);
+    }
+    bookmark_manager_delete_group_toggle_cb(NULL, data, NULL);
+
+    Widget button_row = XmCreateRowColumn(column, xm_name("bookmarkManagerDeleteButtons"), NULL, 0);
+    XtVaSetValues(button_row,
+                  XmNorientation, XmHORIZONTAL,
+                  XmNpacking, XmPACK_TIGHT,
+                  XmNspacing, 10,
+                  XmNalignment, XmALIGNMENT_CENTER,
+                  NULL);
+    XtManageChild(button_row);
+
+    XmString confirm_label = make_string("Delete");
+    Widget confirm_button = XmCreatePushButtonGadget(button_row, xm_name("bookmarkManagerDeleteConfirm"), NULL, 0);
+    XtVaSetValues(confirm_button, XmNlabelString, confirm_label, NULL);
+    XmStringFree(confirm_label);
+    XtAddCallback(confirm_button, XmNactivateCallback, bookmark_manager_delete_group_confirm_cb, data);
+    XtManageChild(confirm_button);
+
+    XmString cancel_label = make_string("Cancel");
+    Widget cancel_button = XmCreatePushButtonGadget(button_row, xm_name("bookmarkManagerDeleteCancel"), NULL, 0);
+    XtVaSetValues(cancel_button, XmNlabelString, cancel_label, NULL);
+    XmStringFree(cancel_label);
+    XtAddCallback(cancel_button, XmNactivateCallback, bookmark_manager_delete_group_cancel_cb, data);
+    XtManageChild(cancel_button);
+
+    XtManageChild(dialog);
 }
 
 static void
@@ -4537,6 +5387,32 @@ show_bookmark_manager_dialog()
                   XmNrightOffset, 0,
                   NULL);
     XtManageChild(button_row);
+
+    XmString new_label = make_string("New Folder");
+    Widget new_button = XmCreatePushButtonGadget(button_row, xm_name("bookmarkManagerNewFolder"), NULL, 0);
+    XtVaSetValues(new_button, XmNlabelString, new_label, NULL);
+    XmStringFree(new_label);
+    XtAddCallback(new_button, XmNactivateCallback, on_bookmark_manager_new_group, ctx);
+    XtManageChild(new_button);
+
+    XmString rename_label = make_string("Rename Folder");
+    Widget rename_button = XmCreatePushButtonGadget(button_row, xm_name("bookmarkManagerRenameFolder"), NULL, 0);
+    XtVaSetValues(rename_button, XmNlabelString, rename_label, NULL);
+    XmStringFree(rename_label);
+    XtSetSensitive(rename_button, False);
+    XtAddCallback(rename_button, XmNactivateCallback, on_bookmark_manager_rename_group, ctx);
+    ctx->rename_group_button = rename_button;
+    XtManageChild(rename_button);
+
+    XmString delete_folder_label = make_string("Delete Folder");
+    Widget delete_folder_button =
+        XmCreatePushButtonGadget(button_row, xm_name("bookmarkManagerDeleteFolder"), NULL, 0);
+    XtVaSetValues(delete_folder_button, XmNlabelString, delete_folder_label, NULL);
+    XmStringFree(delete_folder_label);
+    XtSetSensitive(delete_folder_button, False);
+    XtAddCallback(delete_folder_button, XmNactivateCallback, on_bookmark_manager_delete_group, ctx);
+    ctx->delete_group_button = delete_folder_button;
+    XtManageChild(delete_folder_button);
 
     XmString open_label = make_string("Open");
     Widget open_button = XmCreatePushButtonGadget(button_row, xm_name("bookmarkManagerOpen"), NULL, 0);
@@ -4629,18 +5505,9 @@ show_bookmark_manager_dialog()
     XtManageChild(bookmark_list);
     ctx->bookmark_list = bookmark_list;
 
-    std::vector<std::string> labels;
-    collect_bookmark_groups(root, ctx->group_entries, labels, 0);
-    for (size_t i = 0; i < ctx->group_entries.size(); ++i) {
-        XmString xm_label = make_string(labels[i].c_str());
-        XmListAddItemUnselected(group_list, xm_label, (int)i + 1);
-        XmStringFree(xm_label);
-    }
-    if (!ctx->group_entries.empty()) {
-        ctx->selected_group = ctx->group_entries[0];
-        XmListSelectPos(group_list, 1, False);
-    }
-    bookmark_manager_update_entry_list(ctx);
+    ctx->group_list = group_list;
+    ctx->selected_group = ctx->selected_group ? ctx->selected_group : root;
+    bookmark_manager_refresh_group_list(ctx, ctx->selected_group);
 
     XtManageChild(dialog);
 }
@@ -4716,6 +5583,147 @@ collect_bookmark_menu_entries(BookmarkGroup *group,
     }
     for (const auto &child : group->children) {
         collect_bookmark_menu_entries(child.get(), entries);
+    }
+}
+
+static void
+clear_bookmark_group_submenus()
+{
+    for (Widget widget : g_bookmark_group_cascade_widgets) {
+        if (widget) {
+            XtDestroyWidget(widget);
+        }
+    }
+    g_bookmark_group_cascade_widgets.clear();
+    for (Widget widget : g_bookmark_group_submenu_widgets) {
+        if (widget) {
+            XtDestroyWidget(widget);
+        }
+    }
+    g_bookmark_group_submenu_widgets.clear();
+    for (Widget widget : g_bookmark_group_separator_widgets) {
+        if (widget) {
+            XtDestroyWidget(widget);
+        }
+    }
+    g_bookmark_group_separator_widgets.clear();
+}
+
+static Widget
+add_bookmark_menu_entry(Widget parent,
+                        BookmarkEntry *entry,
+                        Pixel menu_bg,
+                        const char *accel,
+                        const char *accel_text)
+{
+    if (!parent || !entry) return NULL;
+    char name_buf[64];
+    snprintf(name_buf, sizeof(name_buf), "bookmarkEntry%p", (void *)entry);
+    std::string label = entry->name.empty() ? entry->url : entry->name;
+    if (label.empty()) {
+        label = "Bookmark";
+    }
+    Pixmap icon_pix = create_bookmark_icon_pixmap(entry, desired_favicon_size(), menu_bg);
+    if (icon_pix != None) {
+        g_bookmark_menu_icon_pixmaps.push_back(icon_pix);
+    }
+    Widget item = create_menu_item(parent, name_buf, label.c_str(), icon_pix);
+    if (!item) return NULL;
+    XtAddCallback(item, XmNactivateCallback, on_bookmark_menu_activate, entry);
+    if (accel || accel_text) {
+        set_menu_accelerator(item, accel, accel_text);
+    }
+    g_bookmark_menu_items.push_back(item);
+    return item;
+}
+
+static void
+build_bookmark_group_menu_recursive(BookmarkGroup *group,
+                                    Widget parent_menu,
+                                    Pixel menu_bg)
+{
+    if (!group || !parent_menu) return;
+    char submenu_name[64];
+    char cascade_name[64];
+    snprintf(submenu_name, sizeof(submenu_name), "bookmarkGroupPulldown%p", (void *)group);
+    snprintf(cascade_name, sizeof(cascade_name), "bookmarkGroupCascade%p", (void *)group);
+    Widget submenu = XmCreatePulldownMenu(parent_menu, submenu_name, NULL, 0);
+    g_bookmark_group_submenu_widgets.push_back(submenu);
+    std::string menu_label = group->name.empty() ? "Bookmarks" : group->name;
+    XmString label_str = make_string(menu_label.c_str());
+    Widget cascade = XtVaCreateManagedWidget(
+        cascade_name,
+        xmCascadeButtonGadgetClass, parent_menu,
+        XmNlabelString, label_str,
+        XmNsubMenuId, submenu,
+        NULL);
+    XmStringFree(label_str);
+    g_bookmark_group_cascade_widgets.push_back(cascade);
+    for (const auto &entry : group->entries) {
+        add_bookmark_menu_entry(submenu, entry.get(), menu_bg, NULL, NULL);
+    }
+    for (const auto &child : group->children) {
+        build_bookmark_group_menu_recursive(child.get(), submenu, menu_bg);
+    }
+}
+
+static void
+create_bookmark_group_submenus(BookmarkGroup *root, Pixel menu_bg)
+{
+    if (!root || !g_bookmarks_menu) return;
+    for (const auto &child : root->children) {
+        build_bookmark_group_menu_recursive(child.get(), g_bookmarks_menu, menu_bg);
+    }
+}
+
+static BookmarkGroup *
+find_parent_group(BookmarkGroup *root, BookmarkGroup *target)
+{
+    if (!root || !target) return NULL;
+    for (const auto &child : root->children) {
+        if (child.get() == target) {
+            return root;
+        }
+        BookmarkGroup *found = find_parent_group(child.get(), target);
+        if (found) return found;
+    }
+    return NULL;
+}
+
+static bool
+is_group_descendant_or_same(BookmarkGroup *candidate, BookmarkGroup *ancestor)
+{
+    if (!candidate || !ancestor) return false;
+    if (candidate == ancestor) return true;
+    for (const auto &child : ancestor->children) {
+        if (is_group_descendant_or_same(candidate, child.get())) return true;
+    }
+    return false;
+}
+
+static void
+move_all_bookmarks_from_subtree(BookmarkGroup *source, BookmarkGroup *target)
+{
+    if (!source || !target || source == target) return;
+    for (auto &entry : source->entries) {
+        target->entries.emplace_back(std::move(entry));
+    }
+    source->entries.clear();
+    for (const auto &child : source->children) {
+        move_all_bookmarks_from_subtree(child.get(), target);
+    }
+}
+
+static void
+remove_bookmark_group_from_parent(BookmarkGroup *parent, BookmarkGroup *group)
+{
+    if (!parent || !group) return;
+    auto &children = parent->children;
+    for (auto it = children.begin(); it != children.end(); ++it) {
+        if (it->get() == group) {
+            children.erase(it);
+            return;
+        }
     }
 }
 
@@ -5376,6 +6384,37 @@ find_bookmark_by_url(BookmarkGroup *group, const std::string &url, BookmarkGroup
     return NULL;
 }
 
+static BookmarkGroup *
+find_bookmark_parent_group(BookmarkGroup *group, BookmarkEntry *entry)
+{
+    if (!group || !entry) return NULL;
+    for (const auto &child_entry : group->entries) {
+        if (child_entry.get() == entry) {
+            return group;
+        }
+    }
+    for (const auto &child : group->children) {
+        BookmarkGroup *found = find_bookmark_parent_group(child.get(), entry);
+        if (found) return found;
+    }
+    return NULL;
+}
+
+static std::unique_ptr<BookmarkEntry>
+detach_bookmark_entry_from_group(BookmarkGroup *group, BookmarkEntry *entry)
+{
+    if (!group || !entry) return nullptr;
+    auto &entries = group->entries;
+    for (auto it = entries.begin(); it != entries.end(); ++it) {
+        if (it->get() == entry) {
+            std::unique_ptr<BookmarkEntry> detached = std::move(*it);
+            entries.erase(it);
+            return detached;
+        }
+    }
+    return nullptr;
+}
+
 static void
 bookmark_dialog_populate_group_list(BookmarkDialogContext *ctx, Widget list, BookmarkGroup *group, int depth)
 {
@@ -5415,6 +6454,7 @@ rebuild_bookmarks_menu_items()
         }
     }
     g_bookmark_menu_items.clear();
+    clear_bookmark_group_submenus();
     clear_bookmark_menu_icon_pixmaps();
     BookmarkGroup *root = ensure_bookmark_groups();
     if (!root) return;
@@ -5435,6 +6475,14 @@ rebuild_bookmarks_menu_items()
     } else if (g_toplevel) {
         XtVaGetValues(g_toplevel, XmNbackground, &menu_bg, NULL);
     }
+    create_bookmark_group_submenus(root, menu_bg);
+    if (!root->children.empty()) {
+        Widget separator = XmCreateSeparatorGadget(g_bookmarks_menu, xm_name("bookmarkGroupSeparator"), NULL, 0);
+        if (separator) {
+            XtManageChild(separator);
+            g_bookmark_group_separator_widgets.push_back(separator);
+        }
+    }
     for (size_t i = 0; i < favorites.size(); ++i) {
         BookmarkEntry *entry = favorites[i];
         if (!entry) continue;
@@ -5443,22 +6491,14 @@ rebuild_bookmarks_menu_items()
                 i,
                 entry->name.empty() ? "(no name)" : entry->name.c_str(),
                 entry->url.empty() ? "(no url)" : entry->url.c_str());
-        char name_buf[64];
-        snprintf(name_buf, sizeof(name_buf), "bookmarkFavorite%p", (void *)entry);
-        std::string label = entry->name.empty() ? entry->url : entry->name;
-        if (label.empty()) {
-            label = "Bookmark";
+        const char *accel = NULL;
+        const char *accel_text = NULL;
+        size_t accel_count = sizeof(kFavoriteAccelerators) / sizeof(kFavoriteAccelerators[0]);
+        if (i < accel_count) {
+            accel = kFavoriteAccelerators[i];
+            accel_text = kFavoriteAccelTexts[i];
         }
-        Pixmap icon_pix = create_bookmark_icon_pixmap(entry, desired_favicon_size(), menu_bg);
-        if (icon_pix != None) {
-            g_bookmark_menu_icon_pixmaps.push_back(icon_pix);
-        }
-        Widget item = create_menu_item(g_bookmarks_menu, name_buf, label.c_str(), icon_pix);
-        XtAddCallback(item, XmNactivateCallback, on_bookmark_menu_activate, entry);
-        if (i < sizeof(kFavoriteAccelerators) / sizeof(kFavoriteAccelerators[0])) {
-            set_menu_accelerator(item, kFavoriteAccelerators[i], kFavoriteAccelTexts[i]);
-        }
-        g_bookmark_menu_items.push_back(item);
+        add_bookmark_menu_entry(g_bookmarks_menu, entry, menu_bg, accel, accel_text);
     }
 }
 
@@ -5572,12 +6612,28 @@ on_bookmark_dialog_save(Widget w, XtPointer client_data, XtPointer call_data)
     }
     std::string bookmark_name = name_value ? name_value : "";
     BrowserTab *tab = get_selected_tab();
-    const char *tab_url = display_url_for_tab(tab);
+    BookmarkEntry *entry_ptr = ctx->editing_entry;
+    std::string field_url;
+    if (ctx->url_field) {
+        char *url_value = XmTextFieldGetString(ctx->url_field);
+        if (url_value) {
+            field_url = url_value;
+            XtFree(url_value);
+        }
+    }
     std::string bookmark_url;
-    if (tab_url && tab_url[0]) {
-        bookmark_url = normalize_url(tab_url);
-        if (bookmark_url.empty()) {
-            bookmark_url = tab_url;
+    if (!field_url.empty()) {
+        std::string normalized = normalize_url(field_url.c_str());
+        bookmark_url = normalized.empty() ? field_url : normalized;
+    } else if (entry_ptr) {
+        bookmark_url = entry_ptr->url;
+    } else {
+        const char *tab_url = display_url_for_tab(tab);
+        if (tab_url && tab_url[0]) {
+            bookmark_url = normalize_url(tab_url);
+            if (bookmark_url.empty()) {
+                bookmark_url = tab_url;
+            }
         }
     }
     bool add_to_menu = false;
@@ -5586,28 +6642,26 @@ on_bookmark_dialog_save(Widget w, XtPointer client_data, XtPointer call_data)
         XtVaGetValues(ctx->add_to_menu_checkbox, XmNset, &set, NULL);
         add_to_menu = set;
     }
+    BookmarkGroup *root_group = ensure_bookmark_groups();
     BookmarkGroup *target_group = ctx->selected_group ? ctx->selected_group :
-                                   (g_selected_bookmark_group ? g_selected_bookmark_group : ensure_bookmark_groups());
-    if (!target_group && g_bookmark_root) {
-        target_group = g_bookmark_root.get();
+                                   (g_selected_bookmark_group ? g_selected_bookmark_group : root_group);
+    if (!target_group && root_group) {
+        target_group = root_group;
     }
-    BookmarkEntry *entry_ptr = ctx->editing_entry;
     if (entry_ptr) {
-        BookmarkGroup *source_group = ctx->editing_group ? ctx->editing_group : target_group;
+        BookmarkGroup *source_group = ctx->editing_group;
+        if (!source_group && entry_ptr && root_group) {
+            source_group = find_bookmark_parent_group(root_group, entry_ptr);
+        }
         if (source_group && target_group && source_group != target_group) {
-            auto &entries = source_group->entries;
-            for (auto it = entries.begin(); it != entries.end(); ++it) {
-                if (it->get() == entry_ptr) {
-                    std::unique_ptr<BookmarkEntry> moved_entry = std::move(*it);
-                    entries.erase(it);
-                    if (target_group) {
-                        target_group->entries.emplace_back(std::move(moved_entry));
-                        entry_ptr = target_group->entries.back().get();
-                    } else if (g_bookmark_root) {
-                        g_bookmark_root->entries.emplace_back(std::move(moved_entry));
-                        entry_ptr = g_bookmark_root->entries.back().get();
-                    }
-                    break;
+            std::unique_ptr<BookmarkEntry> moved_entry = detach_bookmark_entry_from_group(source_group, entry_ptr);
+            if (moved_entry) {
+                if (target_group) {
+                    target_group->entries.emplace_back(std::move(moved_entry));
+                    entry_ptr = target_group->entries.back().get();
+                } else if (root_group) {
+                    root_group->entries.emplace_back(std::move(moved_entry));
+                    entry_ptr = root_group->entries.back().get();
                 }
             }
         }
@@ -5624,8 +6678,8 @@ on_bookmark_dialog_save(Widget w, XtPointer client_data, XtPointer call_data)
         entry_ptr = entry.get();
         if (target_group) {
             target_group->entries.emplace_back(std::move(entry));
-        } else if (g_bookmark_root) {
-            g_bookmark_root->entries.emplace_back(std::move(entry));
+        } else if (root_group) {
+            root_group->entries.emplace_back(std::move(entry));
         }
     }
     if (!ctx->editing_entry && tab && tab->favicon_url.c_str()) {
@@ -5691,8 +6745,8 @@ show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry, BookmarkGroup *e
     Widget column = XmCreateRowColumn(dialog, xm_name("bookmarkDialogColumn"), NULL, 0);
     XtVaSetValues(column,
                   XmNorientation, XmVERTICAL,
-                  XmNpacking, XmPACK_COLUMN,
-                  XmNspacing, 8,
+                  XmNpacking, XmPACK_TIGHT,
+                  XmNspacing, 6,
                   XmNtopAttachment, XmATTACH_FORM,
                   XmNbottomAttachment, XmATTACH_FORM,
                   XmNleftAttachment, XmATTACH_FORM,
@@ -5721,20 +6775,43 @@ show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry, BookmarkGroup *e
                   XmNvalue, "",
                   NULL);
     XtManageChild(name_field);
-    const char *prefill = NULL;
+    const char *name_prefill = NULL;
     if (entry) {
         if (!entry->name.empty()) {
-            prefill = entry->name.c_str();
+            name_prefill = entry->name.c_str();
         } else if (!entry->url.empty()) {
-            prefill = entry->url.c_str();
+            name_prefill = entry->url.c_str();
         }
     } else if (tab) {
-        prefill = tab->title_full.empty() ? display_url_for_tab(tab) : tab->title_full.c_str();
+        name_prefill = tab->title_full.empty() ? display_url_for_tab(tab) : tab->title_full.c_str();
     }
-    if (prefill) {
-        XmTextFieldSetString(name_field, const_cast<char *>(prefill));
+    if (name_prefill) {
+        XmTextFieldSetString(name_field, const_cast<char *>(name_prefill));
     }
     ctx->name_field = name_field;
+    Widget url_label = XmCreateLabelGadget(column, xm_name("bookmarkUrlLabel"), NULL, 0);
+    XmString url_label_text = make_string("URL:");
+    XtVaSetValues(url_label,
+                  XmNlabelString, url_label_text,
+                  XmNalignment, XmALIGNMENT_BEGINNING,
+                  NULL);
+    XmStringFree(url_label_text);
+    XtManageChild(url_label);
+
+    Widget url_field = XmCreateTextField(column, xm_name("bookmarkUrlField"), NULL, 0);
+    XtVaSetValues(url_field,
+                  XmNcolumns, 60,
+                  XmNeditable, True,
+                  XmNresizable, True,
+                  XmNvalue, "",
+                  NULL);
+    XtManageChild(url_field);
+    ctx->url_field = url_field;
+    const char *url_prefill = entry && !entry->url.empty() ? entry->url.c_str() :
+                             (tab ? display_url_for_tab(tab) : NULL);
+    if (url_prefill) {
+        XmTextFieldSetString(url_field, const_cast<char *>(url_prefill));
+    }
 
     XmString target_label = make_string("Target Folder:");
     Widget target_label_widget = XmCreateLabelGadget(column, xm_name("bookmarkTargetLabel"), NULL, 0);
@@ -5752,8 +6829,6 @@ show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry, BookmarkGroup *e
                   XmNmarginWidth, 2,
                   XmNmarginHeight, 2,
                   XmNresizePolicy, XmRESIZE_ANY,
-                  XmNwidth, 420,
-                  XmNheight, 220,
                   NULL);
     XtManageChild(target_frame);
 
@@ -5762,8 +6837,7 @@ show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry, BookmarkGroup *e
                   XmNscrollingPolicy, XmAUTOMATIC,
                   XmNselectionPolicy, XmBROWSE_SELECT,
                   XmNlistSizePolicy, XmCONSTANT,
-                  XmNwidth, 420,
-                  XmNheight, 220,
+                  XmNvisibleItemCount, 6,
                   NULL);
     XtAddCallback(group_list, XmNbrowseSelectionCallback, bookmark_dialog_group_list_selection_cb, ctx);
     XtManageChild(group_list);
@@ -5773,8 +6847,7 @@ show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry, BookmarkGroup *e
     XtVaSetValues(bottom_column,
                   XmNorientation, XmVERTICAL,
                   XmNpacking, XmPACK_TIGHT,
-                  XmNspacing, 8,
-                  XmNwidth, 420,
+                  XmNspacing, 6,
                   XmNalignment, XmALIGNMENT_BEGINNING,
                   NULL);
     XtManageChild(bottom_column);

@@ -28,7 +28,7 @@
       - [x] Create a lightweight interface layer (either in a shared header or via BrowserApp methods) that allows BrowserClient to perform the actions it needs without dragging Xm-specific statics into `browser_app.cpp`.
     - [x] Move CEF initialization/shutdown helpers (current `CefExecuteProcess`/`CefInitialize`/`CefShutdown` flow) into `BrowserApp`, keeping UI callbacks injectable.
     - [ ] Isolate `BrowserClient` and `CkCefApp` definitions into `browser_app.cpp`, with clear `OnBeforePopup`, `OnBeforeBrowse`, and renderer handler wiring.
-    - [ ] Make `initialize_cef_browser_cb` and tab scheduling helpers members or friends so they do not rely on scattered globals.
+    - [x] Make `initialize_cef_browser_cb` and tab scheduling helpers members or friends so they do not rely on scattered globals.
     - [ ] Transfer `route_url_through_ck_browser`, popup logging, and theme-color request helpers into `BrowserApp`, exposing a minimal callback interface for UI/tab events.
       - [x] route_url/popup logging are now hosted by `browser_app.*`.
       - [ ] theme-color request helpers (`schedule_theme_color_request` et al.) remain in the UI layer for now.

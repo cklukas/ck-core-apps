@@ -264,7 +264,6 @@ struct BookmarkManagerDeleteGroupDialogData {
 
 static std::vector<std::unique_ptr<BrowserTab>> g_browser_tabs;
 static BrowserTab *g_current_tab = NULL;
-static bool g_cef_message_pump_started = false;
 static std::unique_ptr<BookmarkGroup> g_bookmark_root;
 static BookmarkGroup *g_selected_bookmark_group = NULL;
 static Widget g_bookmarks_menu = NULL;
@@ -290,7 +289,6 @@ static void start_devtools_browser_cb(XtPointer client_data, XtIntervalId *id);
 static char *xm_name(const char *name);
 static void on_tab_destroyed(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_tab_selection_changed(Widget w, XtPointer client_data, XtPointer call_data);
-static void initialize_cef_browser_cb(XtPointer client_data, XtIntervalId *id);
 BrowserTab *get_selected_tab();
 bool is_tab_selected(const BrowserTab *tab);
 void set_current_tab(BrowserTab *tab);
@@ -833,15 +831,6 @@ static void on_restore_session(Widget w, XtPointer client_data, XtPointer call_d
     (void)client_data;
     (void)call_data;
     restore_last_session_from_file("menu");
-}
-
-static void cef_message_pump(XtPointer client_data, XtIntervalId *id)
-{
-    (void)client_data;
-    (void)id;
-    CefDoMessageLoopWork();
-    poll_zoom_levels();
-    XtAppAddTimeOut(g_app, 10, cef_message_pump, NULL);
 }
 
 std::string normalize_url(const char *input)
@@ -2633,14 +2622,85 @@ static void on_reload_menu(Widget w, XtPointer client_data, XtPointer call_data)
     on_reload(w, client_data, call_data);
 }
 
+class TabScheduler {
+ public:
+  static TabScheduler &instance();
+  void set_app_context(XtAppContext app);
+  void schedule_browser_creation(BrowserTab *tab);
+
+ private:
+  TabScheduler() = default;
+  TabScheduler(const TabScheduler &) = delete;
+  TabScheduler &operator=(const TabScheduler &) = delete;
+
+  static void initialize_cef_browser_cb(XtPointer client_data, XtIntervalId *id);
+  static void cef_message_pump_cb(XtPointer client_data, XtIntervalId *id);
+  void initialize_browser(BrowserTab *tab);
+  void schedule_retry(BrowserTab *tab);
+  bool create_cef_browser_for_tab(BrowserTab *tab);
+  void run_cef_message_pump();
+
+  XtAppContext app_ = NULL;
+  bool cef_message_pump_started_ = false;
+};
+
 static void schedule_tab_browser_creation(BrowserTab *tab)
 {
-    if (!tab || tab->browser || tab->create_scheduled) return;
-    tab->create_scheduled = true;
-    XtAppAddTimeOut(g_app, 20, initialize_cef_browser_cb, tab);
+    TabScheduler::instance().schedule_browser_creation(tab);
 }
 
-static bool create_cef_browser_for_tab(BrowserTab *tab)
+TabScheduler &TabScheduler::instance()
+{
+    static TabScheduler scheduler;
+    return scheduler;
+}
+
+void TabScheduler::set_app_context(XtAppContext app)
+{
+    app_ = app;
+}
+
+void TabScheduler::schedule_browser_creation(BrowserTab *tab)
+{
+    if (!tab || tab->browser || tab->create_scheduled || !app_) return;
+    tab->create_scheduled = true;
+    XtAppAddTimeOut(app_, 20, initialize_cef_browser_cb, tab);
+}
+
+void TabScheduler::initialize_browser(BrowserTab *tab)
+{
+    if (!tab) return;
+    if (tab->browser) {
+        tab->create_scheduled = false;
+        return;
+    }
+    if (!app_ || !tab->browser_area) return;
+    if (!XtIsRealized(tab->browser_area)) {
+        schedule_retry(tab);
+        return;
+    }
+    Dimension width = 0;
+    Dimension height = 0;
+    XmUpdateDisplay(tab->browser_area);
+    XtVaGetValues(tab->browser_area, XmNwidth, &width, XmNheight, &height, NULL);
+    if (width <= 1 || height <= 1) {
+        schedule_retry(tab);
+        return;
+    }
+    if (!create_cef_browser_for_tab(tab)) {
+        schedule_retry(tab);
+        return;
+    }
+    tab->create_scheduled = false;
+}
+
+void TabScheduler::schedule_retry(BrowserTab *tab)
+{
+    if (!tab || !app_) return;
+    XtAppAddTimeOut(app_, 20, initialize_cef_browser_cb, tab);
+}
+
+bool TabScheduler::create_cef_browser_for_tab(BrowserTab *tab)
 {
     if (!tab || !tab->browser_area) return false;
     if (!XtIsRealized(tab->browser_area)) return false;
@@ -2672,9 +2732,9 @@ static bool create_cef_browser_for_tab(BrowserTab *tab)
         return false;
     }
     tab->current_url = initial;
-    if (!g_cef_message_pump_started && g_app) {
-        g_cef_message_pump_started = true;
-        XtAppAddTimeOut(g_app, 10, cef_message_pump, NULL);
+    if (!cef_message_pump_started_ && app_) {
+        cef_message_pump_started_ = true;
+        XtAppAddTimeOut(app_, 10, cef_message_pump_cb, this);
     }
     CefRefPtr<CefBrowserHost> host = tab->browser->GetHost();
     if (host) {
@@ -2683,33 +2743,29 @@ static bool create_cef_browser_for_tab(BrowserTab *tab)
     return true;
 }
 
-static void initialize_cef_browser_cb(XtPointer client_data, XtIntervalId *id)
+void TabScheduler::run_cef_message_pump()
+{
+    CefDoMessageLoopWork();
+    poll_zoom_levels();
+    if (app_) {
+        XtAppAddTimeOut(app_, 10, cef_message_pump_cb, this);
+    }
+}
+
+void TabScheduler::initialize_cef_browser_cb(XtPointer client_data, XtIntervalId *id)
 {
     (void)id;
-    BrowserTab *tab = (BrowserTab *)client_data;
+    BrowserTab *tab = reinterpret_cast<BrowserTab *>(client_data);
     if (!tab) return;
-    if (tab->browser) {
-        tab->create_scheduled = false;
-        return;
-    }
-    if (!g_app || !tab->browser_area) return;
-    if (!XtIsRealized(tab->browser_area)) {
-        XtAppAddTimeOut(g_app, 20, initialize_cef_browser_cb, tab);
-        return;
-    }
-    Dimension width = 0;
-    Dimension height = 0;
-    XmUpdateDisplay(tab->browser_area);
-    XtVaGetValues(tab->browser_area, XmNwidth, &width, XmNheight, &height, NULL);
-    if (width <= 1 || height <= 1) {
-        XtAppAddTimeOut(g_app, 20, initialize_cef_browser_cb, tab);
-        return;
-    }
-    if (!create_cef_browser_for_tab(tab)) {
-        XtAppAddTimeOut(g_app, 20, initialize_cef_browser_cb, tab);
-        return;
-    }
-    tab->create_scheduled = false;
+    instance().initialize_browser(tab);
+}
+
+void TabScheduler::cef_message_pump_cb(XtPointer client_data, XtIntervalId *id)
+{
+    (void)id;
+    TabScheduler *scheduler = reinterpret_cast<TabScheduler *>(client_data);
+    if (!scheduler) return;
+    scheduler->run_cef_message_pump();
 }
 
 static Widget create_menu_item(Widget parent, const char *name, const char *label, Pixmap icon = XmUNSPECIFIED_PIXMAP)
@@ -6372,6 +6428,7 @@ int start_ui_and_cef_loop(int argc, char *argv[], BrowserApp &app_controller)
                                         &argc, argv, NULL, NULL);
     fprintf(stderr, "[ck-browser] XtAppInitialize returned with toplevel=%p\n", (void *)toplevel);
     g_app = app;
+    TabScheduler::instance().set_app_context(app);
     g_toplevel = toplevel;
     DtInitialize(XtDisplay(toplevel), toplevel, xm_name("CkBrowser"), xm_name("CkBrowser"));
     XtVaSetValues(toplevel,

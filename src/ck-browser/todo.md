@@ -46,10 +46,11 @@
       - [x] Centralize cache path construction into `BrowserApp::build_cache_path` so `ck_browser_run` can focus on UI configuration.
     - [ ] Once dependencies are mapped, pull the runtime orchestration (XtApp setup, widget creation, main loop, shutdown) into a helper that BrowserApp can invoke after CEF initialization.
 - [ ] Convert the existing global helper functions used only by CEF callbacks into private methods inside `BrowserApp`.
+  - [x] Move `spawn_new_browser_window` onto `BrowserApp` (store the subprocess path and call the new instance method from BrowserClient/UI code instead of the global helper).
   - [x] Proxy renderer theme-color requests through `BrowserApp::request_theme_color_for_tab`.
   - [x] Proxy DevTools display through `BrowserApp::show_devtools_for_tab`.
   - [x] Proxy `route_url_through_ck_browser`, popup logging, and `is_devtools_url` through BrowserApp helpers and keep them out of the bridge header.
-  - [ ] Identify the remaining BrowserClient-only helpers that should move into `BrowserApp`.
+  - [x] Identify the remaining BrowserClient-only helpers that should move into `BrowserApp` by introducing BrowserApp handlers for load, status, title, favicon, loading state, and focus.
 - [ ] Surface events (new tab request, load finished) through a small interface so UI modules can react without depending on Xm.
 
 ## Phase 2 – `TabManager`

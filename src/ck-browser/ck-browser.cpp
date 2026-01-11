@@ -385,7 +385,6 @@ void update_favicon_controls(BrowserTab *tab);
 void request_favicon_download(BrowserTab *tab, const char *reason);
 static void theme_color_request_timer_cb(XtPointer client_data, XtIntervalId *id);
 void schedule_theme_color_request(BrowserTab *tab, int delay_ms);
-void spawn_new_browser_window(const std::string &url);
 void open_url_in_new_tab(const std::string &url, bool select);
 static int count_tabs_with_base_title(const char *base_title);
 static BrowserTab *create_tab_page(Widget tab_stack,
@@ -1271,28 +1270,6 @@ void update_all_tab_labels(const char *reason)
                                 : tab->title_full.c_str();
         update_tab_label(tab, label);
     }
-}
-
-void spawn_new_browser_window(const std::string &url)
-{
-    if (g_subprocess_path[0] == '\0') {
-        fprintf(stderr, "[ck-browser] spawn_new_browser_window: missing executable path\n");
-        return;
-    }
-    fprintf(stderr, "[ck-browser] spawn_new_browser_window exe=%s url=%s\n", g_subprocess_path, url.c_str());
-    pid_t pid = fork();
-    if (pid < 0) {
-        perror("[ck-browser] fork");
-        return;
-    }
-    if (pid == 0) {
-        std::string arg = std::string("--ck-open-url=") + url;
-        std::string cache_arg = std::string("--ck-cache-suffix=") + std::to_string((long)getpid());
-        execl(g_subprocess_path, g_subprocess_path, arg.c_str(), cache_arg.c_str(), (char *)NULL);
-        perror("[ck-browser] execl");
-        _exit(127);
-    }
-    fprintf(stderr, "[ck-browser] spawn_new_browser_window pid=%ld\n", (long)pid);
 }
 
 void open_url_in_new_tab(const std::string &url, bool select)
@@ -3119,7 +3096,7 @@ static void on_tab_menu_move_new_window(Widget w, XtPointer client_data, XtPoint
             (void *)tab,
             url.c_str());
     if (!url.empty()) {
-        spawn_new_browser_window(url);
+        BrowserApp::instance().spawn_new_browser_window(url);
     }
     if (tab->page) {
         if (g_tab_stack) {
@@ -3510,7 +3487,7 @@ static void on_new_window(Widget w, XtPointer client_data, XtPointer call_data)
     std::string url = normalize_url(display_url_for_tab(tab));
     if (url.empty()) url = kInitialBrowserUrl;
     fprintf(stderr, "[ck-browser] new window requested url=%s\n", url.c_str());
-    spawn_new_browser_window(url);
+    BrowserApp::instance().spawn_new_browser_window(url);
 }
 
 static void on_close_tab(Widget w, XtPointer client_data, XtPointer call_data)
@@ -3835,7 +3812,7 @@ on_bookmark_manager_open(Widget w, XtPointer client_data, XtPointer call_data)
     if (!ctx || !ctx->selected_entry || ctx->selected_entry->url.empty()) return;
     BrowserTab *tab = get_selected_tab();
     if (!tab) {
-        spawn_new_browser_window(ctx->selected_entry->url.c_str());
+        BrowserApp::instance().spawn_new_browser_window(ctx->selected_entry->url);
         close_bookmark_manager_dialog(ctx);
         return;
     }
@@ -5618,7 +5595,7 @@ on_bookmark_menu_activate(Widget w, XtPointer client_data, XtPointer call_data)
     }
     BrowserTab *tab = get_selected_tab();
     if (!tab) {
-        spawn_new_browser_window(entry->url.c_str());
+        BrowserApp::instance().spawn_new_browser_window(entry->url);
         return;
     }
     set_current_tab(tab);
@@ -6356,6 +6333,7 @@ int start_ui_and_cef_loop(int argc, char *argv[], BrowserApp &app_controller)
             resources_path[0] ? resources_path : "(none)",
             locales_path[0] ? locales_path : "(none)",
             subprocess_path[0] ? subprocess_path : "(none)");
+    app_controller.set_subprocess_path(subprocess_path);
 
     g_session_data = preflight.session_data;
     bool has_startup_url = preflight.has_startup_url;

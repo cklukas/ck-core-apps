@@ -9,7 +9,6 @@ struct BrowserTab;
 
 // Bridge header that documents the UI helpers BrowserClient eventually needs.
 std::string normalize_url(const char *input);
-void spawn_new_browser_window(const std::string &url);
 void open_url_in_new_tab(const std::string &url, bool select);
 void request_favicon_download(BrowserTab *tab, const char *reason);
 void update_favicon_controls(BrowserTab *tab);

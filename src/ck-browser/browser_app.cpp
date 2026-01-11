@@ -151,6 +151,149 @@ void BrowserApp::request_theme_color_for_tab(BrowserTab *tab)
     frame->SendProcessMessage(PID_RENDERER, msg);
 }
 
+void BrowserApp::set_subprocess_path(const std::string &path)
+{
+    subprocess_path_ = path;
+}
+
+void BrowserApp::spawn_new_browser_window(const std::string &url)
+{
+    if (url.empty()) return;
+    if (subprocess_path_.empty()) {
+        fprintf(stderr, "[ck-browser] spawn_new_browser_window: missing executable path\n");
+        return;
+    }
+    fprintf(stderr,
+            "[ck-browser] spawn_new_browser_window exe=%s url=%s\n",
+            subprocess_path_.c_str(),
+            url.c_str());
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("[ck-browser] fork");
+        return;
+    }
+    if (pid == 0) {
+        std::string arg = std::string("--ck-open-url=") + url;
+        std::string cache_arg = std::string("--ck-cache-suffix=") + std::to_string((long)getpid());
+        execl(subprocess_path_.c_str(),
+              subprocess_path_.c_str(),
+              arg.c_str(),
+              cache_arg.c_str(),
+              (char *)NULL);
+        perror("[ck-browser] execl");
+        _exit(127);
+    }
+    fprintf(stderr, "[ck-browser] spawn_new_browser_window pid=%ld\n", (long)pid);
+}
+
+void BrowserApp::handle_tab_load_start(BrowserTab *tab, const std::string &url)
+{
+    if (!tab || url.empty()) return;
+    tab->pending_url = url;
+    std::string host = extract_host_from_url(url);
+    if (host != tab->current_host) {
+        tab->current_host = host;
+        clear_tab_favicon(tab);
+    }
+    tab->loading = true;
+    tab->theme_color_retry_count = 0;
+    tab->theme_color_ready_retry_count = 0;
+    if (tab == get_current_tab()) {
+        update_url_field_for_tab(tab);
+        update_reload_button_for_tab(tab);
+    }
+}
+
+void BrowserApp::handle_tab_address_change(BrowserTab *tab, const std::string &url)
+{
+    if (!tab) return;
+    tab->current_url = url;
+    update_tab_security_status(tab);
+    BrowserTab *current = get_current_tab();
+    if (tab == current) {
+        update_security_controls(tab);
+        update_url_field_for_tab(tab);
+    }
+}
+
+void BrowserApp::handle_tab_status_message(BrowserTab *tab, const std::string &message)
+{
+    if (!tab) return;
+    std::string msg = message;
+    if (msg == "Ready") msg.clear();
+    tab->status_message = msg;
+    BrowserTab *current = get_current_tab();
+    if (is_tab_selected(tab) && current != tab) {
+        set_current_tab(tab);
+        current = tab;
+    }
+    if (tab == current) {
+        set_status_label_text(tab->status_message.c_str());
+    }
+}
+
+void BrowserApp::handle_tab_title_change(BrowserTab *tab, const std::string &title)
+{
+    if (!tab) return;
+    std::string new_title = title.empty() ? tab->base_title : title;
+    if (new_title.empty()) {
+        new_title = "New Tab";
+    }
+    update_tab_label(tab, new_title.c_str());
+    update_all_tab_labels("title change");
+}
+
+void BrowserApp::handle_tab_favicon_change(BrowserTab *tab, const std::string &url)
+{
+    if (!tab || url.empty()) return;
+    tab->favicon_url = url;
+    request_favicon_download(tab, "OnFaviconURLChange");
+    if (tab == get_current_tab()) {
+        update_favicon_controls(tab);
+    }
+}
+
+void BrowserApp::handle_tab_loading_state_change(BrowserTab *tab,
+                                                 bool is_loading,
+                                                 bool can_go_back,
+                                                 bool can_go_forward)
+{
+    if (!tab) return;
+    BrowserTab *current = get_current_tab();
+    tab->can_go_back = can_go_back;
+    tab->can_go_forward = can_go_forward;
+    tab->loading = is_loading;
+    if (!is_loading) {
+        update_tab_security_status(tab);
+        if (tab == current) {
+            update_security_controls(tab);
+        }
+        if (!tab->current_url.empty() && tab->current_url == tab->pending_url) {
+            schedule_theme_color_request(tab, 50);
+            fprintf(stderr,
+                    "[ck-browser] scheduling theme color request (loading finished) url=%s ready_state=complete\n",
+                    tab->pending_url.c_str());
+        } else {
+            fprintf(stderr,
+                    "[ck-browser] skipping theme color request because current_url=%s pending_url=%s\n",
+                    tab->current_url.empty() ? "(none)" : tab->current_url.c_str(),
+                    tab->pending_url.empty() ? "(none)" : tab->pending_url.c_str());
+        }
+    }
+    if (tab == current) {
+        update_navigation_buttons(tab);
+        update_reload_button_for_tab(tab);
+    }
+}
+
+void BrowserApp::handle_tab_focus(BrowserTab *tab)
+{
+    if (!tab) return;
+    if (is_tab_selected(tab)) {
+        focus_browser_area(tab);
+    }
+}
+
 class BrowserClient : public CefClient,
                       public CefLifeSpanHandler,
                       public CefDisplayHandler,
@@ -320,10 +463,10 @@ class BrowserClient : public CefClient,
 	                                  command_id == default_open_link_new_tab_cmd_ ||
 	                                  command_id == default_open_link_new_window_cmd_);
 
-	    if (command_id == 26501 || command_id == default_open_link_new_window_cmd_) {
-	      spawn_new_browser_window(link_url);
-	      return true;
-	    }
+    if (command_id == 26501 || command_id == default_open_link_new_window_cmd_) {
+      BrowserApp::instance().spawn_new_browser_window(link_url);
+      return true;
+    }
 	    if (command_id == 26500 || command_id == default_open_link_new_tab_cmd_) {
 	      open_url_in_new_tab(link_url, true);
 	      return true;
@@ -346,20 +489,7 @@ class BrowserClient : public CefClient,
     (void)transition_type;
     if (!tab_ || !frame || !frame->IsMain()) return;
     std::string url = frame->GetURL().ToString();
-    if (url.empty()) return;
-    tab_->pending_url = url;
-    std::string host = extract_host_from_url(url);
-    if (host != tab_->current_host) {
-      tab_->current_host = host;
-      clear_tab_favicon(tab_);
-    }
-    tab_->loading = true;
-    tab_->theme_color_retry_count = 0;
-    tab_->theme_color_ready_retry_count = 0;
-    if (tab_ == get_current_tab()) {
-      update_url_field_for_tab(tab_);
-      update_reload_button_for_tab(tab_);
-    }
+    BrowserApp::instance().handle_tab_load_start(tab_, url);
   }
 
   void OnLoadEnd(CefRefPtr<CefBrowser> browser,
@@ -644,13 +774,7 @@ class BrowserClient : public CefClient,
     CEF_REQUIRE_UI_THREAD();
     (void)browser;
     if (!tab_ || !frame || !frame->IsMain()) return;
-    tab_->current_url = url.ToString();
-    update_tab_security_status(tab_);
-    BrowserTab *current = get_current_tab();
-    if (tab_ == current) {
-      update_security_controls(tab_);
-      update_url_field_for_tab(tab_);
-    }
+    BrowserApp::instance().handle_tab_address_change(tab_, url.ToString());
   }
 
   void OnStatusMessage(CefRefPtr<CefBrowser> browser, const CefString &value) override {
@@ -658,25 +782,7 @@ class BrowserClient : public CefClient,
     (void)browser;
     if (!tab_) return;
     std::string message = value.ToString();
-    if (message == "Ready") {
-      message.clear();
-    }
-    tab_->status_message = message;
-    BrowserTab *current = get_current_tab();
-    if (is_tab_selected(tab_) && current != tab_) {
-        set_current_tab(tab_);
-        current = tab_;
-    }
-    bool is_current = (tab_ == current);
-    fprintf(stderr, "[ck-browser] OnStatusMessage for tab %s (%p): incoming='%s' stored='%s' (current=%s)\n",
-            tab_->base_title.empty() ? "Tab" : tab_->base_title.c_str(),
-            (void *)tab_,
-            message.c_str(),
-            tab_->status_message.c_str(),
-            is_current ? "yes" : "no");
-    if (is_current) {
-      set_status_label_text(tab_->status_message.c_str());
-    }
+    BrowserApp::instance().handle_tab_status_message(tab_, message);
   }
 
   void OnTitleChange(CefRefPtr<CefBrowser> browser,
@@ -685,11 +791,7 @@ class BrowserClient : public CefClient,
     (void)browser;
     if (!tab_) return;
     std::string new_title = title.ToString();
-    if (new_title.empty()) {
-      new_title = tab_->base_title.empty() ? "New Tab" : tab_->base_title;
-    }
-    update_tab_label(tab_, new_title.c_str());
-    update_all_tab_labels("title change");
+    BrowserApp::instance().handle_tab_title_change(tab_, new_title);
   }
 
   void OnFaviconURLChange(CefRefPtr<CefBrowser> browser,
@@ -698,16 +800,7 @@ class BrowserClient : public CefClient,
     (void)browser;
     if (!tab_) return;
     if (icon_urls.empty()) return;
-    tab_->favicon_url = icon_urls[0].ToString();
-    if (tab_->favicon_url.empty()) return;
-    fprintf(stderr, "[ck-browser] OnFaviconURLChange tab=%s (%p) url=%s\n",
-            tab_->base_title.empty() ? "Tab" : tab_->base_title.c_str(),
-            (void *)tab_,
-            tab_->favicon_url.c_str());
-    request_favicon_download(tab_, "OnFaviconURLChange");
-    if (tab_ == get_current_tab()) {
-      update_favicon_controls(tab_);
-    }
+    BrowserApp::instance().handle_tab_favicon_change(tab_, icon_urls[0].ToString());
   }
 
   void OnLoadingStateChange(CefRefPtr<CefBrowser> browser,
@@ -717,40 +810,14 @@ class BrowserClient : public CefClient,
     CEF_REQUIRE_UI_THREAD();
     (void)browser;
     if (!tab_) return;
-    BrowserTab *current = get_current_tab();
-    tab_->can_go_back = canGoBack;
-    tab_->can_go_forward = canGoForward;
-    tab_->loading = isLoading;
-    if (!isLoading) {
-      update_tab_security_status(tab_);
-      if (tab_ == current) {
-        update_security_controls(tab_);
-      }
-      if (!tab_->current_url.empty() && tab_->current_url == tab_->pending_url) {
-        schedule_theme_color_request(tab_, 50);
-        fprintf(stderr,
-                "[ck-browser] scheduling theme color request (loading finished) url=%s ready_state=complete\n",
-                tab_->pending_url.c_str());
-      } else {
-        fprintf(stderr,
-                "[ck-browser] skipping theme color request because current_url=%s pending_url=%s\n",
-                tab_->current_url.empty() ? "(none)" : tab_->current_url.c_str(),
-                tab_->pending_url.empty() ? "(none)" : tab_->pending_url.c_str());
-      }
-    }
-    if (tab_ == current) {
-      update_navigation_buttons(tab_);
-      update_reload_button_for_tab(tab_);
-    }
+    BrowserApp::instance().handle_tab_loading_state_change(tab_, isLoading, canGoBack, canGoForward);
   }
 
   void OnGotFocus(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
     (void)browser;
     if (!tab_) return;
-    if (is_tab_selected(tab_)) {
-      focus_browser_area(tab_);
-    }
+    BrowserApp::instance().handle_tab_focus(tab_);
   }
 
   private:

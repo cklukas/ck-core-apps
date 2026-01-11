@@ -62,6 +62,15 @@ public:
     void shutdown_cef() const;
     void request_theme_color_for_tab(BrowserTab *tab);
     void show_devtools_for_tab(BrowserTab *tab, int inspect_x, int inspect_y);
+    void spawn_new_browser_window(const std::string &url);
+    void set_subprocess_path(const std::string &path);
+    void handle_tab_load_start(BrowserTab *tab, const std::string &url);
+    void handle_tab_address_change(BrowserTab *tab, const std::string &url);
+    void handle_tab_status_message(BrowserTab *tab, const std::string &message);
+    void handle_tab_title_change(BrowserTab *tab, const std::string &title);
+    void handle_tab_favicon_change(BrowserTab *tab, const std::string &url);
+    void handle_tab_loading_state_change(BrowserTab *tab, bool is_loading, bool can_go_back, bool can_go_forward);
+    void handle_tab_focus(BrowserTab *tab);
 
 private:
     friend class BrowserClient;
@@ -71,6 +80,7 @@ private:
                                       const std::string &url,
                                       bool allow_existing_tab) const;
     bool is_devtools_url(const std::string &url) const;
+    std::string subprocess_path_;
 };
 
 int start_ui_and_cef_loop(int argc, char *argv[], BrowserApp &app_controller);

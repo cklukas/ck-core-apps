@@ -127,8 +127,6 @@ static Widget g_tab_header_menu = NULL;
 static BrowserTab *g_tab_header_menu_target = NULL;
 class BrowserClient;
 class DevToolsClient;
-class CkCefApp;
-static CefRefPtr<CkCefApp> g_cef_app;
 static bool g_tab_handlers_attached = false;
 static SessionData *g_session_data = NULL;
 static bool g_session_loaded = false;
@@ -283,7 +281,8 @@ static time_t g_bookmarks_file_mtime = 0;
 std::string normalize_url(const char *input);
 static const char *display_url_for_tab(const BrowserTab *tab);
 void update_url_field_for_tab(BrowserTab *tab);
-static void load_url_for_tab(BrowserTab *tab, const std::string &url);
+void load_url_for_tab(BrowserTab *tab, const std::string &url);
+void select_tab_page(BrowserTab *tab);
 bool is_devtools_url(const std::string &url);
 static bool is_url_parseable(const std::string &url);
 void show_devtools_for_tab(BrowserTab *tab, int inspect_x, int inspect_y);
@@ -320,10 +319,6 @@ static void poll_zoom_levels();
 static void on_zoom_reset(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_zoom_in(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_zoom_out(Widget w, XtPointer client_data, XtPointer call_data);
-bool route_url_through_ck_browser(CefRefPtr<CefBrowser> browser,
-                                  const std::string &url,
-                                  bool allow_existing_tab);
-void log_popup_features(const CefPopupFeatures &features);
 static BookmarkGroup *ensure_bookmark_groups();
 static BookmarkGroup *add_bookmark_group(BookmarkGroup *parent, const char *name);
 static void collect_bookmark_groups(BookmarkGroup *group,
@@ -471,268 +466,6 @@ static void begin_shutdown_sequence(const char *reason);
 static void focus_url_field_timer(XtPointer client_data, XtIntervalId *id);
 static void on_add_bookmark_menu(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_open_bookmark_manager_menu(Widget w, XtPointer client_data, XtPointer call_data);
-
-class CkCefApp : public CefApp, public CefRenderProcessHandler {
- public:
-  CefRefPtr<CefRenderProcessHandler> GetRenderProcessHandler() override { return this; }
-
-  bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser,
-                                CefRefPtr<CefFrame> frame,
-                                CefProcessId source_process,
-                                CefRefPtr<CefProcessMessage> message) override {
-    (void)browser;
-    (void)source_process;
-    if (!frame || !message) return false;
-    std::string name = message->GetName().ToString();
-    fprintf(stderr,
-            "[ck-renderer] got message=%s frame=%s url=%s\n",
-            name.c_str(),
-            frame->IsMain() ? "main" : "sub",
-            frame->GetURL().ToString().c_str());
-    fflush(stderr);
-    if (name != "ck_request_theme_color") return false;
-
-    CefRefPtr<CefV8Context> ctx = frame->GetV8Context();
-    if (!ctx || !ctx->IsValid()) return true;
-    if (!ctx->Enter()) return true;
-
-    CefRefPtr<CefV8Value> retval;
-    CefRefPtr<CefV8Exception> exception;
-
-    #include <string_view>
-
-const char *code = R"JS(
-(function(){
-  function parseColorString(value){
-    if(!value) return null;
-    var text=String(value).trim();
-    if(!text) return null;
-    var hex=text.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
-    if(hex){
-      var digits=hex[1];
-      if(digits.length===3){
-        digits=digits[0]+digits[0]+digits[1]+digits[1]+digits[2]+digits[2];
-      }
-      return [
-        parseInt(digits.slice(0,2),16),
-        parseInt(digits.slice(2,4),16),
-        parseInt(digits.slice(4,6),16)
-      ];
-    }
-    var rgb=text.match(/^rgba?\(([^)]+)\)/i);
-    if(rgb){
-      var parts=rgb[1].split(',').map(function(p){ return p.trim(); });
-      if(parts.length>=3){
-        var r=parseInt(parts[0],10), g=parseInt(parts[1],10), b=parseInt(parts[2],10);
-        if(!isNaN(r)&&!isNaN(g)&&!isNaN(b)) return [r,g,b];
-      }
-    }
-    return null;
-  }
-
-  function norm(c){
-    var parsed=parseColorString(c);
-    if(parsed) return parsed;
-    var d=document.createElement('div');
-    d.style.color=String(c||'');
-    (document.body||document.documentElement).appendChild(d);
-    var s=getComputedStyle(d).color||'';
-    if(d.parentNode) d.parentNode.removeChild(d);
-    var m=s.match(/rgba?\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
-    if(m) return [parseInt(m[1],10),parseInt(m[2],10),parseInt(m[3],10)];
-    return null;
-  }
-
-  function isTransparent(value){
-    if(value==null) return true;
-    var s=String(value).trim().toLowerCase();
-    if(!s) return true;
-    if(s==='transparent') return true;
-    if(s.indexOf('rgba(')===0){
-      var inner=s.slice(5,-1).split(',');
-      if(inner.length===4){
-        var a=parseFloat(inner[3]);
-        return !isFinite(a) ? false : a<=0;
-      }
-    }
-    if(s.indexOf('/')!==-1 && s.indexOf('rgb')===0){
-      var slash=s.split('/');
-      if(slash.length===2){
-        var a2=parseFloat(slash[1]);
-        if(isFinite(a2)) return a2<=0;
-      }
-    }
-    return false;
-  }
-
-  var logs=[];
-  logs.push('readyState:'+(document.readyState||'unknown'));
-
-  var chosen = { value: null, source: 'fallback' };
-
-  function consider(value, sourceLabel){
-    if(chosen.value!=null) return;
-    if(value==null) return;
-    var v=String(value).trim();
-    if(!v) return;
-    if(isTransparent(v)) {
-      logs.push(sourceLabel+' ignored (transparent)');
-      return;
-    }
-    chosen.value=v;
-    chosen.source=sourceLabel;
-  }
-
-  var meta=document.querySelector('meta[name="theme-color"]');
-  if(meta && meta.content!=null) {
-    logs.push('meta='+meta.content);
-    consider(meta.content,'meta');
-  }
-
-  var htmlBg=getComputedStyle(document.documentElement).backgroundColor||'';
-  logs.push('htmlBackground:'+htmlBg);
-  consider(htmlBg,'html');
-
-  if(document.body){
-    var bodyBg=getComputedStyle(document.body).backgroundColor||'';
-    logs.push('bodyBackground:'+bodyBg);
-    consider(bodyBg,'body');
-  }
-
-  var used = (chosen.value!=null) ? chosen.value : '#ffffff';
-  var source = chosen.source;
-
-  var rgb = norm(used) || [255,255,255];
-  logs.push('used='+used);
-
-  if(window.console && console.log){
-    console.log('[ck-theme-color] '+logs.join(' | '));
-  }
-
-  rgb.push(source);
-  rgb.push(used);
-  rgb.push(document.readyState||'unknown');
-  return rgb;
-})()
-)JS";
-
-
-
-    bool ok = ctx->Eval(code, "ck_theme_color.js", 1, retval, exception);
-    const char *result_type = "null";
-    if (retval) {
-      if (retval->IsArray()) {
-        result_type = "array";
-      } else if (retval->IsString()) {
-        result_type = "string";
-      } else {
-        result_type = "other";
-      }
-    }
-    fprintf(stderr,
-            "[ck-renderer] Eval ok=%d resultType=%s hasException=%d\n",
-            ok ? 1 : 0,
-            result_type,
-            exception ? 1 : 0);
-    if (exception) {
-      fprintf(stderr,
-              "[ck-renderer] JS exception: %s @ %s:%d\n",
-              exception->GetMessage().ToString().c_str(),
-              exception->GetScriptResourceName().ToString().c_str(),
-              exception->GetLineNumber());
-    }
-    fflush(stderr);
-
-    if (!ok || !retval || !retval->IsArray()) {
-      ctx->Exit();
-      return true;
-    }
-
-    int r = 255, g = 255, b = 255;
-    CefRefPtr<CefV8Value> v0 = retval->GetValue(0);
-    CefRefPtr<CefV8Value> v1 = retval->GetValue(1);
-    CefRefPtr<CefV8Value> v2 = retval->GetValue(2);
-    auto extract_number = [](CefRefPtr<CefV8Value> value, int fallback) {
-      if (!value) {
-        fprintf(stderr,
-                "[ck-renderer] extract_number: value is null, returning fallback=%d\n",
-                fallback);
-        return fallback;
-      }
-      if (value->IsInt()) return value->GetIntValue();
-      if (value->IsDouble()) return (int)std::round(value->GetDoubleValue());
-      if (value->IsBool()) return value->GetBoolValue() ? 1 : 0;
-      if (value->IsString()) {
-        try {
-          double parsed = std::stod(value->GetStringValue().ToString());
-          return (int)std::round(parsed);
-        } catch (...) {
-          return fallback;
-        }
-      }
-      return fallback;
-    };
-    r = extract_number(v0, r);
-    g = extract_number(v1, g);
-    b = extract_number(v2, b);
-    std::string source_str;
-    CefRefPtr<CefV8Value> v3 = retval->GetValue(3);
-    if (v3 && v3->IsString()) {
-        // log the actual string
-        fprintf(stderr,
-                "[ck-renderer] theme color raw source string='%s' (v3)\n",
-                v3->GetStringValue().ToString().c_str());
-      source_str = v3->GetStringValue().ToString();
-    }
-    std::string raw_str;
-    CefRefPtr<CefV8Value> v4 = retval->GetValue(4);
-    if (v4 && v4->IsString()) {
-        fprintf(stderr,
-                "[ck-renderer] theme color raw color string='%s' (v4)\n",
-                v4->GetStringValue().ToString().c_str());
-      raw_str = v4->GetStringValue().ToString();
-    }
-    std::string ready_state;
-    CefRefPtr<CefV8Value> v5 = retval->GetValue(5);
-    if (v5 && v5->IsString()) {
-        fprintf(stderr,
-                "[ck-renderer] theme color ready state string='%s' (v5)\n",
-                v5->GetStringValue().ToString().c_str());
-      ready_state = v5->GetStringValue().ToString();
-    }
-    fprintf(stderr,
-            "[ck-browser] renderer theme color rgb=%d,%d,%d source=%s raw='%s' readyState=%s\n",
-            r,
-            g,
-            b,
-            source_str.empty() ? "fallback" : source_str.c_str(),
-            raw_str.empty() ? "(empty)" : raw_str.c_str(),
-            ready_state.empty() ? "unknown" : ready_state.c_str());
-    if (r < 0) r = 0;
-    if (g < 0) g = 0;
-    if (b < 0) b = 0;
-    if (r > 255) r = 255;
-    if (g > 255) g = 255;
-    if (b > 255) b = 255;
-
-    ctx->Exit();
-
-
-    CefRefPtr<CefProcessMessage> reply = CefProcessMessage::Create("ck_theme_color");
-    CefRefPtr<CefListValue> args = reply->GetArgumentList();
-    args->SetInt(0, r);
-    args->SetInt(1, g);
-    args->SetInt(2, b);
-    args->SetString(3, source_str.empty() ? "fallback" : source_str.c_str());
-    args->SetString(4, raw_str.empty() ? "#ffffff" : raw_str.c_str());
-    args->SetString(5, ready_state.empty() ? "unknown" : ready_state.c_str());
-    frame->SendProcessMessage(PID_BROWSER, reply);
-    return true;
-  }
-
- private:
-  IMPLEMENT_REFCOUNTING(CkCefApp);
-};
 
 class DevToolsClient : public CefClient, public CefLifeSpanHandler {
  public:
@@ -1641,54 +1374,12 @@ void open_url_in_new_tab(const std::string &url, bool select)
     }
 }
 
-static void
-log_popup_features(const CefPopupFeatures &features)
+void select_tab_page(BrowserTab *tab)
 {
-    fprintf(stderr,
-            "[ck-browser] popup features x=%d(xSet=%d) y=%d(ySet=%d) "
-            "w=%d(wSet=%d) h=%d(hSet=%d) isPopup=%d\n",
-            features.x,
-            features.xSet,
-            features.y,
-            features.ySet,
-            features.width,
-            features.widthSet,
-            features.height,
-            features.heightSet,
-            features.isPopup);
+    if (!g_tab_stack || !tab || !tab->page) return;
+    XmTabStackSelectTab(tab->page, True);
 }
 
-bool
-route_url_through_ck_browser(CefRefPtr<CefBrowser> browser,
-                             const std::string &url,
-                             bool allow_existing_tab)
-{
-    if (url.empty()) return false;
-    std::string normalized = normalize_url(url.c_str());
-    if (normalized.empty()) return false;
-    fprintf(stderr,
-            "[ck-browser] route_url_through_ck_browser url=%s normalized=%s allow_existing=%d\n",
-            url.c_str(),
-            normalized.c_str(),
-            allow_existing_tab ? 1 : 0);
-    if (browser) {
-        CefRefPtr<CefBrowserHost> host = browser->GetHost();
-        if (host) {
-            host->SetFocus(true);
-        }
-    }
-    if (allow_existing_tab) {
-        BrowserTab *tab = get_selected_tab();
-        if (tab && tab->browser) {
-            load_url_for_tab(tab, normalized);
-            XmTabStackSelectTab(tab->page, True);
-            set_current_tab(tab);
-            return true;
-        }
-    }
-    open_url_in_new_tab(normalized, true);
-    return true;
-}
 
 static void log_widget_size(const char *context, Widget widget)
 {
@@ -2454,7 +2145,7 @@ extract_host_from_url(const std::string &url)
     return host;
 }
 
-static void load_url_for_tab(BrowserTab *tab, const std::string &url)
+void load_url_for_tab(BrowserTab *tab, const std::string &url)
 {
     if (!tab || url.empty()) return;
     const std::string normalized = normalize_url(url.c_str());
@@ -6774,26 +6465,10 @@ int start_ui_and_cef_loop(int argc, char *argv[], BrowserApp &app_controller)
     if (resources_path[0] != '\0') {
         CefString(&settings.resources_dir_path) = resources_path;
     }
-    const char *selected_locales = NULL;
-    if (locales_path[0] != '\0' && app_controller.dir_has_files(locales_path)) {
-        selected_locales = locales_path;
-        CefString(&settings.locales_dir_path) = locales_path;
-    }
-    if (subprocess_path[0] != '\0') {
-        CefString(&settings.browser_subprocess_path) = subprocess_path;
-    }
-    std::string cache_path = app_controller.build_cache_path(cache_suffix);
-    if (!cache_path.empty()) {
-        CefString(&settings.root_cache_path) = cache_path;
-        fprintf(stderr, "[ck-browser] root_cache_path=%s\n", cache_path.c_str());
-    }
-    app_controller.report_cef_resource_status(resources_path, selected_locales ? selected_locales : "");
-    CefMainArgs main_args((int)preflight.cef_argv.size(), preflight.cef_argv.data());
-    app_controller.dump_cef_env_and_args(main_args.argc, main_args.argv);
-    fprintf(stderr, "[ck-browser] calling CefInitialize\n");
-    bool cef_ok = CefInitialize(main_args, settings, g_cef_app, nullptr);
-    fprintf(stderr, "[ck-browser] CefInitialize result=%d\n", cef_ok);
-    if (!cef_ok) {
+    if (!app_controller.initialize_cef(preflight,
+                                       resources_path[0] ? resources_path : NULL,
+                                       locales_path[0] ? locales_path : NULL,
+                                       subprocess_path[0] ? subprocess_path : NULL)) {
         return 1;
     }
     g_cef_initialized = true;
@@ -6815,6 +6490,6 @@ int start_ui_and_cef_loop(int argc, char *argv[], BrowserApp &app_controller)
     }
     g_browser_tabs.clear();
     LOG_ENTER("about to call CefShutdown");
-    CefShutdown();
+    app_controller.shutdown_cef();
     return 0;
 }

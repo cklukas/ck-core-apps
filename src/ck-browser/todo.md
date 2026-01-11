@@ -20,16 +20,18 @@
       - [x] Move the CEF preflight/setup portion (homepage load, path discovery, GPU toggle, session prep, CEF argv/build, `CefExecuteProcess`) into `browser_app.cpp`, keeping UI creation callbacks reachable via forward declarations.
       - [x] Move the Xt/GUI bootstrap and shutdown sequence into a helper callable from `browser_app.cpp` (e.g., `start_ui_and_cef_loop`), leaving `ck-browser.cpp` to export only that helper and UI-specific statics.
       - [x] Remove the old `ck_browser_run` definition from `ck-browser.cpp` once the class-owned flow builds and links.
-    - [ ] Relocate the `CkCefApp` implementation into `browser_app.cpp` with any necessary forward declarations in the header.
-      - [ ] Identify renderer-client responsibilities (theme-color messaging, devtools IPC) that CkCefApp currently handles and outline how they surface through BrowserApp.
-      - [ ] Add helper declarations for the static utilities CkCefApp relies on so they can be invoked from `browser_app.cpp`.
+    - [x] Relocate the `CkCefApp` implementation into `browser_app.cpp` with any necessary forward declarations in the header.
+      - [x] Identify renderer-client responsibilities (theme-color messaging, devtools IPC) that CkCefApp currently handles and outline how they surface through BrowserApp.
+      - [x] Add helper declarations for the static utilities CkCefApp relies on so they can be invoked from `browser_app.cpp`.
     - [ ] Relocate the `BrowserClient` implementation into `browser_app.cpp` and expose only the minimal hooks needed by the UI layer (e.g., to show devtools or spawn windows).
       - [x] Catalog the functions and globals BrowserClient accesses (`show_devtools_for_tab`, `replacement tab creation`, `route_url_through_ck_browser`, `normalize_url`, `spawn_new_browser_window`, `open_url_in_new_tab`, `log_popup_features`, `is_devtools_url`, `extract_host_from_url`, `clear_tab_favicon`, `update_url_field_for_tab`, `update_navigation_buttons`, `update_reload_button_for_tab`, `schedule_theme_color_request`, `apply_tab_theme_colors`, `request_favicon_download`, `update_favicon_controls`, `update_tab_security_status`, `update_security_controls`, `is_tab_selected`, `focus_browser_area`, `set_current_tab`, `update_tab_label`, `update_all_tab_labels`, `set_status_label_text`, `route_url_through_ck_browser`, `g_current_tab`, `g_url_field`, `get_selected_tab`).
-      - [ ] Create a lightweight interface layer (either in a shared header or via BrowserApp methods) that allows BrowserClient to perform the actions it needs without dragging Xm-specific statics into `browser_app.cpp`.
-    - [ ] Move CEF initialization/shutdown helpers (current `CefExecuteProcess`/`CefInitialize`/`CefShutdown` flow) into `BrowserApp`, keeping UI callbacks injectable.
+      - [x] Create a lightweight interface layer (either in a shared header or via BrowserApp methods) that allows BrowserClient to perform the actions it needs without dragging Xm-specific statics into `browser_app.cpp`.
+    - [x] Move CEF initialization/shutdown helpers (current `CefExecuteProcess`/`CefInitialize`/`CefShutdown` flow) into `BrowserApp`, keeping UI callbacks injectable.
     - [ ] Isolate `BrowserClient` and `CkCefApp` definitions into `browser_app.cpp`, with clear `OnBeforePopup`, `OnBeforeBrowse`, and renderer handler wiring.
     - [ ] Make `initialize_cef_browser_cb` and tab scheduling helpers members or friends so they do not rely on scattered globals.
     - [ ] Transfer `route_url_through_ck_browser`, popup logging, and theme-color request helpers into `BrowserApp`, exposing a minimal callback interface for UI/tab events.
+      - [x] route_url/popup logging are now hosted by `browser_app.*`.
+      - [ ] theme-color request helpers (`schedule_theme_color_request` et al.) remain in the UI layer for now.
     - [x] Survey the helper functions currently called from `ck_browser_run` and document the dependencies BrowserApp will need to reach into (session/GUI, bookmark, toolbar helpers, etc.).
       - Requires homepage/config helpers (`load_homepage_file`, `save_homepage_file`, `normalize_url`, cache-suffix parsing), filesystem path utilities (`find_existing_path`, `build_cwd_path`, `build_path_from_dir`, `get_exe_path`, `dir_has_files`), and GPU capability switches (`has_opengl_support`, `apply_gpu_switches`).
       - Depends on session management (`session_parse_argument`, `session_data_create/load/apply_geometry/free`, `restore_tabs_from_session_data`, `save_last_session_file`, `capture_session_state`) plus CEF process wiring (`build_cef_argv`, `CefExecuteProcess`, `CefInitialize`, `CefShutdown`, `report_cef_resource_status`, `dump_cef_env_and_args`).

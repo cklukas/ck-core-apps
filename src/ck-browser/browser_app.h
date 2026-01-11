@@ -52,6 +52,11 @@ public:
     SessionData *prepare_session(int &argc, char **argv) const;
     std::string build_cache_path(const std::string &suffix) const;
     int run_cef_preflight(int argc, char *argv[], CefRefPtr<CefApp> cef_app, BrowserPreflightState *state) const;
+    bool initialize_cef(const BrowserPreflightState &preflight,
+                        const char *resources_path,
+                        const char *locales_path,
+                        const char *subprocess_path);
+    void shutdown_cef() const;
 
 private:
     BrowserApp() = default;

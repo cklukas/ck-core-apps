@@ -37,6 +37,8 @@ std::string extract_host_from_url(const std::string &url);
 bool route_url_through_ck_browser(CefRefPtr<CefBrowser> browser,
                                   const std::string &url,
                                   bool allow_existing_tab);
+void select_tab_page(BrowserTab *tab);
+void load_url_for_tab(BrowserTab *tab, const std::string &url);
 void resize_devtools_to_area(BrowserTab *tab, const char *reason);
 void on_cef_browser_closed(const char *tag);
 

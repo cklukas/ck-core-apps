@@ -65,7 +65,7 @@
     - [x] Move navigation button wiring and the back/forward helpers into `TabManager`.
     - [x] Move reload/stop button behavior and state updates into `TabManager`.
     - [x] Move zoom controls, button updates, and polling into `TabManager`.
-    - [ ] Move favicon cache management and toolbar/icon updates into `TabManager`.
+    - [x] Move favicon cache management and toolbar/icon updates into `TabManager`.
   - [ ] Wire the new `TabManager` API into `BrowserApp`, BrowserClient, and UI callbacks, keeping the old globals behind the manager.
 - [ ] Provide APIs such as `loadUrl`, `openNewTab`, `currentTab`, and `selectTab` so `BrowserApp` and UI builders can work with tabs via a clean interface.
 - [ ] Keep toolbox helpers (status text, URL field updates, toolbar icon management) here instead of in the main file.

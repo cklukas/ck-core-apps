@@ -6,6 +6,23 @@
 #include <memory>
 #include <vector>
 
+int desired_favicon_size();
+Pixmap create_scaled_toolbar_pixmap_from_bgra(Display *display,
+                                              int screen,
+                                              const unsigned char *bgra,
+                                              int src_w,
+                                              int src_h,
+                                              int target_size,
+                                              Pixel bg_pixel);
+bool create_scaled_window_icon_from_bgra(Display *display,
+                                         int screen,
+                                         const unsigned char *bgra,
+                                         int src_w,
+                                         int src_h,
+                                         int target_size,
+                                         Pixmap *out_pixmap,
+                                         Pixmap *out_mask);
+
 #include "browser_tab.h"
 
 class TabManager {
@@ -39,6 +56,16 @@ public:
     void zoomReset(BrowserTab *tab);
     void zoomIn(BrowserTab *tab);
     void zoomOut(BrowserTab *tab);
+    void setTabZoomLevel(BrowserTab *tab, double level);
+    void registerFaviconLabel(Widget favicon_label);
+    void updateFaviconControls(BrowserTab *tab);
+    void requestFaviconDownload(BrowserTab *tab, const char *reason);
+    void clearTabFavicon(BrowserTab *tab);
+    bool getCachedFavicon(const std::string &url,
+                          std::vector<unsigned char> *raw_data,
+                          int *width,
+                          int *height,
+                          std::vector<unsigned char> *png_data);
 
     using TabSelectionHandler = std::function<void(BrowserTab *tab, BrowserTab *previous)>;
     void set_selection_handler(TabSelectionHandler handler);
@@ -64,6 +91,7 @@ private:
     Widget zoom_label_ = NULL;
     Widget zoom_minus_button_ = NULL;
     Widget zoom_plus_button_ = NULL;
+    Widget favicon_label_ = NULL;
 };
 
 #endif // CK_BROWSER_TAB_MANAGER_H

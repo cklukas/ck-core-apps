@@ -247,7 +247,7 @@ void BrowserApp::handle_tab_load_start(BrowserTab *tab, const std::string &url)
     std::string host = extract_host_from_url(url);
     if (host != tab->current_host) {
         tab->current_host = host;
-        clear_tab_favicon(tab);
+        TabManager::instance().clearTabFavicon(tab);
     }
     tab->loading = true;
     tab->theme_color_retry_count = 0;
@@ -301,9 +301,9 @@ void BrowserApp::handle_tab_favicon_change(BrowserTab *tab, const std::string &u
 {
     if (!tab || url.empty()) return;
     tab->favicon_url = url;
-    request_favicon_download(tab, "OnFaviconURLChange");
+    TabManager::instance().requestFaviconDownload(tab, "OnFaviconURLChange");
     if (tab == get_current_tab()) {
-        update_favicon_controls(tab);
+        TabManager::instance().updateFaviconControls(tab);
     }
 }
 

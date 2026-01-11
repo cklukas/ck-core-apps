@@ -1,6 +1,7 @@
 #ifndef CK_BROWSER_TAB_MANAGER_H
 #define CK_BROWSER_TAB_MANAGER_H
 
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -20,6 +21,12 @@ public:
                           const char *base_title,
                           const char *initial_url);
 
+    void scheduleBrowserCreation(BrowserTab *tab);
+
+    using TabSelectionHandler = std::function<void(BrowserTab *tab, BrowserTab *previous)>;
+    void set_selection_handler(TabSelectionHandler handler);
+    void selectTab(BrowserTab *tab);
+
     std::vector<std::unique_ptr<BrowserTab>> &tabs();
     const std::vector<std::unique_ptr<BrowserTab>> &tabs() const;
 
@@ -31,6 +38,7 @@ public:
 private:
     std::vector<std::unique_ptr<BrowserTab>> tabs_;
     BrowserTab *current_tab_ = nullptr;
+    TabSelectionHandler selection_handler_;
 };
 
 #endif // CK_BROWSER_TAB_MANAGER_H

@@ -3,6 +3,7 @@
 
 #include <include/cef_browser.h>
 #include <include/cef_client.h>
+#include <functional>
 #include <string>
 
 struct BrowserTab;
@@ -32,5 +33,12 @@ std::string extract_host_from_url(const std::string &url);
 void select_tab_page(BrowserTab *tab);
 void load_url_for_tab(BrowserTab *tab, const std::string &url);
 void resize_devtools_to_area(BrowserTab *tab, const char *reason);
+void schedule_tab_browser_creation(BrowserTab *tab);
+using SurfaceNewTabCallback = std::function<void(const std::string &url, bool select)>;
+using SurfaceTabCallback = std::function<void(BrowserTab *tab)>;
+void set_surface_new_tab_handler(SurfaceNewTabCallback handler);
+void set_surface_tab_load_finished_handler(SurfaceTabCallback handler);
+void notify_surface_new_tab_request(const std::string &url, bool select);
+void notify_surface_tab_load_finished(BrowserTab *tab);
 
 #endif // CK_BROWSER_BROWSER_UI_BRIDGE_H

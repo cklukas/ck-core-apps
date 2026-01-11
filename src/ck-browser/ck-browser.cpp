@@ -133,6 +133,36 @@ static bool g_cef_initialized = false;
 static bool g_shutdown_requested = false;
 static int g_shutdown_pending_browsers = 0;
 
+namespace {
+SurfaceNewTabCallback g_surface_new_tab_handler = nullptr;
+SurfaceTabCallback g_surface_tab_load_finished_handler = nullptr;
+}  // namespace
+
+void set_surface_new_tab_handler(SurfaceNewTabCallback handler)
+{
+    g_surface_new_tab_handler = std::move(handler);
+}
+
+void set_surface_tab_load_finished_handler(SurfaceTabCallback handler)
+{
+    g_surface_tab_load_finished_handler = std::move(handler);
+}
+
+void notify_surface_new_tab_request(const std::string &url, bool select)
+{
+    if (g_surface_new_tab_handler) {
+        g_surface_new_tab_handler(url, select);
+    }
+}
+
+void notify_surface_tab_load_finished(BrowserTab *tab)
+{
+    if (g_surface_tab_load_finished_handler) {
+        g_surface_tab_load_finished_handler(tab);
+    }
+}
+
+
 struct FaviconCacheEntry {
     std::vector<unsigned char> data;
     std::vector<unsigned char> png_data;
@@ -246,7 +276,8 @@ static void on_tab_selection_changed(Widget w, XtPointer client_data, XtPointer 
 BrowserTab *get_selected_tab();
 bool is_tab_selected(const BrowserTab *tab);
 void set_current_tab(BrowserTab *tab);
-static void schedule_tab_browser_creation(BrowserTab *tab);
+static void tab_selection_handler(BrowserTab *tab, BrowserTab *previous);
+void schedule_tab_browser_creation(BrowserTab *tab);
 static void on_back(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_forward(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_reload(Widget w, XtPointer client_data, XtPointer call_data);
@@ -660,7 +691,7 @@ static void restore_last_session_from_file(const char *reason)
     if (urls.empty()) {
         const char *fallback = g_homepage_url.empty() ? kInitialBrowserUrl : g_homepage_url.c_str();
         BrowserTab *tab_home = TabManager::instance().createTab(g_tab_stack, "tabWelcome", "Welcome", "Welcome", fallback);
-        schedule_tab_browser_creation(tab_home);
+        TabManager::instance().scheduleBrowserCreation(tab_home);
         XmTabStackSelectTab(tab_home->page, False);
         set_current_tab(tab_home);
         return;
@@ -675,7 +706,7 @@ static void restore_last_session_from_file(const char *reason)
         char name[32];
         snprintf(name, sizeof(name), "tabRest%d", idx);
         BrowserTab *tab = TabManager::instance().createTab(g_tab_stack, name, url.c_str(), "Session", url.c_str());
-        schedule_tab_browser_creation(tab);
+        TabManager::instance().scheduleBrowserCreation(tab);
         created.push_back(tab);
     }
     if (!created.empty()) {
@@ -721,7 +752,7 @@ static void restore_tabs_from_session_data(SessionData *data)
         char title[256];
         snprintf(title, sizeof(title), "%s", normalized.c_str());
         BrowserTab *tab = TabManager::instance().createTab(g_tab_stack, name, title, "Session", normalized.c_str());
-        schedule_tab_browser_creation(tab);
+        TabManager::instance().scheduleBrowserCreation(tab);
         created.push_back(tab);
     }
     if (!created.empty()) {
@@ -1241,7 +1272,7 @@ void open_url_in_new_tab(const std::string &url, bool select)
     snprintf(tab_title, sizeof(tab_title), "%s (%d)", base, count + 1);
 
     BrowserTab *tab = TabManager::instance().createTab(g_tab_stack, name, tab_title, base, url.c_str());
-    schedule_tab_browser_creation(tab);
+    TabManager::instance().scheduleBrowserCreation(tab);
     if (select) {
         XmTabStackSelectTab(tab->page, True);
         set_current_tab(tab);
@@ -2033,7 +2064,7 @@ void load_url_for_tab(BrowserTab *tab, const std::string &url)
     }
     tab->pending_url = normalized;
     if (!tab->browser) {
-        schedule_tab_browser_creation(tab);
+        TabManager::instance().scheduleBrowserCreation(tab);
     }
     if (tab->browser) {
         CefRefPtr<CefFrame> frame = tab->browser->GetMainFrame();
@@ -2522,7 +2553,7 @@ class TabScheduler {
   bool cef_message_pump_started_ = false;
 };
 
-static void schedule_tab_browser_creation(BrowserTab *tab)
+void schedule_tab_browser_creation(BrowserTab *tab)
 {
     TabScheduler::instance().schedule_browser_creation(tab);
 }
@@ -2888,7 +2919,7 @@ static void sync_current_tab_cb(XtPointer client_data, XtIntervalId *id)
             (void *)(g_tab_stack ? XmTabStackGetSelectedTab(g_tab_stack) : NULL),
             (void *)tab);
     if (tab) {
-        schedule_tab_browser_creation(tab);
+        TabManager::instance().scheduleBrowserCreation(tab);
         resize_cef_browser_to_area(tab, "sync tab selection");
     }
     set_current_tab(tab);
@@ -3350,7 +3381,7 @@ static void on_new_tab(Widget w, XtPointer client_data, XtPointer call_data)
     snprintf(tab_title, sizeof(tab_title), "%s (%d)", base, count + 1);
 
     BrowserTab *tab = TabManager::instance().createTab(g_tab_stack, name, tab_title, base, kInitialBrowserUrl);
-    schedule_tab_browser_creation(tab);
+    TabManager::instance().scheduleBrowserCreation(tab);
     XmTabStackSelectTab(tab->page, True);
     set_current_tab(tab);
     update_all_tab_labels("new tab");
@@ -3394,8 +3425,11 @@ static void on_close_tab(Widget w, XtPointer client_data, XtPointer call_data)
 
 void set_current_tab(BrowserTab *tab)
 {
-    BrowserTab *previous = TabManager::instance().currentTab();
-    TabManager::instance().setCurrentTab(tab);
+    TabManager::instance().selectTab(tab);
+}
+
+static void tab_selection_handler(BrowserTab *tab, BrowserTab *previous)
+{
     if (previous && previous != tab) {
         apply_tab_theme_colors(previous, false);
     }
@@ -3452,7 +3486,7 @@ static void on_tab_selection_changed(Widget w, XtPointer client_data, XtPointer 
             tab ? (tab->base_title.empty() ? "Tab" : tab->base_title.c_str()) : "(none)",
             tab ? display_url_for_tab(tab) : "(none)");
     if (tab) {
-        schedule_tab_browser_creation(tab);
+        TabManager::instance().scheduleBrowserCreation(tab);
         resize_cef_browser_to_area(tab, "tab selection changed");
     }
     set_current_tab(tab);
@@ -6174,6 +6208,25 @@ bool parse_startup_url_arg(int argc, char *argv[], std::string *out_url)
     return !out_url->empty();
 }
 
+static void surface_new_tab_handler_impl(const std::string &url, bool select)
+{
+    if (url.empty()) return;
+    fprintf(stderr,
+            "[ck-browser] surface event: new tab request url=%s select=%d\n",
+            url.c_str(),
+            select ? 1 : 0);
+    (void)select;
+}
+
+static void surface_tab_load_finished_handler_impl(BrowserTab *tab)
+{
+    if (!tab) return;
+    fprintf(stderr,
+            "[ck-browser] surface event: tab load finished tab=%s url=%s\n",
+            tab->base_title.empty() ? "Tab" : tab->base_title.c_str(),
+            tab->current_url.empty() ? "(none)" : tab->current_url.c_str());
+}
+
 int run_browser_ui_loop(int argc, char *argv[], const BrowserPreflightState &preflight)
 {
     g_homepage_url = preflight.homepage_url;
@@ -6182,6 +6235,9 @@ int run_browser_ui_loop(int argc, char *argv[], const BrowserPreflightState &pre
     }
     fprintf(stderr, "[ck-browser] homepage URL=%s\n",
             g_homepage_url.empty() ? "(empty)" : g_homepage_url.c_str());
+
+    set_surface_new_tab_handler(surface_new_tab_handler_impl);
+    set_surface_tab_load_finished_handler(surface_tab_load_finished_handler_impl);
 
     g_session_data = preflight.session_data;
     bool has_startup_url = preflight.has_startup_url;
@@ -6238,6 +6294,8 @@ int run_browser_ui_loop(int argc, char *argv[], const BrowserPreflightState &pre
     long tab_mask = ButtonPressMask | ButtonReleaseMask | KeyPressMask | KeyReleaseMask;
     XtInsertEventHandler(tab_stack, tab_mask, False, on_tabbox_input, NULL, XtListHead);
 
+    TabManager::instance().set_selection_handler(tab_selection_handler);
+
     if (g_session_data) {
         g_session_loaded = session_load(toplevel, g_session_data) ? true : false;
         if (g_session_loaded) {
@@ -6252,7 +6310,7 @@ int run_browser_ui_loop(int argc, char *argv[], const BrowserPreflightState &pre
         const char *first_url = has_startup_url ? startup_url.c_str()
                                                 : (g_homepage_url.empty() ? kInitialBrowserUrl : g_homepage_url.c_str());
         BrowserTab *tab_home = TabManager::instance().createTab(tab_stack, "tabWelcome", "Welcome", "Welcome", first_url);
-        schedule_tab_browser_creation(tab_home);
+        TabManager::instance().scheduleBrowserCreation(tab_home);
         XmTabStackSelectTab(tab_home->page, False);
         set_current_tab(tab_home);
     }

@@ -225,6 +225,7 @@ void BrowserApp::set_tab_load_finished_handler(TabEventCallback handler)
 
 void BrowserApp::notify_new_tab_request(const std::string &url, bool select)
 {
+    notify_surface_new_tab_request(url, select);
     if (new_tab_request_callback_) {
         new_tab_request_callback_(url, select);
     }
@@ -232,6 +233,7 @@ void BrowserApp::notify_new_tab_request(const std::string &url, bool select)
 
 void BrowserApp::notify_tab_load_finished(BrowserTab *tab)
 {
+    notify_surface_tab_load_finished(tab);
     if (load_finished_callback_) {
         load_finished_callback_(tab);
     }

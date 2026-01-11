@@ -8,6 +8,7 @@
 #include <X11/Xlib.h>
 
 #include <algorithm>
+#include <utility>
 
 #include "browser_ui_bridge.h"
 
@@ -86,6 +87,25 @@ BrowserTab *TabManager::createTab(Widget tab_stack,
     TabManager::instance().addTab(std::move(tab));
     update_all_tab_labels("create_tab_page");
     return tab_ptr;
+}
+
+void TabManager::set_selection_handler(TabSelectionHandler handler)
+{
+    selection_handler_ = std::move(handler);
+}
+
+void TabManager::selectTab(BrowserTab *tab)
+{
+    BrowserTab *previous = current_tab_;
+    current_tab_ = tab;
+    if (selection_handler_) {
+        selection_handler_(tab, previous);
+    }
+}
+
+void TabManager::scheduleBrowserCreation(BrowserTab *tab)
+{
+    schedule_tab_browser_creation(tab);
 }
 
 void TabManager::removeTab(BrowserTab *tab)

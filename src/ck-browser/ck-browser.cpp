@@ -431,7 +431,6 @@ void apply_tab_theme_colors(BrowserTab *tab, bool active);
 static void attach_tab_handlers_cb(XtPointer client_data, XtIntervalId *id);
 void update_favicon_controls(BrowserTab *tab);
 void request_favicon_download(BrowserTab *tab, const char *reason);
-static void request_tab_theme_color(BrowserTab *tab);
 static void theme_color_request_timer_cb(XtPointer client_data, XtIntervalId *id);
 void schedule_theme_color_request(BrowserTab *tab, int delay_ms);
 void spawn_new_browser_window(const std::string &url);
@@ -2159,22 +2158,13 @@ void load_url_for_tab(BrowserTab *tab, const std::string &url)
     }
 }
 
-static void request_tab_theme_color(BrowserTab *tab)
-{
-    if (!tab || !tab->browser) return;
-    CefRefPtr<CefFrame> frame = tab->browser->GetMainFrame();
-    if (!frame) return;
-    CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("ck_request_theme_color");
-    frame->SendProcessMessage(PID_RENDERER, msg);
-}
-
 static void theme_color_request_timer_cb(XtPointer client_data, XtIntervalId *id)
 {
     (void)id;
     BrowserTab *tab = (BrowserTab *)client_data;
     if (!tab) return;
     tab->theme_color_retry_scheduled = false;
-    request_tab_theme_color(tab);
+    BrowserApp::instance().request_theme_color_for_tab(tab);
 }
 
 void schedule_theme_color_request(BrowserTab *tab, int delay_ms)

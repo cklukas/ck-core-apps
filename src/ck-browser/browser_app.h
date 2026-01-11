@@ -57,6 +57,7 @@ public:
                         const char *locales_path,
                         const char *subprocess_path);
     void shutdown_cef() const;
+    void request_theme_color_for_tab(BrowserTab *tab);
 
 private:
     BrowserApp() = default;

@@ -28,6 +28,7 @@
 #include <include/cef_menu_model.h>
 #include <include/cef_popup_features.h>
 #include <include/cef_process_message.h>
+#include <include/cef_process_id.h>
 #include <include/cef_v8.h>
 #include <include/cef_dictionary_value.h>
 #include <include/cef_list_value.h>
@@ -128,6 +129,15 @@ bool route_url_through_ck_browser(CefRefPtr<CefBrowser> browser,
     }
     open_url_in_new_tab(normalized, true);
     return true;
+}
+
+void BrowserApp::request_theme_color_for_tab(BrowserTab *tab)
+{
+    if (!tab || !tab->browser) return;
+    CefRefPtr<CefFrame> frame = tab->browser->GetMainFrame();
+    if (!frame) return;
+    CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("ck_request_theme_color");
+    frame->SendProcessMessage(PID_RENDERER, msg);
 }
 
 class BrowserClient : public CefClient,

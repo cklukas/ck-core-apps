@@ -31,7 +31,8 @@
     - [x] Make `initialize_cef_browser_cb` and tab scheduling helpers members or friends so they do not rely on scattered globals.
     - [ ] Transfer `route_url_through_ck_browser`, popup logging, and theme-color request helpers into `BrowserApp`, exposing a minimal callback interface for UI/tab events.
       - [x] route_url/popup logging are now hosted by `browser_app.*`.
-      - [ ] theme-color request helpers (`schedule_theme_color_request` et al.) remain in the UI layer for now.
+      - [x] Send renderer theme-color requests from `BrowserApp` rather than the UI module.
+      - [ ] Keep the timeout-based scheduling helper (`schedule_theme_color_request`) in the UI layer for now.
     - [x] Survey the helper functions currently called from `ck_browser_run` and document the dependencies BrowserApp will need to reach into (session/GUI, bookmark, toolbar helpers, etc.).
       - Requires homepage/config helpers (`load_homepage_file`, `save_homepage_file`, `normalize_url`, cache-suffix parsing), filesystem path utilities (`find_existing_path`, `build_cwd_path`, `build_path_from_dir`, `get_exe_path`, `dir_has_files`), and GPU capability switches (`has_opengl_support`, `apply_gpu_switches`).
       - Depends on session management (`session_parse_argument`, `session_data_create/load/apply_geometry/free`, `restore_tabs_from_session_data`, `save_last_session_file`, `capture_session_state`) plus CEF process wiring (`build_cef_argv`, `CefExecuteProcess`, `CefInitialize`, `CefShutdown`, `report_cef_resource_status`, `dump_cef_env_and_args`).

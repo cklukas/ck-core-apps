@@ -51,6 +51,8 @@
 #include <array>
 #include <filesystem>
 
+#include "browser_app.h"
+
 extern "C" {
 #include "../shared/about_dialog.h"
 #include "../shared/session_utils.h"
@@ -117,9 +119,6 @@ static Widget g_file_open_dialog = NULL;
 static std::string g_file_open_last_dir;
 static bool g_tab_sync_scheduled = false;
 static std::string g_homepage_url;
-static char g_resources_path[PATH_MAX] = "";
-static char g_locales_path[PATH_MAX] = "";
-static char g_subprocess_path[PATH_MAX] = "";
 static Widget g_tab_header_menu = NULL;
 static BrowserTab *g_tab_header_menu_target = NULL;
 class BrowserClient;
@@ -129,7 +128,6 @@ static CefRefPtr<CkCefApp> g_cef_app;
 static bool g_tab_handlers_attached = false;
 static SessionData *g_session_data = NULL;
 static bool g_session_loaded = false;
-static bool g_force_disable_gpu = false;
 static bool g_cef_initialized = false;
 static bool g_shutdown_requested = false;
 static int g_shutdown_pending_browsers = 0;
@@ -468,8 +466,6 @@ static int count_open_browsers();
 static void on_cef_browser_closed(const char *tag);
 static void begin_shutdown_sequence(const char *reason);
 static void focus_url_field_timer(XtPointer client_data, XtIntervalId *id);
-static bool has_opengl_support();
-static void apply_gpu_switches();
 static void on_add_bookmark_menu(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_open_bookmark_manager_menu(Widget w, XtPointer client_data, XtPointer call_data);
 
@@ -1564,29 +1560,6 @@ static void save_homepage_file(const std::string &url, const char *reason)
     fclose(fp);
     fprintf(stderr, "[ck-browser] saved homepage reason=%s url=%s path=%s\n",
             reason ? reason : "(null)", url.c_str(), path);
-}
-
-static bool has_opengl_support()
-{
-    const char *libs[] = {"libGL.so.1", "libGL.so", NULL};
-    for (const char **it = libs; *it; ++it) {
-        void *handle = dlopen(*it, RTLD_LAZY | RTLD_LOCAL);
-        if (!handle) continue;
-        void *sym = dlsym(handle, "glXGetCurrentContext");
-        dlclose(handle);
-        if (sym) return true;
-    }
-    return false;
-}
-
-static void apply_gpu_switches()
-{
-    if (!g_force_disable_gpu) return;
-    CefRefPtr<CefCommandLine> global = CefCommandLine::GetGlobalCommandLine();
-    if (!global) return;
-    global->AppendSwitch("disable-gpu");
-    global->AppendSwitch("disable-software-rasterizer");
-    global->AppendSwitch("disable-gpu-compositing");
 }
 
 static void save_last_session_file(const char *reason)
@@ -7258,166 +7231,6 @@ static char *xm_name(const char *name)
     return const_cast<char *>(name ? name : "");
 }
 
-static bool build_path_from_dir(const char *dir, const char *suffix, char *buffer, size_t buffer_len)
-{
-    if (!buffer || buffer_len == 0) return false;
-    buffer[0] = '\0';
-    if (!dir || dir[0] == '\0') return false;
-    size_t dir_len = strnlen(dir, PATH_MAX);
-    if (suffix && suffix[0]) {
-        size_t suffix_len = strlen(suffix);
-        if (dir_len + 1 + suffix_len + 1 > buffer_len) {
-            return false;
-        }
-        memcpy(buffer, dir, dir_len);
-        buffer[dir_len] = '/';
-        memcpy(buffer + dir_len + 1, suffix, suffix_len);
-        buffer[dir_len + 1 + suffix_len] = '\0';
-    } else {
-        if (dir_len + 1 > buffer_len) {
-            return false;
-        }
-        memcpy(buffer, dir, dir_len);
-        buffer[dir_len] = '\0';
-    }
-    return true;
-}
-
-static void build_cwd_path(char *buffer, size_t buffer_len, const char *suffix)
-{
-    if (!buffer || buffer_len == 0) return;
-    char cwd[PATH_MAX];
-    if (!getcwd(cwd, sizeof(cwd))) {
-        buffer[0] = '\0';
-        return;
-    }
-    if (!build_path_from_dir(cwd, suffix, buffer, buffer_len)) {
-        buffer[0] = '\0';
-    }
-}
-
-static int dir_has_files(const char *path)
-{
-    if (!path || path[0] == '\0') return 0;
-    DIR *dir = opendir(path);
-    if (!dir) return 0;
-    struct dirent *entry = NULL;
-    int has_files = 0;
-    while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-            continue;
-        }
-        has_files = 1;
-        break;
-    }
-    closedir(dir);
-    return has_files;
-}
-
-static int file_exists(const char *path)
-{
-    if (!path || path[0] == '\0') return 0;
-    return access(path, R_OK) == 0;
-}
-
-static void report_cef_resource_status(const char *resources_path, const char *locales_path)
-{
-    const char *resource_dir = resources_path ? resources_path : "(null)";
-    const char *locales_dir = locales_path ? locales_path : "(null)";
-    fprintf(stderr, "[ck-browser] CEF resources_dir_path=%s\n", resource_dir);
-    fprintf(stderr, "[ck-browser] CEF locales_dir_path=%s\n", locales_dir);
-    if (resources_path && resources_path[0]) {
-        char icu_path[PATH_MAX];
-        size_t res_len = strnlen(resources_path, sizeof(icu_path));
-        const char *suffix = "/icudtl.dat";
-        size_t suffix_len = strlen(suffix);
-        if (res_len + suffix_len + 1 <= sizeof(icu_path)) {
-            memcpy(icu_path, resources_path, res_len);
-            memcpy(icu_path + res_len, suffix, suffix_len);
-            icu_path[res_len + suffix_len] = '\0';
-        } else {
-            icu_path[0] = '\0';
-        }
-        if (!icu_path[0] || !file_exists(icu_path)) {
-            fprintf(stderr, "[ck-browser] Missing ICU data file: %s\n", icu_path);
-        } else {
-            int fd = open(icu_path, O_RDONLY);
-            if (fd < 0) {
-                fprintf(stderr, "[ck-browser] Unable to open ICU data file: %s\n", icu_path);
-            } else {
-                close(fd);
-            }
-        }
-    }
-}
-
-static void get_exe_path(char *buffer, size_t buffer_len)
-{
-    if (!buffer || buffer_len == 0) return;
-    ssize_t len = readlink("/proc/self/exe", buffer, buffer_len - 1);
-    if (len < 0) {
-        buffer[0] = '\0';
-        return;
-    }
-    buffer[len] = '\0';
-}
-
-static void dump_cef_env_and_args(int argc, char *argv[])
-{
-    fprintf(stderr, "[ck-browser] argv:\n");
-    for (int i = 0; i < argc; ++i) {
-        fprintf(stderr, "  argv[%d]=%s\n", i, argv[i] ? argv[i] : "(null)");
-    }
-    const char *envs[] = {
-        "ICU_DATA",
-        "ICU_DATA_FILE",
-        "CHROME_VERSION_EXTRA",
-        "LD_LIBRARY_PATH",
-        "CEF_RESOURCE_PATH",
-        "CEF_LOCALES_PATH",
-        NULL
-    };
-    fprintf(stderr, "[ck-browser] env:\n");
-    for (const char **env = envs; *env; ++env) {
-        const char *val = getenv(*env);
-        fprintf(stderr, "  %s=%s\n", *env, val ? val : "(unset)");
-    }
-}
-
-static bool find_existing_path(char *buffer, size_t buffer_len, const char *suffix)
-{
-    if (!buffer || buffer_len == 0 || !suffix || suffix[0] == '\0') return false;
-    buffer[0] = '\0';
-    char candidate[PATH_MAX];
-    char cwd[PATH_MAX];
-    if (getcwd(cwd, sizeof(cwd))) {
-        if (build_path_from_dir(cwd, suffix, candidate, sizeof(candidate)) &&
-            dir_has_files(candidate)) {
-            strncpy(buffer, candidate, buffer_len);
-            buffer[buffer_len - 1] = '\0';
-            return true;
-        }
-    }
-    char exe_path[PATH_MAX];
-    get_exe_path(exe_path, sizeof(exe_path));
-    if (exe_path[0] != '\0') {
-        std::filesystem::path parent = std::filesystem::path(exe_path).parent_path();
-        std::filesystem::path previous;
-        while (!parent.empty() && parent != previous) {
-            std::string base = parent.string();
-            if (build_path_from_dir(base.c_str(), suffix, candidate, sizeof(candidate)) &&
-                dir_has_files(candidate)) {
-                strncpy(buffer, candidate, buffer_len);
-                buffer[buffer_len - 1] = '\0';
-                return true;
-            }
-            previous = parent;
-            parent = parent.parent_path();
-        }
-    }
-    return false;
-}
-
 static bool parse_startup_url_arg(int argc, char *argv[], std::string *out_url)
 {
     if (!out_url) return false;
@@ -7440,76 +7253,9 @@ static bool parse_startup_url_arg(int argc, char *argv[], std::string *out_url)
     return !out_url->empty();
 }
 
-static bool parse_cache_suffix_arg(int argc, char *argv[], std::string *out_suffix)
+int ck_browser_run(int argc, char *argv[])
 {
-    if (!out_suffix) return false;
-    out_suffix->clear();
-    const char *prefix = "--ck-cache-suffix=";
-    for (int i = 1; i < argc; ++i) {
-        const char *arg = argv[i];
-        if (!arg) continue;
-        if (strncmp(arg, prefix, strlen(prefix)) == 0) {
-            *out_suffix = std::string(arg + strlen(prefix));
-            break;
-        }
-        if (strcmp(arg, "--ck-cache-suffix") == 0 && i + 1 < argc && argv[i + 1]) {
-            *out_suffix = std::string(argv[i + 1]);
-            break;
-        }
-    }
-    if (out_suffix->empty()) return false;
-    for (char &c : *out_suffix) {
-        bool ok = ((c >= '0' && c <= '9') ||
-                   (c >= 'A' && c <= 'Z') ||
-                   (c >= 'a' && c <= 'z') ||
-                   c == '-' ||
-                   c == '_');
-        if (!ok) c = '_';
-    }
-    return true;
-}
-
-static void build_cef_argv(int argc, char *argv[], std::vector<char *> *out_argv)
-{
-    if (!out_argv) return;
-    out_argv->clear();
-    if (argc <= 0 || !argv) return;
-    out_argv->reserve((size_t)argc);
-    out_argv->push_back(argv[0]);
-
-    for (int i = 1; i < argc; ++i) {
-        const char *arg = argv[i];
-        if (!arg) continue;
-
-        if (strcmp(arg, "-session") == 0) {
-            if (i + 1 < argc) i++;
-            continue;
-        }
-
-        const char *open_url_prefix = "--ck-open-url=";
-        if (strncmp(arg, open_url_prefix, strlen(open_url_prefix)) == 0) {
-            continue;
-        }
-        if (strcmp(arg, "--ck-open-url") == 0) {
-            if (i + 1 < argc) i++;
-            continue;
-        }
-
-        const char *cache_prefix = "--ck-cache-suffix=";
-        if (strncmp(arg, cache_prefix, strlen(cache_prefix)) == 0) {
-            continue;
-        }
-        if (strcmp(arg, "--ck-cache-suffix") == 0) {
-            if (i + 1 < argc) i++;
-            continue;
-        }
-
-        out_argv->push_back(argv[i]);
-    }
-}
-
-int main(int argc, char *argv[])
-{
+    BrowserApp &app_controller = BrowserApp::instance();
     g_homepage_url = load_homepage_file();
     if (g_homepage_url.empty()) {
         g_homepage_url = kInitialBrowserUrl;
@@ -7517,54 +7263,52 @@ int main(int argc, char *argv[])
     fprintf(stderr, "[ck-browser] homepage URL=%s\n",
             g_homepage_url.empty() ? "(empty)" : g_homepage_url.c_str());
 
-    if (!find_existing_path(g_resources_path, sizeof(g_resources_path),
-                            "third_party/cef/resources")) {
-        build_cwd_path(g_resources_path, sizeof(g_resources_path), "third_party/cef/resources");
+    BrowserPaths cef_paths = app_controller.discover_cef_paths();
+    char resources_path[PATH_MAX] = "";
+    char locales_path[PATH_MAX] = "";
+    char subprocess_path[PATH_MAX] = "";
+    if (!cef_paths.resources_path.empty()) {
+        strncpy(resources_path, cef_paths.resources_path.c_str(), sizeof(resources_path));
+        resources_path[sizeof(resources_path) - 1] = '\0';
     }
-    if (!find_existing_path(g_locales_path, sizeof(g_locales_path),
-                            "third_party/cef/locales")) {
-        build_cwd_path(g_locales_path, sizeof(g_locales_path), "third_party/cef/locales");
+    if (!cef_paths.locales_path.empty()) {
+        strncpy(locales_path, cef_paths.locales_path.c_str(), sizeof(locales_path));
+        locales_path[sizeof(locales_path) - 1] = '\0';
     }
-    if (!dir_has_files(g_locales_path)) {
-        if (!find_existing_path(g_locales_path, sizeof(g_locales_path),
-                                "third_party/cef/resources/locales")) {
-            build_cwd_path(g_locales_path, sizeof(g_locales_path),
-                           "third_party/cef/resources/locales");
-        }
+    if (!cef_paths.subprocess_path.empty()) {
+        strncpy(subprocess_path, cef_paths.subprocess_path.c_str(), sizeof(subprocess_path));
+        subprocess_path[sizeof(subprocess_path) - 1] = '\0';
     }
-    get_exe_path(g_subprocess_path, sizeof(g_subprocess_path));
     fprintf(stderr, "[ck-browser] resource_path=%s locales_path=%s subprocess=%s\n",
-            g_resources_path[0] ? g_resources_path : "(none)",
-            g_locales_path[0] ? g_locales_path : "(none)",
-            g_subprocess_path[0] ? g_subprocess_path : "(none)");
+            resources_path[0] ? resources_path : "(none)",
+            locales_path[0] ? locales_path : "(none)",
+            subprocess_path[0] ? subprocess_path : "(none)");
 
-    g_force_disable_gpu = !has_opengl_support();
-    if (g_force_disable_gpu) {
+    bool force_disable_gpu = !app_controller.has_opengl_support();
+    if (force_disable_gpu) {
         fprintf(stderr,
                 "[ck-browser] OpenGL stack missing (libGL), forcing --disable-gpu + software fallback\n");
     } else {
         fprintf(stderr, "[ck-browser] OpenGL stack present, GPU acceleration enabled\n");
     }
-    apply_gpu_switches();
+    app_controller.apply_gpu_switches(force_disable_gpu);
 
-    char *session_id = session_parse_argument(&argc, argv);
-    g_session_data = session_data_create(session_id);
-    free(session_id);
+    g_session_data = app_controller.prepare_session(argc, argv);
 
     if (!g_cef_app) {
         g_cef_app = new CkCefApp();
     }
 
     std::vector<char *> cef_argv;
-    build_cef_argv(argc, argv, &cef_argv);
+    app_controller.build_cef_argv(argc, argv, &cef_argv);
     fprintf(stderr, "[ck-browser] cef args:");
     for (int i = 0; i < (int)cef_argv.size(); ++i) {
         fprintf(stderr, " %s", cef_argv[i] ? cef_argv[i] : "(null)");
     }
     fprintf(stderr, "\n");
     CefMainArgs main_args((int)cef_argv.size(), cef_argv.data());
-    if (g_force_disable_gpu) {
-        apply_gpu_switches();
+    if (force_disable_gpu) {
+        app_controller.apply_gpu_switches(force_disable_gpu);
     }
     fprintf(stderr, "[ck-browser] calling cef_execute_process\n");
     int exit_code = CefExecuteProcess(main_args, g_cef_app, nullptr);
@@ -7576,7 +7320,7 @@ int main(int argc, char *argv[])
     std::string startup_url;
     bool has_startup_url = parse_startup_url_arg(argc, argv, &startup_url);
     std::string cache_suffix;
-    (void)parse_cache_suffix_arg(argc, argv, &cache_suffix);
+    (void)app_controller.parse_cache_suffix_arg(argc, argv, &cache_suffix);
     if (cache_suffix.empty() && has_startup_url) {
         cache_suffix = std::to_string((long)getpid());
     }
@@ -7672,23 +7416,23 @@ int main(int argc, char *argv[])
     settings.command_line_args_disabled = 1;
     settings.log_severity = LOGSEVERITY_VERBOSE;
     char log_path[PATH_MAX];
-    build_cwd_path(log_path, sizeof(log_path), "build/ck-browser-cef.log");
+    app_controller.build_cwd_path(log_path, sizeof(log_path), "build/ck-browser-cef.log");
     if (log_path[0] != '\0') {
         CefString(&settings.log_file) = log_path;
     }
-    if (g_resources_path[0] != '\0') {
-        CefString(&settings.resources_dir_path) = g_resources_path;
+    if (resources_path[0] != '\0') {
+        CefString(&settings.resources_dir_path) = resources_path;
     }
     const char *selected_locales = NULL;
-    if (g_locales_path[0] != '\0' && dir_has_files(g_locales_path)) {
-        selected_locales = g_locales_path;
-        CefString(&settings.locales_dir_path) = g_locales_path;
+    if (locales_path[0] != '\0' && app_controller.dir_has_files(locales_path)) {
+        selected_locales = locales_path;
+        CefString(&settings.locales_dir_path) = locales_path;
     }
-    if (g_subprocess_path[0] != '\0') {
-        CefString(&settings.browser_subprocess_path) = g_subprocess_path;
+    if (subprocess_path[0] != '\0') {
+        CefString(&settings.browser_subprocess_path) = subprocess_path;
     }
     char cache_base[PATH_MAX];
-    build_cwd_path(cache_base, sizeof(cache_base), "build/ck-browser-cache");
+    app_controller.build_cwd_path(cache_base, sizeof(cache_base), "build/ck-browser-cache");
     char cache_path[PATH_MAX];
     if (cache_base[0] == '\0') {
         cache_path[0] = '\0';
@@ -7713,8 +7457,8 @@ int main(int argc, char *argv[])
         CefString(&settings.root_cache_path) = cache_path;
         fprintf(stderr, "[ck-browser] root_cache_path=%s\n", cache_path);
     }
-    report_cef_resource_status(g_resources_path, selected_locales ? selected_locales : "");
-    dump_cef_env_and_args(main_args.argc, main_args.argv);
+    app_controller.report_cef_resource_status(resources_path, selected_locales ? selected_locales : "");
+    app_controller.dump_cef_env_and_args(main_args.argc, main_args.argv);
     fprintf(stderr, "[ck-browser] calling CefInitialize\n");
     bool cef_ok = CefInitialize(main_args, settings, g_cef_app, nullptr);
     fprintf(stderr, "[ck-browser] CefInitialize result=%d\n", cef_ok);

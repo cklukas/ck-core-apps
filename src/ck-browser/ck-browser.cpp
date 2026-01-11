@@ -409,7 +409,6 @@ static void on_home_button_press(Widget w, XtPointer client_data, XEvent *event,
 static void on_home_menu_set_blank(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_home_menu_use_current(Widget w, XtPointer client_data, XtPointer call_data);
 static int count_open_browsers();
-void on_cef_browser_closed(const char *tag);
 static void begin_shutdown_sequence(const char *reason);
 static void focus_url_field_timer(XtPointer client_data, XtIntervalId *id);
 static void on_add_bookmark_menu(Widget w, XtPointer client_data, XtPointer call_data);
@@ -444,7 +443,7 @@ class DevToolsClient : public CefClient, public CefLifeSpanHandler {
       tab_->devtools_shell = NULL;
       tab_->devtools_area = NULL;
     }
-    on_cef_browser_closed("devtools");
+    BrowserApp::instance().notify_browser_closed("devtools");
   }
 
   void detach_tab() {
@@ -1274,7 +1273,8 @@ void update_all_tab_labels(const char *reason)
 
 void open_url_in_new_tab(const std::string &url, bool select)
 {
-    if (!g_tab_stack) return;
+    if (url.empty() || !g_tab_stack) return;
+    BrowserApp::instance().notify_new_tab_request(url, select);
     const char *base = "New Tab";
     int count = count_tabs_with_base_title(base);
     char name[32];
@@ -2268,7 +2268,7 @@ static int count_open_browsers()
     return pending;
 }
 
-void on_cef_browser_closed(const char *tag)
+void BrowserApp::notify_browser_closed(const char *tag)
 {
     if (!g_shutdown_requested) return;
     if (g_shutdown_pending_browsers > 0) {
@@ -6296,16 +6296,8 @@ bool parse_startup_url_arg(int argc, char *argv[], std::string *out_url)
     return !out_url->empty();
 }
 
-int start_ui_and_cef_loop(int argc, char *argv[], BrowserApp &app_controller)
+int run_browser_ui_loop(int argc, char *argv[], const BrowserPreflightState &preflight)
 {
-    CefRefPtr<CefApp> cef_app = ensure_cef_app();
-
-    BrowserPreflightState preflight;
-    int preflight_exit = app_controller.run_cef_preflight(argc, argv, cef_app, &preflight);
-    if (preflight_exit >= 0) {
-        return preflight_exit;
-    }
-
     g_homepage_url = preflight.homepage_url;
     if (g_homepage_url.empty()) {
         g_homepage_url = kInitialBrowserUrl;
@@ -6313,32 +6305,9 @@ int start_ui_and_cef_loop(int argc, char *argv[], BrowserApp &app_controller)
     fprintf(stderr, "[ck-browser] homepage URL=%s\n",
             g_homepage_url.empty() ? "(empty)" : g_homepage_url.c_str());
 
-    BrowserPaths cef_paths = preflight.cef_paths;
-    char resources_path[PATH_MAX] = "";
-    char locales_path[PATH_MAX] = "";
-    char subprocess_path[PATH_MAX] = "";
-    if (!cef_paths.resources_path.empty()) {
-        strncpy(resources_path, cef_paths.resources_path.c_str(), sizeof(resources_path));
-        resources_path[sizeof(resources_path) - 1] = '\0';
-    }
-    if (!cef_paths.locales_path.empty()) {
-        strncpy(locales_path, cef_paths.locales_path.c_str(), sizeof(locales_path));
-        locales_path[sizeof(locales_path) - 1] = '\0';
-    }
-    if (!cef_paths.subprocess_path.empty()) {
-        strncpy(subprocess_path, cef_paths.subprocess_path.c_str(), sizeof(subprocess_path));
-        subprocess_path[sizeof(subprocess_path) - 1] = '\0';
-    }
-    fprintf(stderr, "[ck-browser] resource_path=%s locales_path=%s subprocess=%s\n",
-            resources_path[0] ? resources_path : "(none)",
-            locales_path[0] ? locales_path : "(none)",
-            subprocess_path[0] ? subprocess_path : "(none)");
-    app_controller.set_subprocess_path(subprocess_path);
-
     g_session_data = preflight.session_data;
     bool has_startup_url = preflight.has_startup_url;
     std::string startup_url = preflight.startup_url;
-    std::string cache_suffix = preflight.cache_suffix;
 
     XtAppContext app;
     Widget toplevel = XtVaAppInitialize(&app, "CkBrowser", NULL, 0,
@@ -6426,25 +6395,6 @@ int start_ui_and_cef_loop(int argc, char *argv[], BrowserApp &app_controller)
     if (g_session_loaded && g_session_data) {
         session_apply_geometry(toplevel, g_session_data, "x", "y", "w", "h");
     }
-    CefSettings settings;
-    settings.no_sandbox = 1;
-    settings.external_message_pump = 1;
-    settings.command_line_args_disabled = 1;
-    settings.log_severity = LOGSEVERITY_VERBOSE;
-    char log_path[PATH_MAX];
-    app_controller.build_cwd_path(log_path, sizeof(log_path), "build/ck-browser-cef.log");
-    if (log_path[0] != '\0') {
-        CefString(&settings.log_file) = log_path;
-    }
-    if (resources_path[0] != '\0') {
-        CefString(&settings.resources_dir_path) = resources_path;
-    }
-    if (!app_controller.initialize_cef(preflight,
-                                       resources_path[0] ? resources_path : NULL,
-                                       locales_path[0] ? locales_path : NULL,
-                                       subprocess_path[0] ? subprocess_path : NULL)) {
-        return 1;
-    }
     g_cef_initialized = true;
     fprintf(stderr, "[ck-browser] CEF initialized, refreshing bookmark icons\n");
     rebuild_bookmarks_menu_items();
@@ -6463,8 +6413,6 @@ int start_ui_and_cef_loop(int argc, char *argv[], BrowserApp &app_controller)
         detach_tab_clients(tab.get());
     }
     g_browser_tabs.clear();
-    LOG_ENTER("about to call CefShutdown");
-    app_controller.shutdown_cef();
     return 0;
 }
 void update_security_controls(BrowserTab *tab);

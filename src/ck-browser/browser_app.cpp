@@ -15,6 +15,7 @@
 #include <cmath>
 #include <filesystem>
 #include <functional>
+#include <utility>
 #include <vector>
 #include <include/cef_app.h>
 #include <include/cef_render_process_handler.h>
@@ -42,6 +43,8 @@ extern "C" {
 
 extern std::string load_homepage_file();
 extern bool parse_startup_url_arg(int argc, char *argv[], std::string *out_url);
+
+int run_browser_ui_loop(int argc, char *argv[], const BrowserPreflightState &preflight);
 
 static const char *window_disposition_name(cef_window_open_disposition_t disposition)
 {
@@ -86,7 +89,31 @@ int BrowserApp::run(int argc, char *argv[])
 
 int BrowserApp::run_main(int argc, char *argv[])
 {
-    return start_ui_and_cef_loop(argc, argv, *this);
+    CefRefPtr<CefApp> cef_app = ensure_cef_app();
+    BrowserPreflightState preflight;
+    int preflight_exit = run_cef_preflight(argc, argv, cef_app, &preflight);
+    if (preflight_exit >= 0) {
+        return preflight_exit;
+    }
+
+    const BrowserPaths &paths = preflight.cef_paths;
+    fprintf(stderr,
+            "[ck-browser] resource_path=%s locales_path=%s subprocess=%s\n",
+            paths.resources_path.empty() ? "(none)" : paths.resources_path.c_str(),
+            paths.locales_path.empty() ? "(none)" : paths.locales_path.c_str(),
+            paths.subprocess_path.empty() ? "(none)" : paths.subprocess_path.c_str());
+    set_subprocess_path(paths.subprocess_path);
+
+    if (!initialize_cef(preflight,
+                        paths.resources_path.empty() ? nullptr : paths.resources_path.c_str(),
+                        paths.locales_path.empty() ? nullptr : paths.locales_path.c_str(),
+                        paths.subprocess_path.empty() ? nullptr : paths.subprocess_path.c_str())) {
+        return 1;
+    }
+
+    int ui_result = run_browser_ui_loop(argc, argv, preflight);
+    shutdown_cef();
+    return ui_result;
 }
 
 void BrowserApp::log_popup_features(const CefPopupFeatures &features) const
@@ -186,6 +213,30 @@ void BrowserApp::spawn_new_browser_window(const std::string &url)
     fprintf(stderr, "[ck-browser] spawn_new_browser_window pid=%ld\n", (long)pid);
 }
 
+void BrowserApp::set_new_tab_request_handler(NewTabRequestCallback handler)
+{
+    new_tab_request_callback_ = std::move(handler);
+}
+
+void BrowserApp::set_tab_load_finished_handler(TabEventCallback handler)
+{
+    load_finished_callback_ = std::move(handler);
+}
+
+void BrowserApp::notify_new_tab_request(const std::string &url, bool select)
+{
+    if (new_tab_request_callback_) {
+        new_tab_request_callback_(url, select);
+    }
+}
+
+void BrowserApp::notify_tab_load_finished(BrowserTab *tab)
+{
+    if (load_finished_callback_) {
+        load_finished_callback_(tab);
+    }
+}
+
 void BrowserApp::handle_tab_load_start(BrowserTab *tab, const std::string &url)
 {
     if (!tab || url.empty()) return;
@@ -262,6 +313,7 @@ void BrowserApp::handle_tab_loading_state_change(BrowserTab *tab,
     BrowserTab *current = get_current_tab();
     tab->can_go_back = can_go_back;
     tab->can_go_forward = can_go_forward;
+    bool was_loading = tab->loading;
     tab->loading = is_loading;
     if (!is_loading) {
         update_tab_security_status(tab);
@@ -278,6 +330,9 @@ void BrowserApp::handle_tab_loading_state_change(BrowserTab *tab,
                     "[ck-browser] skipping theme color request because current_url=%s pending_url=%s\n",
                     tab->current_url.empty() ? "(none)" : tab->current_url.c_str(),
                     tab->pending_url.empty() ? "(none)" : tab->pending_url.c_str());
+        }
+        if (was_loading) {
+            notify_tab_load_finished(tab);
         }
     }
     if (tab == current) {
@@ -761,7 +816,7 @@ class BrowserClient : public CefClient,
     if (tab_ && tab_->browser == browser) {
       tab_->browser = nullptr;
     }
-    on_cef_browser_closed("browser");
+    BrowserApp::instance().notify_browser_closed("browser");
   }
 
   void detach_tab() {

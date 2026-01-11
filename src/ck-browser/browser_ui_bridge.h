@@ -32,6 +32,5 @@ std::string extract_host_from_url(const std::string &url);
 void select_tab_page(BrowserTab *tab);
 void load_url_for_tab(BrowserTab *tab, const std::string &url);
 void resize_devtools_to_area(BrowserTab *tab, const char *reason);
-void on_cef_browser_closed(const char *tag);
 
 #endif // CK_BROWSER_BROWSER_UI_BRIDGE_H

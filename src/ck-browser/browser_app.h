@@ -2,6 +2,7 @@
 #define CK_BROWSER_BROWSER_APP_H
 
 #include <cstddef>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,14 @@ public:
 
     int run(int argc, char *argv[]);
     int run_main(int argc, char *argv[]);
+    int run_ui_loop(int argc, char *argv[]);
+
+    using NewTabRequestCallback = std::function<void(const std::string &url, bool select)>;
+    using TabEventCallback = std::function<void(BrowserTab *tab)>;
+    void set_new_tab_request_handler(NewTabRequestCallback handler);
+    void set_tab_load_finished_handler(TabEventCallback handler);
+    void notify_new_tab_request(const std::string &url, bool select);
+    void notify_tab_load_finished(BrowserTab *tab);
 
     BrowserPaths discover_cef_paths() const;
     bool build_path_from_dir(const char *dir, const char *suffix, char *buffer, size_t buffer_len) const;
@@ -71,6 +80,7 @@ public:
     void handle_tab_favicon_change(BrowserTab *tab, const std::string &url);
     void handle_tab_loading_state_change(BrowserTab *tab, bool is_loading, bool can_go_back, bool can_go_forward);
     void handle_tab_focus(BrowserTab *tab);
+    void notify_browser_closed(const char *tag);
 
 private:
     friend class BrowserClient;
@@ -81,9 +91,9 @@ private:
                                       bool allow_existing_tab) const;
     bool is_devtools_url(const std::string &url) const;
     std::string subprocess_path_;
+    NewTabRequestCallback new_tab_request_callback_;
+    TabEventCallback load_finished_callback_;
 };
-
-int start_ui_and_cef_loop(int argc, char *argv[], BrowserApp &app_controller);
 
 CefRefPtr<CefClient> create_browser_client(BrowserTab *tab);
 void detach_browser_client(const CefRefPtr<CefClient> &client);

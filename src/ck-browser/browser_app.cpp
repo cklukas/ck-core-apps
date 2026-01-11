@@ -15,6 +15,7 @@
 #include <cmath>
 #include <filesystem>
 #include <functional>
+#include <vector>
 #include <include/cef_app.h>
 #include <include/cef_render_process_handler.h>
 #include <include/cef_browser.h>
@@ -26,16 +27,15 @@
 #include <include/cef_life_span_handler.h>
 #include <include/cef_load_handler.h>
 #include <include/cef_menu_model.h>
-#include <include/cef_popup_features.h>
+#include <include/internal/cef_types_wrappers.h>
 #include <include/cef_process_message.h>
-#include <include/cef_process_id.h>
 #include <include/cef_v8.h>
-#include <include/cef_dictionary_value.h>
-#include <include/cef_list_value.h>
+#include <include/cef_values.h>
 #include <include/cef_request.h>
 #include <include/cef_request_handler.h>
 #include <include/cef_command_line.h>
-#include <include/cef_string.h>
+#include <include/internal/cef_string.h>
+#include <include/wrapper/cef_helpers.h>
 extern "C" {
 #include "../shared/session_utils.h"
 }
@@ -62,6 +62,11 @@ static const char *window_disposition_name(cef_window_open_disposition_t disposi
     }
 }
 
+namespace {
+constexpr int kThemeColorRetryLimit = 3;
+constexpr int kThemeColorReadyRetryLimit = 6;
+}  // namespace
+
 
 int main(int argc, char *argv[])
 {
@@ -84,7 +89,7 @@ int BrowserApp::run_main(int argc, char *argv[])
     return start_ui_and_cef_loop(argc, argv, *this);
 }
 
-static void log_popup_features(const CefPopupFeatures &features)
+void BrowserApp::log_popup_features(const CefPopupFeatures &features) const
 {
     fprintf(stderr,
             "[ck-browser] popup features x=%d(xSet=%d) y=%d(ySet=%d) "
@@ -100,9 +105,9 @@ static void log_popup_features(const CefPopupFeatures &features)
             features.isPopup);
 }
 
-bool route_url_through_ck_browser(CefRefPtr<CefBrowser> browser,
-                                  const std::string &url,
-                                  bool allow_existing_tab)
+bool BrowserApp::route_url_through_ck_browser(CefRefPtr<CefBrowser> browser,
+                                              const std::string &url,
+                                              bool allow_existing_tab) const
 {
     if (url.empty()) return false;
     std::string normalized = normalize_url(url.c_str());
@@ -129,6 +134,12 @@ bool route_url_through_ck_browser(CefRefPtr<CefBrowser> browser,
     }
     open_url_in_new_tab(normalized, true);
     return true;
+}
+
+bool BrowserApp::is_devtools_url(const std::string &url) const
+{
+    if (url.empty()) return false;
+    return (url.rfind("chrome-devtools://", 0) == 0) || (url.rfind("devtools://", 0) == 0);
 }
 
 void BrowserApp::request_theme_color_for_tab(BrowserTab *tab)
@@ -295,9 +306,9 @@ class BrowserClient : public CefClient,
 	              command_id,
 	              last_context_x_,
 	              last_context_y_);
-	      if (tab_) {
-	        show_devtools_for_tab(tab_, last_context_x_, last_context_y_);
-	      }
+      if (tab_) {
+        BrowserApp::instance().show_devtools_for_tab(tab_, last_context_x_, last_context_y_);
+      }
 	      return true;
 	    }
 	    if (link_url.empty()) link_url = last_context_link_url_;
@@ -378,7 +389,7 @@ class BrowserClient : public CefClient,
             user_gesture ? 1 : 0,
             url.c_str());
     if (url.empty()) return false;
-    if (is_devtools_url(url)) {
+    if (BrowserApp::instance().is_devtools_url(url)) {
       fprintf(stderr, "[ck-browser] devtools url allowed (OnOpenURLFromTab)\n");
       return false;
     }
@@ -387,7 +398,7 @@ class BrowserClient : public CefClient,
     bool load_in_current = (target_disposition == CEF_WOD_CURRENT_TAB ||
                             target_disposition == CEF_WOD_SWITCH_TO_TAB ||
                             target_disposition == CEF_WOD_SINGLETON_TAB);
-    return route_url_through_ck_browser(browser, url, load_in_current);
+    return BrowserApp::instance().route_url_through_ck_browser(browser, url, load_in_current);
   }
 
   bool OnBeforeBrowse(CefRefPtr<CefBrowser> browser,
@@ -463,11 +474,11 @@ class BrowserClient : public CefClient,
             popupFeatures.height,
             popupFeatures.heightSet,
             popupFeatures.isPopup);
-    log_popup_features(popupFeatures);
+    BrowserApp::instance().log_popup_features(popupFeatures);
     if (url.empty()) {
       return false;
     }
-    if (is_devtools_url(url)) {
+    if (BrowserApp::instance().is_devtools_url(url)) {
       fprintf(stderr, "[ck-browser] devtools url allowed (OnBeforePopup)\n");
       return false;
     }
@@ -493,7 +504,7 @@ class BrowserClient : public CefClient,
         target_disposition == CEF_WOD_NEW_POPUP ||
         target_disposition == CEF_WOD_NEW_FOREGROUND_TAB ||
         target_disposition == CEF_WOD_NEW_BACKGROUND_TAB) {
-      return route_url_through_ck_browser(browser, url, false);
+      return BrowserApp::instance().route_url_through_ck_browser(browser, url, false);
     }
     return false;
   }
@@ -1013,92 +1024,31 @@ const char *code = R"JS(
   IMPLEMENT_REFCOUNTING(CkCefApp);
 };
 
- : 0;
-      if (value->IsString()) {
-        try {
-          double parsed = std::stod(value->GetStringValue().ToString());
-          return (int)std::round(parsed);
-        } catch (...) {
-          return fallback;
-        }
-      }
-      return fallback;
-    };
-    r = extract_number(v0, r);
-    g = extract_number(v1, g);
-    b = extract_number(v2, b);
-    std::string source_str;
-    CefRefPtr<CefV8Value> v3 = retval->GetValue(3);
-    if (v3 && v3->IsString()) {
-        // log the actual string
-        fprintf(stderr,
-                "[ck-renderer] theme color raw source string='%s' (v3)\n",
-                v3->GetStringValue().ToString().c_str());
-      source_str = v3->GetStringValue().ToString();
-    }
-    std::string raw_str;
-    CefRefPtr<CefV8Value> v4 = retval->GetValue(4);
-    if (v4 && v4->IsString()) {
-        fprintf(stderr,
-                "[ck-renderer] theme color raw color string='%s' (v4)\n",
-                v4->GetStringValue().ToString().c_str());
-      raw_str = v4->GetStringValue().ToString();
-    }
-    std::string ready_state;
-    CefRefPtr<CefV8Value> v5 = retval->GetValue(5);
-    if (v5 && v5->IsString()) {
-        fprintf(stderr,
-                "[ck-renderer] theme color ready state string='%s' (v5)\n",
-                v5->GetStringValue().ToString().c_str());
-      ready_state = v5->GetStringValue().ToString();
-    }
-    fprintf(stderr,
-            "[ck-browser] renderer theme color rgb=%d,%d,%d source=%s raw='%s' readyState=%s\n",
-            r,
-            g,
-            b,
-            source_str.empty() ? "fallback" : source_str.c_str(),
-            raw_str.empty() ? "(empty)" : raw_str.c_str(),
-            ready_state.empty() ? "unknown" : ready_state.c_str());
-    if (r < 0) r = 0;
-    if (g < 0) g = 0;
-    if (b < 0) b = 0;
-    if (r > 255) r = 255;
-    if (g > 255) g = 255;
-    if (b > 255) b = 255;
-
-    ctx->Exit();
-
-
-    CefRefPtr<CefProcessMessage> reply = CefProcessMessage::Create("ck_theme_color");
-    CefRefPtr<CefListValue> args = reply->GetArgumentList();
-    args->SetInt(0, r);
-    args->SetInt(1, g);
-    args->SetInt(2, b);
-    args->SetString(3, source_str.empty() ? "fallback" : source_str.c_str());
-    args->SetString(4, raw_str.empty() ? "#ffffff" : raw_str.c_str());
-    args->SetString(5, ready_state.empty() ? "unknown" : ready_state.c_str());
-    frame->SendProcessMessage(PID_BROWSER, reply);
-    return true;
-  }
-
-private:
-  IMPLEMENT_REFCOUNTING(CkCefApp);
-};
-
 CefRefPtr<CkCefApp> g_cef_app;
 
-CefRefPtr<BrowserClient> create_browser_client(BrowserTab *tab)
+CefRefPtr<CefApp> ensure_cef_app()
+{
+    if (!g_cef_app) {
+        g_cef_app = new CkCefApp();
+    }
+    return g_cef_app;
+}
+
+// BrowserClient is defined in this translation unit, so conversions are safe here.
+CefRefPtr<CefClient> create_browser_client(BrowserTab *tab)
 {
     return new BrowserClient(tab);
 }
 
-void detach_browser_client(const CefRefPtr<BrowserClient> &client)
+void detach_browser_client(const CefRefPtr<CefClient> &client)
 {
-    if (client) {
-        client->detach_tab();
+    if (!client) return;
+    BrowserClient *browser_client = static_cast<BrowserClient *>(client.get());
+    if (browser_client) {
+        browser_client->detach_tab();
     }
 }
+
 bool BrowserApp::build_path_from_dir(const char *dir, const char *suffix, char *buffer, size_t buffer_len) const
 {
     if (!buffer || buffer_len == 0) return false;
@@ -1477,7 +1427,8 @@ bool BrowserApp::initialize_cef(const BrowserPreflightState &preflight,
         fprintf(stderr, "[ck-browser] root_cache_path=%s\n", cache_path.c_str());
     }
     report_cef_resource_status(resources_path, selected_locales ? selected_locales : "");
-    CefMainArgs main_args((int)preflight.cef_argv.size(), preflight.cef_argv.data());
+    std::vector<char *> cef_argv_copy = preflight.cef_argv;
+    CefMainArgs main_args((int)cef_argv_copy.size(), cef_argv_copy.data());
     dump_cef_env_and_args(main_args.argc, main_args.argv);
     fprintf(stderr, "[ck-browser] calling CefInitialize\n");
     bool cef_ok = CefInitialize(main_args, settings, g_cef_app, nullptr);

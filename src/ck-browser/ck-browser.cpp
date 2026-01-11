@@ -99,7 +99,6 @@ static void log_function_entry(const char *func, const char *fmt, ...)
 
 #define LOG_ENTER(fmt, ...) log_function_entry(__func__, fmt, ##__VA_ARGS__)
 
-struct BrowserTab;
 static XtAppContext g_app = NULL;
 static Widget g_toplevel = NULL;
 static Widget g_tab_stack = NULL;
@@ -123,58 +122,15 @@ static Widget g_file_open_dialog = NULL;
 static std::string g_file_open_last_dir;
 static bool g_tab_sync_scheduled = false;
 static std::string g_homepage_url;
+static char g_subprocess_path[PATH_MAX] = "";
 static Widget g_tab_header_menu = NULL;
 static BrowserTab *g_tab_header_menu_target = NULL;
-class BrowserClient;
-class DevToolsClient;
 static bool g_tab_handlers_attached = false;
 static SessionData *g_session_data = NULL;
 static bool g_session_loaded = false;
 static bool g_cef_initialized = false;
 static bool g_shutdown_requested = false;
 static int g_shutdown_pending_browsers = 0;
-
-struct BrowserTab {
-    Widget page = NULL;
-    Widget browser_area = NULL;
-    std::string base_title;
-    std::string title_full;
-    std::string pending_url;
-    std::string current_url;
-    CefRefPtr<CefBrowser> browser;
-    CefRefPtr<BrowserClient> client;
-    bool create_scheduled = false;
-    bool can_go_back = false;
-    bool can_go_forward = false;
-    std::string status_message;
-    double zoom_level = 0.0;
-    std::string security_status;
-    std::string favicon_url;
-    Pixmap favicon_toolbar_pixmap = None;
-    int favicon_toolbar_size = 0;
-    Pixmap favicon_window_pixmap = None;
-    Pixmap favicon_window_mask = None;
-    int favicon_window_size = 0;
-    bool tab_default_colors_initialized = false;
-    Pixel tab_default_background = 0;
-    Pixel tab_default_foreground = 0;
-    bool has_theme_color = false;
-    unsigned char theme_r = 0;
-    unsigned char theme_g = 0;
-    unsigned char theme_b = 0;
-    int theme_color_retry_count = 0;
-    bool theme_color_retry_scheduled = false;
-    int theme_color_ready_retry_count = 0;
-    Widget devtools_shell = NULL;
-    Widget devtools_area = NULL;
-    CefRefPtr<CefBrowser> devtools_browser;
-    CefRefPtr<DevToolsClient> devtools_client;
-    int devtools_inspect_x = 0;
-    int devtools_inspect_y = 0;
-    bool devtools_show_scheduled = false;
-    bool loading = false;
-    std::string current_host;
-};
 
 struct FaviconCacheEntry {
     std::vector<unsigned char> data;
@@ -282,9 +238,8 @@ static const char *display_url_for_tab(const BrowserTab *tab);
 void update_url_field_for_tab(BrowserTab *tab);
 void load_url_for_tab(BrowserTab *tab, const std::string &url);
 void select_tab_page(BrowserTab *tab);
-bool is_devtools_url(const std::string &url);
 static bool is_url_parseable(const std::string &url);
-void show_devtools_for_tab(BrowserTab *tab, int inspect_x, int inspect_y);
+static void show_devtools_for_tab_impl(BrowserTab *tab, int inspect_x, int inspect_y);
 static void start_devtools_browser_cb(XtPointer client_data, XtIntervalId *id);
 static char *xm_name(const char *name);
 static void on_tab_destroyed(Widget w, XtPointer client_data, XtPointer call_data);
@@ -365,8 +320,6 @@ static void clear_bookmark_menu_icon_pixmaps();
 static void bookmark_manager_free_entry_pixmaps(BookmarkManagerContext *ctx);
 static void bookmark_manager_clear_entry_widgets(BookmarkManagerContext *ctx);
 static void bookmark_manager_entry_activate_cb(Widget w, XtPointer client_data, XtPointer call_data);
-static void clear_tab_favicon(BrowserTab *tab);
-static std::string extract_host_from_url(const std::string &url);
 static void show_invalid_url_dialog(const char *text);
 static void set_reload_button_label(const char *text);
 void update_reload_button_for_tab(BrowserTab *tab);
@@ -401,15 +354,14 @@ static void bookmark_manager_refresh_group_list(BookmarkManagerContext *ctx, Boo
 static void update_bookmark_manager_group_controls(BookmarkManagerContext *ctx);
 static void show_bookmark_manager_dialog();
 static void set_security_label_text(const char *text);
-static void update_security_controls(BrowserTab *tab);
-static void update_tab_security_status(BrowserTab *tab);
 static void focus_motif_widget(Widget widget);
 static void browser_set_focus(BrowserTab *tab, bool focus);
 static void on_url_focus(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_url_button_press(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch);
 static void on_browser_area_button_press(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch);
 static Widget pick_adjacent_tab_page(Widget current_page);
-static void focus_browser_area(BrowserTab *tab);
+void clear_tab_favicon(BrowserTab *tab);
+std::string extract_host_from_url(const std::string &url);
 static Widget find_tab_stack_tabbox(Widget tab_stack);
 static void sync_current_tab_cb(XtPointer client_data, XtIntervalId *id);
 static void sync_current_tab_timeout_cb(XtPointer client_data, XtIntervalId *id);
@@ -869,12 +821,6 @@ static bool is_url_parseable(const std::string &url)
     return CefParseURL(cef_url, parts);
 }
 
-bool is_devtools_url(const std::string &url)
-{
-    if (url.empty()) return false;
-    return (url.rfind("chrome-devtools://", 0) == 0) || (url.rfind("devtools://", 0) == 0);
-}
-
 static void devtools_resize_timer_cb(XtPointer client_data, XtIntervalId *id)
 {
     (void)id;
@@ -946,7 +892,12 @@ static void start_devtools_browser_cb(XtPointer client_data, XtIntervalId *id)
     }
 }
 
-void show_devtools_for_tab(BrowserTab *tab, int inspect_x, int inspect_y)
+void BrowserApp::show_devtools_for_tab(BrowserTab *tab, int inspect_x, int inspect_y)
+{
+    show_devtools_for_tab_impl(tab, inspect_x, inspect_y);
+}
+
+static void show_devtools_for_tab_impl(BrowserTab *tab, int inspect_x, int inspect_y)
 {
     if (!tab || !tab->browser || !g_toplevel) return;
     CefRefPtr<CefBrowserHost> host = tab->browser->GetHost();
@@ -6370,12 +6321,10 @@ bool parse_startup_url_arg(int argc, char *argv[], std::string *out_url)
 
 int start_ui_and_cef_loop(int argc, char *argv[], BrowserApp &app_controller)
 {
-    if (!g_cef_app) {
-        g_cef_app = new CkCefApp();
-    }
+    CefRefPtr<CefApp> cef_app = ensure_cef_app();
 
     BrowserPreflightState preflight;
-    int preflight_exit = app_controller.run_cef_preflight(argc, argv, g_cef_app, &preflight);
+    int preflight_exit = app_controller.run_cef_preflight(argc, argv, cef_app, &preflight);
     if (preflight_exit >= 0) {
         return preflight_exit;
     }
@@ -6540,3 +6489,6 @@ int start_ui_and_cef_loop(int argc, char *argv[], BrowserApp &app_controller)
     app_controller.shutdown_cef();
     return 0;
 }
+void update_security_controls(BrowserTab *tab);
+void update_tab_security_status(BrowserTab *tab);
+void focus_browser_area(BrowserTab *tab);

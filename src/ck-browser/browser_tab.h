@@ -10,7 +10,6 @@
 #include <string>
 #include <vector>
 
-class BrowserClient;
 class DevToolsClient;
 
 struct BrowserTab {
@@ -21,7 +20,7 @@ struct BrowserTab {
     std::string pending_url;
     std::string current_url;
     CefRefPtr<CefBrowser> browser;
-    CefRefPtr<BrowserClient> client;
+    CefRefPtr<CefClient> client;
     bool create_scheduled = false;
     bool can_go_back = false;
     bool can_go_forward = false;

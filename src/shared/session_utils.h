@@ -11,7 +11,7 @@ typedef struct SessionKV {
     struct SessionKV *next;
 } SessionKV;
 
-typedef struct {
+typedef struct SessionData {
     char *session_id; /* duplicated from argv */
     SessionKV *items;
 } SessionData;

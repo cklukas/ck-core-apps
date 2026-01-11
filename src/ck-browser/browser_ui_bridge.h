@@ -3,16 +3,12 @@
 
 #include <include/cef_browser.h>
 #include <include/cef_client.h>
-#include <include/cef_popup_features.h>
 #include <string>
 
 struct BrowserTab;
 
 // Bridge header that documents the UI helpers BrowserClient eventually needs.
-void show_devtools_for_tab(BrowserTab *tab, int inspect_x, int inspect_y);
 std::string normalize_url(const char *input);
-bool is_devtools_url(const std::string &url);
-void log_popup_features(const CefPopupFeatures &features);
 void spawn_new_browser_window(const std::string &url);
 void open_url_in_new_tab(const std::string &url, bool select);
 void request_favicon_download(BrowserTab *tab, const char *reason);
@@ -34,9 +30,6 @@ BrowserTab *get_selected_tab();
 BrowserTab *get_current_tab();
 void clear_tab_favicon(BrowserTab *tab);
 std::string extract_host_from_url(const std::string &url);
-bool route_url_through_ck_browser(CefRefPtr<CefBrowser> browser,
-                                  const std::string &url,
-                                  bool allow_existing_tab);
 void select_tab_page(BrowserTab *tab);
 void load_url_for_tab(BrowserTab *tab, const std::string &url);
 void resize_devtools_to_area(BrowserTab *tab, const char *reason);

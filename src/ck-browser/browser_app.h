@@ -5,13 +5,16 @@
 #include <string>
 #include <vector>
 
-template <typename T> class CefRefPtr;
-class CefApp;
-class CkCefApp;
+#include <include/cef_app.h>
+#include <include/cef_client.h>
+#include <include/internal/cef_types_wrappers.h>
 
+class CkCefApp;
 extern CefRefPtr<CkCefApp> g_cef_app;
+CefRefPtr<CefApp> ensure_cef_app();
 class BrowserClient;
 struct BrowserTab;
+struct SessionData;
 struct BrowserPaths {
     std::string resources_path;
     std::string locales_path;
@@ -58,14 +61,21 @@ public:
                         const char *subprocess_path);
     void shutdown_cef() const;
     void request_theme_color_for_tab(BrowserTab *tab);
+    void show_devtools_for_tab(BrowserTab *tab, int inspect_x, int inspect_y);
 
 private:
+    friend class BrowserClient;
     BrowserApp() = default;
+    void log_popup_features(const CefPopupFeatures &features) const;
+    bool route_url_through_ck_browser(CefRefPtr<CefBrowser> browser,
+                                      const std::string &url,
+                                      bool allow_existing_tab) const;
+    bool is_devtools_url(const std::string &url) const;
 };
 
 int start_ui_and_cef_loop(int argc, char *argv[], BrowserApp &app_controller);
 
-CefRefPtr<BrowserClient> create_browser_client(BrowserTab *tab);
-void detach_browser_client(const CefRefPtr<BrowserClient> &client);
+CefRefPtr<CefClient> create_browser_client(BrowserTab *tab);
+void detach_browser_client(const CefRefPtr<CefClient> &client);
 
 #endif // CK_BROWSER_BROWSER_APP_H

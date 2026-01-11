@@ -62,6 +62,10 @@
   - [x] Delegate tab selection (`set_current_tab`/`select_tab_page`) to `TabManager` so event code talks through the manager (added TabManager selection handler and registered `tab_selection_handler`).
   - [x] Move toolbar/tab-stack helpers (`schedule_tab_browser_creation` scheduling) into `TabManager` once the basic creation/selection APIs are in place (introduced `scheduleBrowserCreation`).
   - [ ] Relocate navigation/reload handling, zoom controls, and favicon/icon cache updates into `TabManager` methods so BrowserApp can manipulate tabs through a clean interface.
+    - [x] Move navigation button wiring and the back/forward helpers into `TabManager`.
+    - [x] Move reload/stop button behavior and state updates into `TabManager`.
+    - [x] Move zoom controls, button updates, and polling into `TabManager`.
+    - [ ] Move favicon cache management and toolbar/icon updates into `TabManager`.
   - [ ] Wire the new `TabManager` API into `BrowserApp`, BrowserClient, and UI callbacks, keeping the old globals behind the manager.
 - [ ] Provide APIs such as `loadUrl`, `openNewTab`, `currentTab`, and `selectTab` so `BrowserApp` and UI builders can work with tabs via a clean interface.
 - [ ] Keep toolbox helpers (status text, URL field updates, toolbar icon management) here instead of in the main file.

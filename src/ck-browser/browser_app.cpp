@@ -1,6 +1,7 @@
 #include "browser_app.h"
 #include "browser_tab.h"
 #include "browser_ui_bridge.h"
+#include "tab_manager.h"
 
 #include <cstdio>
 #include <dirent.h>
@@ -253,7 +254,7 @@ void BrowserApp::handle_tab_load_start(BrowserTab *tab, const std::string &url)
     tab->theme_color_ready_retry_count = 0;
     if (tab == get_current_tab()) {
         update_url_field_for_tab(tab);
-        update_reload_button_for_tab(tab);
+        TabManager::instance().updateReloadButton(tab);
     }
 }
 
@@ -338,8 +339,8 @@ void BrowserApp::handle_tab_loading_state_change(BrowserTab *tab,
         }
     }
     if (tab == current) {
-        update_navigation_buttons(tab);
-        update_reload_button_for_tab(tab);
+        TabManager::instance().updateNavigationButtons(tab);
+        TabManager::instance().updateReloadButton(tab);
     }
 }
 

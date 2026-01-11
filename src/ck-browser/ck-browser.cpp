@@ -115,10 +115,6 @@ static Widget g_home_button = NULL;
 static Widget g_home_button_menu = NULL;
 static Widget g_status_message_label = NULL;
 static Widget g_security_label = NULL;
-static Widget g_zoom_label = NULL;
-static Widget g_zoom_minus_button = NULL;
-static Widget g_zoom_plus_button = NULL;
-static Widget g_reload_button = NULL;
 static Widget g_file_open_dialog = NULL;
 static std::string g_file_open_last_dir;
 static bool g_tab_sync_scheduled = false;
@@ -290,15 +286,12 @@ static void on_open_file_menu(Widget w, XtPointer client_data, XtPointer call_da
 static void on_file_open_dialog_ok(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_file_open_dialog_cancel(Widget w, XtPointer client_data, XtPointer call_data);
 void set_status_label_text(const char *text);
-void update_navigation_buttons(BrowserTab *tab);
 void update_tab_label(BrowserTab *tab, const char *text);
 void update_all_tab_labels(const char *reason);
 static void log_widget_size(const char *context, Widget widget);
 static void on_main_window_resize(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_tab_stack_resize(Widget w, XtPointer client_data, XtPointer call_data);
 static void resize_cef_browser_to_area(BrowserTab *tab, const char *reason);
-static void update_zoom_controls(BrowserTab *tab);
-static void poll_zoom_levels();
 static void on_zoom_reset(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_zoom_in(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_zoom_out(Widget w, XtPointer client_data, XtPointer call_data);
@@ -351,8 +344,6 @@ static void bookmark_manager_free_entry_pixmaps(BookmarkManagerContext *ctx);
 static void bookmark_manager_clear_entry_widgets(BookmarkManagerContext *ctx);
 static void bookmark_manager_entry_activate_cb(Widget w, XtPointer client_data, XtPointer call_data);
 static void show_invalid_url_dialog(const char *text);
-static void set_reload_button_label(const char *text);
-void update_reload_button_for_tab(BrowserTab *tab);
 static void write_netscape_bookmarks(FILE *f, BookmarkGroup *root);
 static void write_group_contents(FILE *f, BookmarkGroup *group, int indent);
 static void parse_netscape_bookmarks(const std::string &content, BookmarkGroup *root);
@@ -385,7 +376,7 @@ static void update_bookmark_manager_group_controls(BookmarkManagerContext *ctx);
 static void show_bookmark_manager_dialog();
 static void set_security_label_text(const char *text);
 static void focus_motif_widget(Widget widget);
-static void browser_set_focus(BrowserTab *tab, bool focus);
+void browser_set_focus(BrowserTab *tab, bool focus);
 static void on_url_focus(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_url_button_press(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch);
 void on_browser_area_button_press(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch);
@@ -1295,92 +1286,6 @@ static void log_widget_size(const char *context, Widget widget)
     fprintf(stderr, "[ck-browser] %s size %dx%d\n", context, (int)width, (int)height);
 }
 
-void update_navigation_buttons(BrowserTab *tab)
-{
-    if (g_back_button) {
-        XtSetSensitive(g_back_button, tab && tab->can_go_back);
-    }
-    if (g_forward_button) {
-        XtSetSensitive(g_forward_button, tab && tab->can_go_forward);
-    }
-    if (g_nav_back) {
-        XtSetSensitive(g_nav_back, tab && tab->can_go_back);
-    }
-    if (g_nav_forward) {
-        XtSetSensitive(g_nav_forward, tab && tab->can_go_forward);
-    }
-}
-
-static int zoom_percent_from_level(double level)
-{
-    const double kStepFactor = 1.0954451150103321;  // sqrt(1.2)
-    int steps = (int)(level * 2.0 + (level >= 0 ? 0.5 : -0.5));  // round to 0.5 increments
-    double factor = 1.0;
-    if (steps > 0) {
-        for (int i = 0; i < steps; ++i) {
-            factor *= kStepFactor;
-        }
-    } else if (steps < 0) {
-        for (int i = 0; i < -steps; ++i) {
-            factor /= kStepFactor;
-        }
-    }
-    int percent = (int)(factor * 100.0 + 0.5);
-    if (percent < 25) percent = 25;
-    if (percent > 500) percent = 500;
-    return percent;
-}
-
-static void update_zoom_controls(BrowserTab *tab)
-{
-    if (!g_zoom_label) return;
-    double level = tab ? tab->zoom_level : 0.0;
-    int percent = zoom_percent_from_level(level);
-    char buf[64];
-    snprintf(buf, sizeof(buf), "Zoom: %d%%", percent);
-    XmString xm_text = make_string(buf);
-    XtVaSetValues(g_zoom_label, XmNlabelString, xm_text, NULL);
-    XmStringFree(xm_text);
-}
-
-static void poll_zoom_levels()
-{
-    static int tick = 0;
-    tick++;
-    if ((tick % 20) != 0) {  // ~200ms
-        return;
-    }
-    const auto &tabs = TabManager::instance().tabs();
-    BrowserTab *current_tab = TabManager::instance().currentTab();
-    for (const auto &entry : tabs) {
-        BrowserTab *tab = entry.get();
-        if (!tab || !tab->browser) continue;
-        CefRefPtr<CefBrowserHost> host = tab->browser->GetHost();
-        if (!host) continue;
-        double current = host->GetZoomLevel();
-        double diff = current - tab->zoom_level;
-        if (diff < 0) diff = -diff;
-        if (diff > 1e-6) {
-            tab->zoom_level = current;
-            if (tab == current_tab) {
-                update_zoom_controls(tab);
-            }
-        }
-    }
-}
-
-static void set_tab_zoom_level(BrowserTab *tab, double level)
-{
-    if (!tab || !tab->browser) return;
-    CefRefPtr<CefBrowserHost> host = tab->browser->GetHost();
-    if (!host) return;
-    host->SetZoomLevel(level);
-    tab->zoom_level = level;
-    if (tab == TabManager::instance().currentTab()) {
-        update_zoom_controls(tab);
-    }
-}
-
 static void on_zoom_reset(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
@@ -1390,7 +1295,7 @@ static void on_zoom_reset(Widget w, XtPointer client_data, XtPointer call_data)
     if (!tab) return;
     set_current_tab(tab);
     browser_set_focus(tab, false);
-    set_tab_zoom_level(tab, 0.0);
+    TabManager::instance().zoomReset(tab);
 }
 
 static void on_zoom_in(Widget w, XtPointer client_data, XtPointer call_data)
@@ -1402,7 +1307,7 @@ static void on_zoom_in(Widget w, XtPointer client_data, XtPointer call_data)
     if (!tab) return;
     set_current_tab(tab);
     browser_set_focus(tab, false);
-    set_tab_zoom_level(tab, tab->zoom_level + 0.5);
+    TabManager::instance().zoomIn(tab);
 }
 
 static void on_zoom_out(Widget w, XtPointer client_data, XtPointer call_data)
@@ -1414,7 +1319,7 @@ static void on_zoom_out(Widget w, XtPointer client_data, XtPointer call_data)
     if (!tab) return;
     set_current_tab(tab);
     browser_set_focus(tab, false);
-    set_tab_zoom_level(tab, tab->zoom_level - 0.5);
+    TabManager::instance().zoomOut(tab);
 }
 
 static bool tab_is_alive(const BrowserTab *tab)
@@ -1968,22 +1873,6 @@ void update_favicon_controls(BrowserTab *tab)
     }
 }
 
-static void
-set_reload_button_label(const char *text)
-{
-    if (!g_reload_button) return;
-    XmString xm_label = make_string(text ? text : "");
-    XtVaSetValues(g_reload_button, XmNlabelString, xm_label, NULL);
-    XmStringFree(xm_label);
-}
-
-void
-update_reload_button_for_tab(BrowserTab *tab)
-{
-    bool loading = tab && tab->loading;
-    set_reload_button_label(loading ? "Stop" : "Reload");
-}
-
 void
 clear_tab_favicon(BrowserTab *tab)
 {
@@ -2414,11 +2303,8 @@ static void on_back(Widget w, XtPointer client_data, XtPointer call_data)
     (void)client_data;
     (void)call_data;
     BrowserTab *tab = get_selected_tab();
-    if (!tab || !tab->browser) return;
-    browser_set_focus(tab, false);
-    if (tab->browser->CanGoBack()) {
-        tab->browser->GoBack();
-    }
+    if (!tab) return;
+    TabManager::instance().goBack(tab);
 }
 
 static void on_forward(Widget w, XtPointer client_data, XtPointer call_data)
@@ -2427,11 +2313,8 @@ static void on_forward(Widget w, XtPointer client_data, XtPointer call_data)
     (void)client_data;
     (void)call_data;
     BrowserTab *tab = get_selected_tab();
-    if (!tab || !tab->browser) return;
-    browser_set_focus(tab, false);
-    if (tab->browser->CanGoForward()) {
-        tab->browser->GoForward();
-    }
+    if (!tab) return;
+    TabManager::instance().goForward(tab);
 }
 
 static void on_reload(Widget w, XtPointer client_data, XtPointer call_data)
@@ -2440,8 +2323,7 @@ static void on_reload(Widget w, XtPointer client_data, XtPointer call_data)
     (void)client_data;
     (void)call_data;
     BrowserTab *tab = get_selected_tab();
-    if (!tab || !tab->browser) return;
-    browser_set_focus(tab, false);
+    if (!tab) return;
     Dimension width = 0, height = 0;
     if (tab->browser_area) {
         XtVaGetValues(tab->browser_area, XmNwidth, &width, XmNheight, &height, NULL);
@@ -2462,15 +2344,7 @@ static void on_reload(Widget w, XtPointer client_data, XtPointer call_data)
         log_widget_size("main window (reload)", g_toplevel);
     }
     resize_cef_browser_to_area(tab, "reload");
-    if (tab->loading) {
-        tab->browser->StopLoad();
-        tab->loading = false;
-        if (tab == TabManager::instance().currentTab()) {
-            update_reload_button_for_tab(tab);
-        }
-    } else {
-        tab->browser->Reload();
-    }
+    TabManager::instance().reloadTab(tab);
 }
 
 static void on_home(Widget w, XtPointer client_data, XtPointer call_data)
@@ -2655,7 +2529,7 @@ bool TabScheduler::create_cef_browser_for_tab(BrowserTab *tab)
 void TabScheduler::run_cef_message_pump()
 {
     CefDoMessageLoopWork();
-    poll_zoom_levels();
+    TabManager::instance().pollZoomLevels();
     if (app_) {
         XtAppAddTimeOut(app_, 10, cef_message_pump_cb, this);
     }
@@ -2763,7 +2637,7 @@ static void focus_motif_widget(Widget widget)
     }
 }
 
-static void browser_set_focus(BrowserTab *tab, bool focus)
+void browser_set_focus(BrowserTab *tab, bool focus)
 {
     if (!tab || !tab->browser) return;
     CefRefPtr<CefBrowserHost> host = tab->browser->GetHost();
@@ -3450,8 +3324,8 @@ static void tab_selection_handler(BrowserTab *tab, BrowserTab *previous)
     } else {
         set_status_label_text(NULL);
     }
-    update_navigation_buttons(tab);
-    update_reload_button_for_tab(tab);
+    TabManager::instance().updateNavigationButtons(tab);
+    TabManager::instance().updateReloadButton(tab);
     update_security_controls(tab);
     update_favicon_controls(tab);
     if (tab && tab->browser) {
@@ -3460,7 +3334,7 @@ static void tab_selection_handler(BrowserTab *tab, BrowserTab *previous)
             tab->zoom_level = host->GetZoomLevel();
         }
     }
-    update_zoom_controls(tab);
+    TabManager::instance().updateZoomControls(tab);
 }
 
 static void on_tab_selection_changed(Widget w, XtPointer client_data, XtPointer call_data)
@@ -5998,11 +5872,17 @@ static Widget create_toolbar(Widget parent, Widget attach_top)
     XtAddCallback(forward_button, XmNactivateCallback, on_forward, NULL);
     g_forward_button = forward_button;
 
+    TabManager::instance().registerNavigationWidgets(back_button,
+                                                     forward_button,
+                                                     g_nav_back,
+                                                     g_nav_forward);
+
     XmString reload_label = make_string("Reload");
     Widget reload_button = XtVaCreateManagedWidget("reloadButton", xmPushButtonWidgetClass, button_row,
                             XmNlabelString, reload_label, NULL);
     XmStringFree(reload_label);
     XtAddCallback(reload_button, XmNactivateCallback, on_reload, NULL);
+    TabManager::instance().registerReloadButton(reload_button);
 
     XmString home_label = make_string("Home");
     Widget home_button = XtVaCreateManagedWidget("homeButton", xmPushButtonWidgetClass, button_row,
@@ -6109,7 +5989,6 @@ static Widget create_zoom_segment(Widget parent)
                                                NULL);
     XmStringFree(minus_label);
     XtAddCallback(minus_btn, XmNactivateCallback, on_zoom_out, NULL);
-    g_zoom_minus_button = minus_btn;
 
     XmString zoom_label = make_string("Zoom: 100%");
     Widget zoom_btn = XtVaCreateManagedWidget("zoomReset", xmPushButtonGadgetClass, row,
@@ -6120,7 +5999,6 @@ static Widget create_zoom_segment(Widget parent)
                                               NULL);
     XmStringFree(zoom_label);
     XtAddCallback(zoom_btn, XmNactivateCallback, on_zoom_reset, NULL);
-    g_zoom_label = zoom_btn;
 
     XmString plus_label = make_string("+");
     Widget plus_btn = XtVaCreateManagedWidget("zoomPlus", xmPushButtonGadgetClass, row,
@@ -6130,7 +6008,8 @@ static Widget create_zoom_segment(Widget parent)
                                               NULL);
     XmStringFree(plus_label);
     XtAddCallback(plus_btn, XmNactivateCallback, on_zoom_in, NULL);
-    g_zoom_plus_button = plus_btn;
+
+    TabManager::instance().registerZoomControls(zoom_btn, minus_btn, plus_btn);
 
     return frame;
 }

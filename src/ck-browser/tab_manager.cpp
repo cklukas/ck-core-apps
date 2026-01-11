@@ -7,10 +7,33 @@
 #include <X11/Intrinsic.h>
 #include <X11/Xlib.h>
 
+#include <cstdio>
+
 #include <algorithm>
-#include <utility>
 
 #include "browser_ui_bridge.h"
+
+namespace {
+int zoom_percent_from_level(double level)
+{
+    const double kStepFactor = 1.0954451150103321;  // sqrt(1.2)
+    int steps = (int)(level * 2.0 + (level >= 0 ? 0.5 : -0.5));
+    double factor = 1.0;
+    if (steps > 0) {
+        for (int i = 0; i < steps; ++i) {
+            factor *= kStepFactor;
+        }
+    } else if (steps < 0) {
+        for (int i = 0; i < -steps; ++i) {
+            factor /= kStepFactor;
+        }
+    }
+    int percent = (int)(factor * 100.0 + 0.5);
+    if (percent < 25) percent = 25;
+    if (percent > 500) percent = 500;
+    return percent;
+}
+}  // namespace
 
 extern const char *kInitialBrowserUrl;
 extern void on_tab_destroyed(Widget w, XtPointer client_data, XtPointer call_data);
@@ -101,6 +124,158 @@ void TabManager::selectTab(BrowserTab *tab)
     if (selection_handler_) {
         selection_handler_(tab, previous);
     }
+}
+
+void TabManager::registerNavigationWidgets(Widget back_button,
+                                          Widget forward_button,
+                                          Widget nav_back,
+                                          Widget nav_forward)
+{
+    back_button_ = back_button;
+    forward_button_ = forward_button;
+    nav_back_button_ = nav_back;
+    nav_forward_button_ = nav_forward;
+    updateNavigationButtons(current_tab_);
+}
+
+void TabManager::updateNavigationButtons(BrowserTab *tab)
+{
+    bool can_back = tab && tab->can_go_back;
+    bool can_forward = tab && tab->can_go_forward;
+
+    auto update_state = [](Widget widget, bool enabled) {
+        if (!widget) return;
+        XtSetSensitive(widget, enabled ? True : False);
+    };
+
+    update_state(back_button_, can_back);
+    update_state(forward_button_, can_forward);
+    update_state(nav_back_button_, can_back);
+    update_state(nav_forward_button_, can_forward);
+}
+
+void TabManager::goBack(BrowserTab *tab)
+{
+    if (!tab || !tab->browser) return;
+    browser_set_focus(tab, False);
+    if (tab->browser->CanGoBack()) {
+        tab->browser->GoBack();
+    }
+}
+
+void TabManager::goForward(BrowserTab *tab)
+{
+    if (!tab || !tab->browser) return;
+    browser_set_focus(tab, False);
+    if (tab->browser->CanGoForward()) {
+        tab->browser->GoForward();
+    }
+}
+
+void TabManager::registerReloadButton(Widget reload_button)
+{
+    reload_button_ = reload_button;
+    updateReloadButton(current_tab_);
+}
+
+void TabManager::updateReloadButton(BrowserTab *tab)
+{
+    if (!reload_button_) return;
+    bool loading = tab && tab->loading;
+    const char *label = loading ? "Stop" : "Reload";
+    XmString xm_label = XmStringCreateLocalized(label);
+    XtVaSetValues(reload_button_, XmNlabelString, xm_label, NULL);
+    XmStringFree(xm_label);
+}
+
+void TabManager::reloadTab(BrowserTab *tab)
+{
+    if (!tab || !tab->browser) return;
+    browser_set_focus(tab, False);
+    if (tab->loading) {
+        tab->browser->StopLoad();
+        tab->loading = false;
+    } else {
+        tab->browser->Reload();
+    }
+    if (tab == current_tab_) {
+        updateReloadButton(tab);
+    }
+}
+
+void TabManager::registerZoomControls(Widget zoom_label, Widget zoom_minus, Widget zoom_plus)
+{
+    zoom_label_ = zoom_label;
+    zoom_minus_button_ = zoom_minus;
+    zoom_plus_button_ = zoom_plus;
+    updateZoomControls(current_tab_);
+}
+
+void TabManager::updateZoomControls(BrowserTab *tab)
+{
+    if (!zoom_label_) return;
+    double level = tab ? tab->zoom_level : 0.0;
+    int percent = zoom_percent_from_level(level);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "Zoom: %d%%", percent);
+    XmString xm_text = XmStringCreateLocalized((String)buf);
+    XtVaSetValues(zoom_label_, XmNlabelString, xm_text, NULL);
+    XmStringFree(xm_text);
+}
+
+void TabManager::pollZoomLevels()
+{
+    static int tick = 0;
+    tick++;
+    if ((tick % 20) != 0) {
+        return;
+    }
+    BrowserTab *current_tab = currentTab();
+    for (const auto &entry : tabs_) {
+        BrowserTab *tab = entry.get();
+        if (!tab || !tab->browser) continue;
+        CefRefPtr<CefBrowserHost> host = tab->browser->GetHost();
+        if (!host) continue;
+        double current = host->GetZoomLevel();
+        double diff = current - tab->zoom_level;
+        if (diff < 0) diff = -diff;
+        if (diff > 1e-6) {
+            tab->zoom_level = current;
+            if (tab == current_tab) {
+                updateZoomControls(tab);
+            }
+        }
+    }
+}
+
+void TabManager::setTabZoomLevel(BrowserTab *tab, double level)
+{
+    if (!tab || !tab->browser) return;
+    CefRefPtr<CefBrowserHost> host = tab->browser->GetHost();
+    if (!host) return;
+    host->SetZoomLevel(level);
+    tab->zoom_level = level;
+    if (tab == current_tab_) {
+        updateZoomControls(tab);
+    }
+}
+
+void TabManager::zoomReset(BrowserTab *tab)
+{
+    if (!tab) return;
+    setTabZoomLevel(tab, 0.0);
+}
+
+void TabManager::zoomIn(BrowserTab *tab)
+{
+    if (!tab) return;
+    setTabZoomLevel(tab, tab->zoom_level + 0.5);
+}
+
+void TabManager::zoomOut(BrowserTab *tab)
+{
+    if (!tab) return;
+    setTabZoomLevel(tab, tab->zoom_level - 0.5);
 }
 
 void TabManager::scheduleBrowserCreation(BrowserTab *tab)

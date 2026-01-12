@@ -71,15 +71,19 @@
 - [x] Keep toolbox helpers (status text, URL field updates, toolbar icon management) here instead of in the main file.
 
 ## Phase 3 – `BookmarkManager`
-- [ ] Port the `BookmarkEntry/Group` data structures, Netscape parsing/serialization, icon cache, and the menu rebuild logic into `bookmark_manager.*`.
-  - [ ] Create `bookmark_manager.h`/`bookmark_manager.cpp` that own the bookmark tree, file I/O helpers, and the core types so `ck-browser.cpp` no longer declares the global state.
-  - [ ] Move the Netscape parsing/serialization, file monitor, and icon cache helpers into the new module and export a focused API for load/save/rebuild.
-  - [ ] Keep UI menu/dialog wiring in `ck-browser.cpp` for now, but call `BookmarkManager` helpers instead of manipulating bookmark globals directly.
-- [ ] Expose methods for adding/updating bookmarks, moving entries between folders, renaming/deleting folders, and returning favorites/groups for UI consumption.
-- [ ] Keep file-path, serialization, and caching details internal; only expose high-level mutation and query APIs.
+- [x] Port the `BookmarkEntry/Group` data structures, Netscape parsing/serialization, icon cache, and the menu rebuild logic into `bookmark_manager.*`.
+  - [x] Create `bookmark_manager.h`/`bookmark_manager.cpp` that own the bookmark tree, file I/O helpers, and the core types so `ck-browser.cpp` no longer declares the global state.
+  - [x] Move the Netscape parsing/serialization, file monitor, and icon cache helpers into the new module and export a focused API for load/save/rebuild.
+  - [x] Keep UI menu/dialog wiring in `ck-browser.cpp` for now, but call `BookmarkManager` helpers instead of manipulating bookmark globals directly.
+- [x] Expose methods for adding/updating bookmarks, moving entries between folders, renaming/deleting folders, and returning favorites/groups for UI consumption.
+- [x] Keep file-path, serialization, and caching details internal; only expose high-level mutation and query APIs.
 
 ## Phase 4 – `UiBuilder`
 - [ ] Factor all menu/tab bar builders, dialogs (Add Bookmark, Bookmark Manager), and widget helpers into `ui_builder.*`, using `TabManager`/`BookmarkManager` APIs for data.
+  - [ ] Add a new `ui_builder.h`/`ui_builder.cpp` that exposes builders for menus, toolbars, and dialogs.
+  - [ ] Move the existing menu/tab bar creation helpers (`create_menu_bar`, `create_toolbar`, `create_status_bar`, navigation menu code) into `ui_builder`.
+  - [ ] Relocate the bookmark dialogs (`show_add_bookmark_dialog`, `show_bookmark_manager_dialog`, related callbacks) and their context structs into the new module.
+  - [ ] Update `ck-browser.cpp` to call `UiBuilder` APIs instead of embedding these builders directly, keeping widget-specific state localized.
 - [ ] Maintain Xm-based layout code here; the module should register callbacks that call back into the managers rather than mutating globals.
 - [ ] Move dialog contexts (`BookmarkDialogContext`, manager contexts) under this module so state stays alongside the widgets they own.
 

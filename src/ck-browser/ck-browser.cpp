@@ -87,6 +87,7 @@ extern "C" {
 #include "tab_manager.h"
 
 #include "browser_ui_bridge.h"
+#include "ui_builder.h"
 
 struct BookmarkDialogContext {
     Widget dialog = NULL;
@@ -181,6 +182,11 @@ static bool g_session_loaded = false;
 static bool g_cef_initialized = false;
 static bool g_shutdown_requested = false;
 static int g_shutdown_pending_browsers = 0;
+
+using UiBuilder::create_menu_item;
+using UiBuilder::create_cascade_menu;
+using UiBuilder::set_menu_accelerator;
+using UiBuilder::make_string;
 
 namespace {
 SurfaceNewTabCallback g_surface_new_tab_handler = nullptr;
@@ -466,11 +472,6 @@ void apply_tab_theme_colors(BrowserTab *tab, bool active)
                   XmNtabBackground, bg_pixel,
                   XmNtabForeground, fg_pixel,
                   NULL);
-}
-
-static XmString make_string(const char *text)
-{
-    return XmStringCreateLocalized((String)(text ? text : ""));
 }
 
 static void capture_session_state(const char *reason)
@@ -1879,51 +1880,6 @@ void TabScheduler::cef_message_pump_cb(XtPointer client_data, XtIntervalId *id)
     TabScheduler *scheduler = reinterpret_cast<TabScheduler *>(client_data);
     if (!scheduler) return;
     scheduler->run_cef_message_pump();
-}
-
-static Widget create_menu_item(Widget parent, const char *name, const char *label, Pixmap icon = XmUNSPECIFIED_PIXMAP)
-{
-    XmString xm_label = make_string(label);
-    Widget item = XtVaCreateManagedWidget(
-        name,
-        xmPushButtonGadgetClass, parent,
-        XmNlabelString, xm_label,
-        NULL);
-    if (icon != XmUNSPECIFIED_PIXMAP && icon != None) {
-        XtVaSetValues(item,
-                      XmNlabelType, XmPIXMAP_AND_STRING,
-                      XmNlabelPixmap, icon,
-                      NULL);
-    }
-    XmStringFree(xm_label);
-    return item;
-}
-
-static Widget create_cascade_menu(Widget menu_bar, const char *label, const char *name, char mnemonic)
-{
-    Widget menu = XmCreatePulldownMenu(menu_bar, (String)name, NULL, 0);
-    XmString xm_label = make_string(label);
-    Widget cascade = XtVaCreateManagedWidget(
-        name,
-        xmCascadeButtonGadgetClass, menu_bar,
-        XmNlabelString, xm_label,
-        XmNmnemonic, mnemonic,
-        XmNsubMenuId, menu,
-        NULL);
-    XmStringFree(xm_label);
-    (void)cascade;
-    return menu;
-}
-
-static void set_menu_accelerator(Widget item, const char *accel, const char *accel_text)
-{
-    if (!item) return;
-    XmString xm = make_string(accel_text ? accel_text : "");
-    XtVaSetValues(item,
-                  XmNaccelerator, accel ? accel : "",
-                  XmNacceleratorText, xm,
-                  NULL);
-    XmStringFree(xm);
 }
 
 static BrowserTab *get_tab_for_widget(Widget page)

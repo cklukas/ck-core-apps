@@ -4,6 +4,7 @@
 #include <Xm/Xm.h>
 #include <functional>
 #include <memory>
+#include <string>
 #include <vector>
 
 int desired_favicon_size();
@@ -70,6 +71,14 @@ public:
     using TabSelectionHandler = std::function<void(BrowserTab *tab, BrowserTab *previous)>;
     void set_selection_handler(TabSelectionHandler handler);
     void selectTab(BrowserTab *tab);
+    void setTabStack(Widget stack);
+    BrowserTab *openNewTab(const std::string &url, bool select);
+    void loadUrl(BrowserTab *tab, const std::string &url);
+    void registerUrlField(Widget url_field);
+    void registerStatusLabel(Widget status_label);
+    void updateUrlField(BrowserTab *tab);
+    void setStatusText(const char *text);
+    int getUrlFieldHeight() const;
 
     std::vector<std::unique_ptr<BrowserTab>> &tabs();
     const std::vector<std::unique_ptr<BrowserTab>> &tabs() const;
@@ -83,6 +92,7 @@ private:
     std::vector<std::unique_ptr<BrowserTab>> tabs_;
     BrowserTab *current_tab_ = nullptr;
     TabSelectionHandler selection_handler_;
+    Widget tab_stack_ = NULL;
     Widget back_button_ = NULL;
     Widget forward_button_ = NULL;
     Widget nav_back_button_ = NULL;
@@ -92,6 +102,8 @@ private:
     Widget zoom_minus_button_ = NULL;
     Widget zoom_plus_button_ = NULL;
     Widget favicon_label_ = NULL;
+    Widget url_field_ = NULL;
+    Widget status_label_ = NULL;
 };
 
 #endif // CK_BROWSER_TAB_MANAGER_H

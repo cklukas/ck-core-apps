@@ -66,9 +66,9 @@
     - [x] Move reload/stop button behavior and state updates into `TabManager`.
     - [x] Move zoom controls, button updates, and polling into `TabManager`.
     - [x] Move favicon cache management and toolbar/icon updates into `TabManager`.
-  - [ ] Wire the new `TabManager` API into `BrowserApp`, BrowserClient, and UI callbacks, keeping the old globals behind the manager.
-- [ ] Provide APIs such as `loadUrl`, `openNewTab`, `currentTab`, and `selectTab` so `BrowserApp` and UI builders can work with tabs via a clean interface.
-- [ ] Keep toolbox helpers (status text, URL field updates, toolbar icon management) here instead of in the main file.
+  - [x] Wire the new `TabManager` API into `BrowserApp`, BrowserClient, and UI callbacks, keeping the old globals behind the manager.
+- [x] Provide APIs such as `loadUrl`, `openNewTab`, `currentTab`, and `selectTab` so `BrowserApp` and UI builders can work with tabs via a clean interface.
+- [x] Keep toolbox helpers (status text, URL field updates, toolbar icon management) here instead of in the main file.
 
 ## Phase 3 – `BookmarkManager`
 - [ ] Port the `BookmarkEntry/Group` data structures, Netscape parsing/serialization, icon cache, and the menu rebuild logic into `bookmark_manager.*`.

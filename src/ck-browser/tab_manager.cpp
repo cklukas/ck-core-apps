@@ -3,6 +3,7 @@
 #include <Xm/DrawingA.h>
 #include <Xm/Form.h>
 #include <Xm/TabStack.h>
+#include <Xm/TextF.h>
 #include <Xm/Xm.h>
 #include <X11/Intrinsic.h>
 #include <X11/Xlib.h>
@@ -93,6 +94,14 @@ bool tab_is_alive(const BrowserTab *tab)
         if (entry.get() == tab) return true;
     }
     return false;
+}
+
+const char *display_url_for_tab(const BrowserTab *tab)
+{
+    if (!tab) return kInitialBrowserUrl;
+    if (!tab->current_url.empty()) return tab->current_url.c_str();
+    if (!tab->pending_url.empty()) return tab->pending_url.c_str();
+    return kInitialBrowserUrl;
 }
 
 void remove_favicon_cache_entry(const std::string &key)
@@ -575,8 +584,9 @@ BrowserTab *TabManager::createTab(Widget tab_stack,
                                   const char *base_title,
                                   const char *initial_url)
 {
-    if (!tab_stack) return nullptr;
-    Widget page = XmCreateForm(tab_stack, (String)name, NULL, 0);
+    Widget stack = tab_stack ? tab_stack : tab_stack_;
+    if (!stack) return nullptr;
+    Widget page = XmCreateForm(stack, (String)name, NULL, 0);
     XtVaSetValues(page,
                   XmNfractionBase, 100,
                   XmNtopAttachment, XmATTACH_FORM,
@@ -638,6 +648,67 @@ void TabManager::selectTab(BrowserTab *tab)
     if (selection_handler_) {
         selection_handler_(tab, previous);
     }
+}
+
+void TabManager::setTabStack(Widget stack)
+{
+    tab_stack_ = stack;
+}
+
+BrowserTab *TabManager::openNewTab(const std::string &url, bool select)
+{
+    if (url.empty() || !tab_stack_) return nullptr;
+    BrowserApp::instance().notify_new_tab_request(url, select);
+    const char *base = "New Tab";
+    int count = countTabsWithBaseTitle(base);
+    char name[32];
+    snprintf(name, sizeof(name), "tabNew%d", count + 1);
+    char tab_title[64];
+    snprintf(tab_title, sizeof(tab_title), "%s (%d)", base, count + 1);
+    BrowserTab *tab = createTab(tab_stack_, name, tab_title, base, url.c_str());
+    if (!tab) return nullptr;
+    scheduleBrowserCreation(tab);
+    if (select) {
+        if (tab->page) {
+            XmTabStackSelectTab(tab->page, True);
+        }
+        selectTab(tab);
+    }
+    return tab;
+}
+
+void TabManager::registerUrlField(Widget url_field)
+{
+    url_field_ = url_field;
+}
+
+void TabManager::registerStatusLabel(Widget status_label)
+{
+    status_label_ = status_label;
+}
+
+void TabManager::updateUrlField(BrowserTab *tab)
+{
+    if (!url_field_ || !tab || tab != current_tab_) return;
+    const char *value = display_url_for_tab(tab);
+    XmTextFieldSetString(url_field_, const_cast<char *>(value ? value : ""));
+}
+
+void TabManager::setStatusText(const char *text)
+{
+    if (!status_label_) return;
+    const char *display = text ? text : "";
+    XmString xm_text = XmStringCreateLocalized(const_cast<char *>(display));
+    XtVaSetValues(status_label_, XmNlabelString, xm_text, NULL);
+    XmStringFree(xm_text);
+}
+
+int TabManager::getUrlFieldHeight() const
+{
+    if (!url_field_) return 0;
+    Dimension height = 0;
+    XtVaGetValues(url_field_, XmNheight, &height, NULL);
+    return (int)height;
 }
 
 void TabManager::registerNavigationWidgets(Widget back_button,
@@ -849,6 +920,29 @@ void TabManager::clearTabFavicon(BrowserTab *tab)
     if (tab == current_tab_) {
         updateFaviconControls(tab);
     }
+}
+
+void TabManager::loadUrl(BrowserTab *tab, const std::string &url)
+{
+    if (!tab || url.empty()) return;
+    const std::string normalized = normalize_url(url.c_str());
+    if (normalized.empty()) return;
+    std::string host = extract_host_from_url(normalized);
+    if (host != tab->current_host) {
+        tab->current_host = host;
+        clearTabFavicon(tab);
+    }
+    tab->pending_url = normalized;
+    if (!tab->browser) {
+        scheduleBrowserCreation(tab);
+    }
+    if (tab->browser) {
+        CefRefPtr<CefFrame> frame = tab->browser->GetMainFrame();
+        if (frame) {
+            frame->LoadURL(normalized);
+        }
+    }
+    updateUrlField(tab);
 }
 
 bool TabManager::getCachedFavicon(const std::string &url,

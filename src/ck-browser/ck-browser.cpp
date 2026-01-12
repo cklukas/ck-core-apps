@@ -112,7 +112,6 @@ static Widget g_nav_back = NULL;
 static Widget g_nav_forward = NULL;
 static Widget g_home_button = NULL;
 static Widget g_home_button_menu = NULL;
-static Widget g_status_message_label = NULL;
 static Widget g_security_label = NULL;
 static Widget g_file_open_dialog = NULL;
 static std::string g_file_open_last_dir;
@@ -159,10 +158,7 @@ void notify_surface_tab_load_finished(BrowserTab *tab)
 
 int get_url_field_height()
 {
-    if (!g_url_field) return 0;
-    Dimension height = 0;
-    XtVaGetValues(g_url_field, XmNheight, &height, NULL);
-    return (int)height;
+    return TabManager::instance().getUrlFieldHeight();
 }
 
 Widget get_toplevel_widget()
@@ -1025,18 +1021,12 @@ static const char *display_url_for_tab(const BrowserTab *tab)
 
 void update_url_field_for_tab(BrowserTab *tab)
 {
-    if (!g_url_field) return;
-    const char *value = display_url_for_tab(tab);
-    XmTextFieldSetString(g_url_field, const_cast<char *>(value ? value : ""));
+    TabManager::instance().updateUrlField(tab);
 }
 
 void set_status_label_text(const char *text)
 {
-    if (!g_status_message_label) return;
-    const char *display = text ? text : "";
-    XmString xm_text = make_string(display);
-    XtVaSetValues(g_status_message_label, XmNlabelString, xm_text, NULL);
-    XmStringFree(xm_text);
+    TabManager::instance().setStatusText(text);
 }
 
 static void set_security_label_text(const char *text)
@@ -1253,21 +1243,7 @@ void update_all_tab_labels(const char *reason)
 
 void open_url_in_new_tab(const std::string &url, bool select)
 {
-    if (url.empty() || !g_tab_stack) return;
-    BrowserApp::instance().notify_new_tab_request(url, select);
-    const char *base = "New Tab";
-    int count = TabManager::instance().countTabsWithBaseTitle(base);
-    char name[32];
-    snprintf(name, sizeof(name), "tabNew%d", count + 1);
-    char tab_title[64];
-    snprintf(tab_title, sizeof(tab_title), "%s (%d)", base, count + 1);
-
-    BrowserTab *tab = TabManager::instance().createTab(g_tab_stack, name, tab_title, base, url.c_str());
-    TabManager::instance().scheduleBrowserCreation(tab);
-    if (select) {
-        XmTabStackSelectTab(tab->page, True);
-        set_current_tab(tab);
-    }
+    TabManager::instance().openNewTab(url, select);
 }
 
 void select_tab_page(BrowserTab *tab)
@@ -1362,27 +1338,7 @@ extract_host_from_url(const std::string &url)
 
 void load_url_for_tab(BrowserTab *tab, const std::string &url)
 {
-    if (!tab || url.empty()) return;
-    const std::string normalized = normalize_url(url.c_str());
-    if (normalized.empty()) return;
-    std::string host = extract_host_from_url(normalized);
-    if (host != tab->current_host) {
-        tab->current_host = host;
-        TabManager::instance().clearTabFavicon(tab);
-    }
-    tab->pending_url = normalized;
-    if (!tab->browser) {
-        TabManager::instance().scheduleBrowserCreation(tab);
-    }
-    if (tab->browser) {
-        CefRefPtr<CefFrame> frame = tab->browser->GetMainFrame();
-        if (frame) {
-            frame->LoadURL(normalized);
-        }
-    }
-    if (tab == TabManager::instance().currentTab() && g_url_field) {
-        XmTextFieldSetString(g_url_field, const_cast<char *>(tab->pending_url.c_str()));
-    }
+    TabManager::instance().loadUrl(tab, url);
 }
 
 static void theme_color_request_timer_cb(XtPointer client_data, XtIntervalId *id)
@@ -5355,6 +5311,7 @@ static Widget create_toolbar(Widget parent, Widget attach_top)
     XtAddEventHandler(url_field, ButtonPressMask, False, on_url_button_press, NULL);
     g_url_field = url_field;
     XmProcessTraversal(url_field, XmTRAVERSE_CURRENT);
+    TabManager::instance().registerUrlField(url_field);
 
     return toolbar;
 }
@@ -5452,7 +5409,9 @@ static Widget create_status_bar(Widget parent)
                   NULL);
     XtManageChild(status_form);
 
-    Widget status_left = create_status_segment(status_form, "statusMain", "", &g_status_message_label);
+    Widget status_left_label = NULL;
+    Widget status_left = create_status_segment(status_form, "statusMain", "", &status_left_label);
+    TabManager::instance().registerStatusLabel(status_left_label);
     Widget status_center = create_status_segment(status_form, "statusSecurity", "Security: None", &g_security_label);
     Widget status_right = create_zoom_segment(status_form);
 
@@ -5598,6 +5557,7 @@ int run_browser_ui_loop(int argc, char *argv[], const BrowserPreflightState &pre
                   NULL);
     XtManageChild(tab_stack);
     g_tab_stack = tab_stack;
+    TabManager::instance().setTabStack(tab_stack);
     // Register tab selection handling after realize; some Motif builds don't
     // create callback lists/widgets until then.
     XtAddCallback(tab_stack, XmNresizeCallback, on_tab_stack_resize, NULL);

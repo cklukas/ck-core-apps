@@ -72,6 +72,9 @@
 
 ## Phase 3 – `BookmarkManager`
 - [ ] Port the `BookmarkEntry/Group` data structures, Netscape parsing/serialization, icon cache, and the menu rebuild logic into `bookmark_manager.*`.
+  - [ ] Create `bookmark_manager.h`/`bookmark_manager.cpp` that own the bookmark tree, file I/O helpers, and the core types so `ck-browser.cpp` no longer declares the global state.
+  - [ ] Move the Netscape parsing/serialization, file monitor, and icon cache helpers into the new module and export a focused API for load/save/rebuild.
+  - [ ] Keep UI menu/dialog wiring in `ck-browser.cpp` for now, but call `BookmarkManager` helpers instead of manipulating bookmark globals directly.
 - [ ] Expose methods for adding/updating bookmarks, moving entries between folders, renaming/deleting folders, and returning favorites/groups for UI consumption.
 - [ ] Keep file-path, serialization, and caching details internal; only expose high-level mutation and query APIs.
 

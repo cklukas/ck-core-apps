@@ -83,9 +83,64 @@ extern "C" {
 #include <include/wrapper/cef_helpers.h>
 
 #include "browser_tab.h"
+#include "bookmark_manager.h"
 #include "tab_manager.h"
 
 #include "browser_ui_bridge.h"
+
+struct BookmarkDialogContext {
+    Widget dialog = NULL;
+    Widget name_field = NULL;
+    Widget add_to_menu_checkbox = NULL;
+    Widget url_field = NULL;
+    std::vector<BookmarkGroup *> group_entries;
+    BookmarkEntry *editing_entry = NULL;
+    BookmarkGroup *editing_group = NULL;
+    Widget group_list = NULL;
+    BookmarkGroup *selected_group = NULL;
+};
+
+struct BookmarkManagerContext {
+    Widget dialog = NULL;
+    Widget group_list = NULL;
+    Widget bookmark_list = NULL;
+    Widget open_button = NULL;
+    Widget edit_button = NULL;
+    Widget delete_button = NULL;
+    Widget rename_group_button = NULL;
+    Widget delete_group_button = NULL;
+    std::vector<BookmarkGroup *> group_entries;
+    std::vector<BookmarkEntry *> entry_items;
+    std::vector<Widget> bookmark_entry_widgets;
+    std::vector<Pixmap> bookmark_entry_pixmaps;
+    Widget selected_entry_widget = NULL;
+    BookmarkGroup *selected_group = NULL;
+    BookmarkEntry *selected_entry = NULL;
+};
+
+struct BookmarkManagerNewGroupDialogData {
+    BookmarkManagerContext *ctx = NULL;
+    Widget dialog = NULL;
+    Widget text_field = NULL;
+};
+
+struct BookmarkManagerRenameGroupDialogData {
+    BookmarkManagerContext *ctx = NULL;
+    BookmarkGroup *group = NULL;
+    Widget dialog = NULL;
+    Widget text_field = NULL;
+};
+
+struct BookmarkManagerDeleteGroupDialogData {
+    BookmarkManagerContext *ctx = NULL;
+    BookmarkGroup *group = NULL;
+    Widget dialog = NULL;
+    Widget move_target_list = NULL;
+    Widget delete_option = NULL;
+    Widget move_option = NULL;
+    std::vector<BookmarkGroup *> target_entries;
+    BookmarkGroup *selected_target_group = NULL;
+};
 
 static void log_function_entry(const char *func, const char *fmt, ...)
 {
@@ -174,89 +229,14 @@ Display *get_browser_display()
 
 static const int kThemeColorRetryLimit = 3;
 static const int kThemeColorReadyRetryLimit = 6;
-struct BookmarkEntry {
-    std::string name;
-    std::string url;
-    bool show_in_menu = false;
-    std::vector<unsigned char> icon_raw;
-    std::vector<unsigned char> icon_png;
-    int icon_width = 0;
-    int icon_height = 0;
-};
-
-struct BookmarkGroup {
-    std::string name;
-    std::vector<std::unique_ptr<BookmarkEntry>> entries;
-    std::vector<std::unique_ptr<BookmarkGroup>> children;
-};
-
-struct BookmarkDialogContext {
-    Widget dialog = NULL;
-    Widget name_field = NULL;
-    Widget add_to_menu_checkbox = NULL;
-    Widget url_field = NULL;
-    std::vector<BookmarkGroup *> group_entries;
-    BookmarkEntry *editing_entry = NULL;
-    BookmarkGroup *editing_group = NULL;
-    Widget group_list = NULL;
-    BookmarkGroup *selected_group = NULL;
-};
-
-struct BookmarkManagerContext {
-    Widget dialog = NULL;
-    Widget group_list = NULL;
-    Widget bookmark_list = NULL;
-    Widget open_button = NULL;
-    Widget edit_button = NULL;
-    Widget delete_button = NULL;
-    Widget rename_group_button = NULL;
-    Widget delete_group_button = NULL;
-    std::vector<BookmarkGroup *> group_entries;
-    std::vector<BookmarkEntry *> entry_items;
-    std::vector<Widget> bookmark_entry_widgets;
-    std::vector<Pixmap> bookmark_entry_pixmaps;
-    Widget selected_entry_widget = NULL;
-    BookmarkGroup *selected_group = NULL;
-    BookmarkEntry *selected_entry = NULL;
-};
-
-struct BookmarkManagerNewGroupDialogData {
-    BookmarkManagerContext *ctx = NULL;
-    Widget dialog = NULL;
-    Widget text_field = NULL;
-};
-
-struct BookmarkManagerRenameGroupDialogData {
-    BookmarkManagerContext *ctx = NULL;
-    BookmarkGroup *group = NULL;
-    Widget dialog = NULL;
-    Widget text_field = NULL;
-};
-
-struct BookmarkManagerDeleteGroupDialogData {
-    BookmarkManagerContext *ctx = NULL;
-    BookmarkGroup *group = NULL;
-    Widget dialog = NULL;
-    Widget move_target_list = NULL;
-    Widget delete_option = NULL;
-    Widget move_option = NULL;
-    std::vector<BookmarkGroup *> target_entries;
-    BookmarkGroup *selected_target_group = NULL;
-};
-
-static std::unique_ptr<BookmarkGroup> g_bookmark_root;
-static BookmarkGroup *g_selected_bookmark_group = NULL;
 static Widget g_bookmarks_menu = NULL;
 static std::vector<Widget> g_bookmark_menu_items;
 static std::vector<Widget> g_bookmark_group_cascade_widgets;
 static std::vector<Widget> g_bookmark_group_submenu_widgets;
 static std::vector<Widget> g_bookmark_group_separator_widgets;
 static std::vector<Pixmap> g_bookmark_menu_icon_pixmaps;
-const char *kInitialBrowserUrl = "https://www.wikipedia.org";
-static const char *kBookmarksFileName = "bookmarks.html";
-static char g_bookmarks_file_path[PATH_MAX] = "";
-static bool g_bookmarks_path_ready = false;
 static time_t g_bookmarks_file_mtime = 0;
+const char *kInitialBrowserUrl = "https://www.wikipedia.org";
 std::string normalize_url(const char *input);
 static const char *display_url_for_tab(const BrowserTab *tab);
 void update_url_field_for_tab(BrowserTab *tab);
@@ -294,14 +274,10 @@ static void resize_cef_browser_to_area(BrowserTab *tab, const char *reason);
 static void on_zoom_reset(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_zoom_in(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_zoom_out(Widget w, XtPointer client_data, XtPointer call_data);
-static BookmarkGroup *ensure_bookmark_groups();
-static BookmarkGroup *add_bookmark_group(BookmarkGroup *parent, const char *name);
 static void collect_bookmark_groups(BookmarkGroup *group,
                                     std::vector<BookmarkGroup *> &entries,
                                     std::vector<std::string> &labels,
                                     int depth);
-static void collect_bookmark_menu_entries(BookmarkGroup *group,
-                                          std::vector<BookmarkEntry *> &entries);
 static void clear_bookmark_group_submenus();
 static Widget add_bookmark_menu_entry(Widget parent,
                                       BookmarkEntry *entry,
@@ -312,10 +288,6 @@ static void build_bookmark_group_menu_recursive(BookmarkGroup *group,
                                                 Widget parent_menu,
                                                 Pixel menu_bg);
 static void create_bookmark_group_submenus(BookmarkGroup *root, Pixel menu_bg);
-static BookmarkGroup *find_parent_group(BookmarkGroup *root, BookmarkGroup *target);
-static bool is_group_descendant_or_same(BookmarkGroup *candidate, BookmarkGroup *ancestor);
-static void move_all_bookmarks_from_subtree(BookmarkGroup *source, BookmarkGroup *target);
-static void remove_bookmark_group_from_parent(BookmarkGroup *parent, BookmarkGroup *group);
 static void rebuild_bookmarks_menu_items();
 static void on_bookmark_menu_activate(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_bookmark_dialog_save(Widget w, XtPointer client_data, XtPointer call_data);
@@ -323,18 +295,7 @@ static void on_bookmark_dialog_cancel(Widget w, XtPointer client_data, XtPointer
 static void show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry = NULL, BookmarkGroup *group = NULL);
 static void bookmark_dialog_group_list_selection_cb(Widget w, XtPointer client_data, XtPointer call_data);
 static void bookmark_dialog_populate_group_list(BookmarkDialogContext *ctx, Widget list, BookmarkGroup *group, int depth);
-static BookmarkEntry *find_bookmark_by_url(BookmarkGroup *group, const std::string &url, BookmarkGroup **out_group);
-static BookmarkGroup *find_bookmark_parent_group(BookmarkGroup *group, BookmarkEntry *entry);
-static std::unique_ptr<BookmarkEntry> detach_bookmark_entry_from_group(BookmarkGroup *group, BookmarkEntry *entry);
-static void save_bookmarks_to_file();
-static std::unique_ptr<BookmarkGroup> load_bookmarks_from_file();
-static void ensure_path_directory(const char *path);
-static const char *get_bookmarks_file_path();
 static time_t get_file_mtime(const char *path);
-static std::string escape_html(const std::string &input);
-static std::string base64_encode(const std::vector<unsigned char> &data);
-static bool base64_decode(const std::string &input, std::vector<unsigned char> &output);
-static bool extract_base64_payload(const std::string &value, std::string &out_payload);
 static bool bookmark_entry_set_icon_png(BookmarkEntry *entry, const unsigned char *png_data, size_t png_size);
 static void bookmark_entry_copy_icon_from_cache(BookmarkEntry *entry, const char *url);
 static Pixmap create_bookmark_icon_pixmap(BookmarkEntry *entry, int target_size, Pixel bg_pixel);
@@ -343,14 +304,8 @@ static void bookmark_manager_free_entry_pixmaps(BookmarkManagerContext *ctx);
 static void bookmark_manager_clear_entry_widgets(BookmarkManagerContext *ctx);
 static void bookmark_manager_entry_activate_cb(Widget w, XtPointer client_data, XtPointer call_data);
 static void show_invalid_url_dialog(const char *text);
-static void write_netscape_bookmarks(FILE *f, BookmarkGroup *root);
-static void write_group_contents(FILE *f, BookmarkGroup *group, int indent);
-static void parse_netscape_bookmarks(const std::string &content, BookmarkGroup *root);
-static bool extract_tag_text(const std::string &content, size_t start, const char *closing_tag, size_t &out_end, std::string &out_text);
-static bool parse_attribute_value(const std::string &tag, const char *name, std::string &out_value);
-static BookmarkGroup *find_or_create_child_group(BookmarkGroup *parent, const std::string &name);
-static std::unique_ptr<BookmarkGroup> create_default_bookmark_tree();
 static void bookmark_file_monitor_timer_cb(XtPointer client_data, XtIntervalId *id);
+static void save_bookmarks_and_refresh_mtime();
 static void close_bookmark_manager_dialog(BookmarkManagerContext *ctx);
 static void bookmark_manager_update_entry_list(BookmarkManagerContext *ctx);
 static void bookmark_manager_group_selection_cb(Widget w, XtPointer client_data, XtPointer call_data);
@@ -2923,7 +2878,8 @@ update_bookmark_manager_group_controls(BookmarkManagerContext *ctx)
 {
     if (!ctx) return;
     BookmarkGroup *selected = ctx->selected_group;
-    bool enable = selected && selected != g_bookmark_root.get();
+    BookmarkGroup *root = get_bookmark_root();
+    bool enable = selected && selected != root;
     if (ctx->rename_group_button) {
         XtSetSensitive(ctx->rename_group_button, enable);
     }
@@ -3148,7 +3104,7 @@ on_bookmark_manager_delete(Widget w, XtPointer client_data, XtPointer call_data)
     ctx->selected_entry_widget = NULL;
     bookmark_manager_update_entry_list(ctx);
     rebuild_bookmarks_menu_items();
-    save_bookmarks_to_file();
+    save_bookmarks_and_refresh_mtime();
 }
 
 static void
@@ -3157,7 +3113,8 @@ on_bookmark_manager_rename_group(Widget w, XtPointer client_data, XtPointer call
     (void)w;
     (void)call_data;
     BookmarkManagerContext *ctx = (BookmarkManagerContext *)client_data;
-    if (!ctx || !ctx->selected_group || ctx->selected_group == g_bookmark_root.get()) return;
+    BookmarkGroup *root = get_bookmark_root();
+    if (!ctx || !ctx->selected_group || ctx->selected_group == root) return;
     BookmarkManagerRenameGroupDialogData *data = new BookmarkManagerRenameGroupDialogData();
     data->ctx = ctx;
     data->group = ctx->selected_group;
@@ -3249,10 +3206,10 @@ bookmark_manager_rename_group_confirm_cb(Widget button, XtPointer client_data, X
     if (value) XtFree(value);
     if (!name.empty()) {
         data->group->name = name;
-        g_selected_bookmark_group = data->group;
+        set_selected_bookmark_group(data->group);
         fprintf(stderr, "[ck-browser] bookmark manager renamed group to '%s'\n", name.c_str());
         rebuild_bookmarks_menu_items();
-        save_bookmarks_to_file();
+        save_bookmarks_and_refresh_mtime();
         bookmark_manager_refresh_group_list(data->ctx, data->group);
     }
     if (data->dialog) {
@@ -3353,7 +3310,7 @@ bookmark_manager_delete_group_confirm_cb(Widget button, XtPointer client_data, X
     }
     remove_bookmark_group_from_parent(parent, group);
     BookmarkGroup *new_selected = parent ? parent : root;
-    g_selected_bookmark_group = new_selected;
+    set_selected_bookmark_group(new_selected);
     std::string action = "deleted";
     if (move_selected && move_target) {
         std::string target_name = move_target->name.empty() ? "(unnamed)" : move_target->name;
@@ -3364,7 +3321,7 @@ bookmark_manager_delete_group_confirm_cb(Widget button, XtPointer client_data, X
             action.c_str(),
             group->name.empty() ? "(unnamed)" : group->name.c_str());
     rebuild_bookmarks_menu_items();
-    save_bookmarks_to_file();
+    save_bookmarks_and_refresh_mtime();
     bookmark_manager_refresh_group_list(data->ctx, new_selected);
     if (data->dialog) {
         XtDestroyWidget(data->dialog);
@@ -3391,15 +3348,11 @@ on_bookmark_manager_delete_group(Widget w, XtPointer client_data, XtPointer call
     (void)w;
     (void)call_data;
     BookmarkManagerContext *ctx = (BookmarkManagerContext *)client_data;
-    if (!ctx || !ctx->selected_group || ctx->selected_group == g_bookmark_root.get()) return;
+    BookmarkGroup *root = ensure_bookmark_groups();
+    if (!ctx || !ctx->selected_group || ctx->selected_group == root) return;
     BookmarkManagerDeleteGroupDialogData *data = new BookmarkManagerDeleteGroupDialogData();
     data->ctx = ctx;
     data->group = ctx->selected_group;
-    BookmarkGroup *root = ensure_bookmark_groups();
-    if (!root) {
-        delete data;
-        return;
-    }
     Widget dialog = XmCreateFormDialog(g_toplevel, xm_name("bookmarkManagerDeleteFolderDialog"), NULL, 0);
     XmString title = make_string("Delete Bookmark Folder");
     XtVaSetValues(dialog,
@@ -3524,7 +3477,7 @@ on_bookmark_manager_show_bookmarks(Widget w, XtPointer client_data, XtPointer ca
     (void)call_data;
     BookmarkGroup *root = ensure_bookmark_groups();
     if (!root) return;
-    save_bookmarks_to_file();
+    save_bookmarks_and_refresh_mtime();
     const char *path = get_bookmarks_file_path();
     if (!path || !path[0]) return;
     std::string url = std::string("file://") + path;
@@ -3689,50 +3642,6 @@ show_bookmark_manager_dialog()
     XtManageChild(dialog);
 }
 
-static BookmarkGroup *
-add_bookmark_group(BookmarkGroup *parent, const char *name)
-{
-    if (!parent) return NULL;
-    parent->children.emplace_back(std::make_unique<BookmarkGroup>());
-    BookmarkGroup *child = parent->children.back().get();
-    child->name = name ? name : "";
-    return child;
-}
-
-static std::unique_ptr<BookmarkGroup>
-create_default_bookmark_tree()
-{
-    auto root = std::make_unique<BookmarkGroup>();
-    root->name = "Bookmarks Menu";
-    BookmarkGroup *favorites = add_bookmark_group(root.get(), "Favorites");
-    add_bookmark_group(favorites, "Work");
-    add_bookmark_group(favorites, "Personal");
-    BookmarkGroup *other = add_bookmark_group(root.get(), "Other Bookmarks");
-    add_bookmark_group(other, "Research");
-    add_bookmark_group(other, "Snippets");
-    return root;
-}
-
-static BookmarkGroup *
-ensure_bookmark_groups()
-{
-    if (g_bookmark_root) return g_bookmark_root.get();
-    std::unique_ptr<BookmarkGroup> loaded = load_bookmarks_from_file();
-    if (loaded) {
-        g_bookmark_root = std::move(loaded);
-    } else {
-        g_bookmark_root = create_default_bookmark_tree();
-    }
-    BookmarkGroup *selected = g_bookmark_root.get();
-    if (g_bookmark_root->children.empty()) {
-        selected = g_bookmark_root.get();
-    } else {
-        selected = g_bookmark_root->children[0].get();
-    }
-    g_selected_bookmark_group = selected ? selected : g_bookmark_root.get();
-    return g_bookmark_root.get();
-}
-
 static void
 collect_bookmark_groups(BookmarkGroup *group,
                         std::vector<BookmarkGroup *> &entries,
@@ -3745,21 +3654,6 @@ collect_bookmark_groups(BookmarkGroup *group,
     labels.emplace_back(indent + group->name);
     for (const auto &child : group->children) {
         collect_bookmark_groups(child.get(), entries, labels, depth + 1);
-    }
-}
-
-static void
-collect_bookmark_menu_entries(BookmarkGroup *group,
-                              std::vector<BookmarkEntry *> &entries)
-{
-    if (!group) return;
-    for (const auto &entry : group->entries) {
-        if (entry && entry->show_in_menu) {
-            entries.push_back(entry.get());
-        }
-    }
-    for (const auto &child : group->children) {
-        collect_bookmark_menu_entries(child.get(), entries);
     }
 }
 
@@ -3853,83 +3747,6 @@ create_bookmark_group_submenus(BookmarkGroup *root, Pixel menu_bg)
     }
 }
 
-static BookmarkGroup *
-find_parent_group(BookmarkGroup *root, BookmarkGroup *target)
-{
-    if (!root || !target) return NULL;
-    for (const auto &child : root->children) {
-        if (child.get() == target) {
-            return root;
-        }
-        BookmarkGroup *found = find_parent_group(child.get(), target);
-        if (found) return found;
-    }
-    return NULL;
-}
-
-static bool
-is_group_descendant_or_same(BookmarkGroup *candidate, BookmarkGroup *ancestor)
-{
-    if (!candidate || !ancestor) return false;
-    if (candidate == ancestor) return true;
-    for (const auto &child : ancestor->children) {
-        if (is_group_descendant_or_same(candidate, child.get())) return true;
-    }
-    return false;
-}
-
-static void
-move_all_bookmarks_from_subtree(BookmarkGroup *source, BookmarkGroup *target)
-{
-    if (!source || !target || source == target) return;
-    for (auto &entry : source->entries) {
-        target->entries.emplace_back(std::move(entry));
-    }
-    source->entries.clear();
-    for (const auto &child : source->children) {
-        move_all_bookmarks_from_subtree(child.get(), target);
-    }
-}
-
-static void
-remove_bookmark_group_from_parent(BookmarkGroup *parent, BookmarkGroup *group)
-{
-    if (!parent || !group) return;
-    auto &children = parent->children;
-    for (auto it = children.begin(); it != children.end(); ++it) {
-        if (it->get() == group) {
-            children.erase(it);
-            return;
-        }
-    }
-}
-
-static void
-ensure_path_directory(const char *path)
-{
-    if (!path) return;
-    char dir[PATH_MAX];
-    strncpy(dir, path, sizeof(dir) - 1);
-    dir[sizeof(dir) - 1] = '\0';
-    char *slash = strrchr(dir, '/');
-    if (slash) {
-        *slash = '\0';
-        if (dir[0]) {
-            mkdir(dir, 0700);
-        }
-    }
-}
-
-static const char *
-get_bookmarks_file_path()
-{
-    if (!g_bookmarks_path_ready) {
-        config_build_path(g_bookmarks_file_path, sizeof(g_bookmarks_file_path), kBookmarksFileName);
-        g_bookmarks_path_ready = true;
-    }
-    return g_bookmarks_file_path;
-}
-
 static time_t
 get_file_mtime(const char *path)
 {
@@ -3941,111 +3758,59 @@ get_file_mtime(const char *path)
     return 0;
 }
 
-static std::string
-escape_html(const std::string &input)
+static void
+refresh_bookmarks_file_mtime()
 {
-    std::string output;
-    output.reserve(input.size());
-    for (char c : input) {
-        switch (c) {
-            case '&': output += "&amp;"; break;
-            case '<': output += "&lt;"; break;
-            case '>': output += "&gt;"; break;
-            case '\"': output += "&quot;"; break;
-            default: output += c; break;
+    const char *path = get_bookmarks_file_path();
+    if (!path || path[0] == '\0') {
+        g_bookmarks_file_mtime = 0;
+        return;
+    }
+    g_bookmarks_file_mtime = get_file_mtime(path);
+}
+
+static void
+save_bookmarks_and_refresh_mtime()
+{
+    save_bookmarks_to_file();
+    refresh_bookmarks_file_mtime();
+}
+
+static void
+bookmark_file_monitor_timer_cb(XtPointer client_data, XtIntervalId *id)
+{
+    (void)client_data;
+    (void)id;
+    const char *path = get_bookmarks_file_path();
+    if (path && path[0]) {
+        time_t current = get_file_mtime(path);
+        if (current == 0) {
+            current = g_bookmarks_file_mtime;
+        }
+        if (current != g_bookmarks_file_mtime) {
+            fprintf(stderr, "[ck-browser] bookmark monitor detected change (current=%ld prior=%ld)\n",
+                    (long)current, (long)g_bookmarks_file_mtime);
+            std::unique_ptr<BookmarkGroup> loaded = load_bookmarks_from_file();
+            if (!loaded) {
+                loaded = create_default_bookmark_tree();
+            }
+            if (loaded) {
+                replace_bookmark_root(std::move(loaded));
+                rebuild_bookmarks_menu_items();
+            }
+            g_bookmarks_file_mtime = current;
+        }
+    } else if (g_bookmarks_file_mtime != 0) {
+        g_bookmarks_file_mtime = 0;
+        std::unique_ptr<BookmarkGroup> fallback = create_default_bookmark_tree();
+        if (fallback) {
+            replace_bookmark_root(std::move(fallback));
+            rebuild_bookmarks_menu_items();
         }
     }
-    return output;
-}
-
-static const char kBase64Chars[] =
-"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-"abcdefghijklmnopqrstuvwxyz"
-"0123456789+/";
-
-static std::string
-base64_encode(const std::vector<unsigned char> &data)
-{
-    std::string output;
-    size_t len = data.size();
-    size_t i = 0;
-    output.reserve(((len + 2) / 3) * 4);
-    while (i + 2 < len) {
-        unsigned char a = data[i++];
-        unsigned char b = data[i++];
-        unsigned char c = data[i++];
-        output.push_back(kBase64Chars[a >> 2]);
-        output.push_back(kBase64Chars[((a & 0x3) << 4) | (b >> 4)]);
-        output.push_back(kBase64Chars[((b & 0xf) << 2) | (c >> 6)]);
-        output.push_back(kBase64Chars[c & 0x3f]);
+    if (g_app) {
+        XtAppAddTimeOut(g_app, 1000, bookmark_file_monitor_timer_cb, NULL);
     }
-    size_t remaining = len - i;
-    if (remaining == 1) {
-        unsigned char a = data[i];
-        output.push_back(kBase64Chars[a >> 2]);
-        output.push_back(kBase64Chars[(a & 0x3) << 4]);
-        output.push_back('=');
-        output.push_back('=');
-    } else if (remaining == 2) {
-        unsigned char a = data[i++];
-        unsigned char b = data[i];
-        output.push_back(kBase64Chars[a >> 2]);
-        output.push_back(kBase64Chars[((a & 0x3) << 4) | (b >> 4)]);
-        output.push_back(kBase64Chars[(b & 0xf) << 2]);
-        output.push_back('=');
-    }
-    return output;
-}
-
-static inline bool
-is_base64_char(char c)
-{
-    return (c >= 'A' && c <= 'Z') ||
-           (c >= 'a' && c <= 'z') ||
-           (c >= '0' && c <= '9') ||
-           c == '+' || c == '/';
-}
-
-static bool
-base64_decode(const std::string &input, std::vector<unsigned char> &output)
-{
-    output.clear();
-    int val = 0;
-    int valb = -8;
-    for (char ch : input) {
-        if (isspace((unsigned char)ch)) continue;
-        if (ch == '=') {
-            valb = -8;
-            break;
-        }
-        if (!is_base64_char(ch)) continue;
-        val = (val << 6) + (int)(strchr(kBase64Chars, ch) - kBase64Chars);
-        valb += 6;
-        if (valb >= 0) {
-            output.push_back((unsigned char)((val >> valb) & 0xff));
-            valb -= 8;
-        }
-    }
-    return !output.empty();
-}
-
-static bool
-extract_base64_payload(const std::string &value, std::string &out_payload)
-{
-    if (value.empty()) return false;
-    size_t comma = value.find(',');
-    if (comma == std::string::npos) {
-        out_payload = value;
-    } else {
-        out_payload = value.substr(comma + 1);
-    }
-    while (!out_payload.empty() && isspace((unsigned char)out_payload.front())) {
-        out_payload.erase(out_payload.begin());
-    }
-    while (!out_payload.empty() && isspace((unsigned char)out_payload.back())) {
-        out_payload.pop_back();
-    }
-    return !out_payload.empty();
 }
 
 static bool
@@ -4143,461 +3908,6 @@ clear_bookmark_menu_icon_pixmaps()
 }
 
 static void
-write_indent(FILE *f, int indent)
-{
-    for (int i = 0; i < indent; ++i) {
-        fputc(' ', f);
-    }
-}
-
-static void
-write_bookmark_entry(FILE *f, BookmarkEntry *entry, int indent)
-{
-    if (!f || !entry) return;
-    time_t now = time(NULL);
-    write_indent(f, indent);
-    std::string icon_attr;
-    if (!entry->icon_png.empty()) {
-        std::string encoded = base64_encode(entry->icon_png);
-        icon_attr = " ICON=\"data:image/png;base64,";
-        icon_attr += encoded;
-        icon_attr += "\"";
-    }
-    fprintf(f,
-            "<DT><A HREF=\"%s\" ADD_DATE=\"%lld\" LAST_MODIFIED=\"%lld\" LAST_VISIT=\"%lld\" SHOW_IN_MENU=\"%d\"%s>%s</A>\n",
-            escape_html(entry->url).c_str(),
-            (long long)now,
-            (long long)now,
-            (long long)now,
-            entry->show_in_menu ? 1 : 0,
-            icon_attr.c_str(),
-            escape_html(entry->name).c_str());
-}
-
-static void
-write_group_contents(FILE *f, BookmarkGroup *group, int indent)
-{
-    if (!f || !group) return;
-    time_t now = time(NULL);
-    for (const auto &child : group->children) {
-        if (!child) continue;
-        write_indent(f, indent);
-        fprintf(f,
-                "<DT><H3 ADD_DATE=\"%lld\" LAST_MODIFIED=\"%lld\">%s</H3>\n",
-                (long long)now,
-                (long long)now,
-                escape_html(child->name).c_str());
-        write_indent(f, indent);
-        fprintf(f, "<DL><p>\n");
-        write_group_contents(f, child.get(), indent + 4);
-        write_indent(f, indent);
-        fprintf(f, "</DL><p>\n");
-    }
-    for (const auto &entry : group->entries) {
-        if (!entry) continue;
-        write_bookmark_entry(f, entry.get(), indent);
-    }
-}
-
-static void
-write_netscape_bookmarks(FILE *f, BookmarkGroup *root)
-{
-    if (!f || !root) return;
-    fprintf(f,
-            "<!DOCTYPE NETSCAPE-Bookmark-file-1>\n"
-            "<!-- This is an automatically generated file.\n"
-            "     It will be read and overwritten.\n"
-            "     DO NOT EDIT! -->\n"
-            "<HTML>\n"
-            "<HEAD>\n"
-            "<META HTTP-EQUIV=\"Content-Type\" CONTENT=\"text/html; charset=UTF-8\">\n"
-            "<TITLE>Bookmarks</TITLE>\n"
-            "</HEAD>\n"
-            "<BODY>\n"
-            "<H1>Bookmarks</H1>\n\n"
-            "<DL><p>\n");
-    write_group_contents(f, root, 4);
-    fprintf(f, "</DL><p>\n</BODY>\n</HTML>\n");
-}
-
-static bool
-extract_tag_text(const std::string &content, size_t start, const char *closing_tag, size_t &out_end, std::string &out_text)
-{
-    size_t closing = content.find(closing_tag, start);
-    if (closing == std::string::npos) return false;
-    out_text = content.substr(start, closing - start);
-    out_end = closing + strlen(closing_tag);
-    while (!out_text.empty() && isspace((unsigned char)out_text.front())) {
-        out_text.erase(out_text.begin());
-    }
-    while (!out_text.empty() && isspace((unsigned char)out_text.back())) {
-        out_text.pop_back();
-    }
-    return true;
-}
-
-static bool
-parse_attribute_value(const std::string &tag, const char *name, std::string &out_value)
-{
-    std::string lower_name;
-    for (const char *c = name; *c; ++c) {
-        lower_name.push_back(std::tolower((unsigned char)*c));
-    }
-    size_t pos = 0;
-    while (pos < tag.size()) {
-        while (pos < tag.size() && isspace((unsigned char)tag[pos])) ++pos;
-        size_t name_start = pos;
-        while (pos < tag.size() && tag[pos] != '=' && !isspace((unsigned char)tag[pos])) ++pos;
-        if (pos >= tag.size()) break;
-        std::string attr_name = tag.substr(name_start, pos - name_start);
-        std::string attr_name_lower;
-        for (char ch : attr_name) {
-            attr_name_lower.push_back(std::tolower((unsigned char)ch));
-        }
-        while (pos < tag.size() && isspace((unsigned char)tag[pos])) ++pos;
-        if (pos >= tag.size() || tag[pos] != '=') continue;
-        ++pos;
-        while (pos < tag.size() && isspace((unsigned char)tag[pos])) ++pos;
-        if (pos >= tag.size()) break;
-        char quote = tag[pos];
-        if (quote == '\"' || quote == '\'') {
-            ++pos;
-            size_t value_start = pos;
-            while (pos < tag.size() && tag[pos] != quote) ++pos;
-            std::string attr_value = tag.substr(value_start, pos - value_start);
-            if (attr_name_lower == lower_name) {
-                out_value = attr_value;
-                return true;
-            }
-            if (pos < tag.size()) ++pos;
-        } else {
-            size_t value_start = pos;
-            while (pos < tag.size() && !isspace((unsigned char)tag[pos])) ++pos;
-            std::string attr_value = tag.substr(value_start, pos - value_start);
-            if (attr_name_lower == lower_name) {
-                out_value = attr_value;
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-static std::string
-trim_whitespace(std::string value)
-{
-    size_t start = 0;
-    while (start < value.size() && isspace((unsigned char)value[start])) start++;
-    size_t end = value.size();
-    while (end > start && isspace((unsigned char)value[end - 1])) end--;
-    return value.substr(start, end - start);
-}
-
-static BookmarkGroup *
-find_or_create_child_group(BookmarkGroup *parent, const std::string &name)
-{
-    if (!parent) return NULL;
-    for (const auto &child : parent->children) {
-        if (child && child->name == name) {
-            return child.get();
-        }
-    }
-    return add_bookmark_group(parent, name.c_str());
-}
-
-static void
-parse_netscape_bookmarks(const std::string &content, BookmarkGroup *root)
-{
-    if (!root) {
-        fprintf(stderr, "[ck-browser] parse_netscape_bookmarks called with null root\n");
-        return;
-    }
-    fprintf(stderr,
-            "[ck-browser] parse_netscape_bookmarks start len=%zu root=%p\n",
-            content.size(),
-            (void *)root);
-    std::vector<BookmarkGroup *> stack;
-    stack.push_back(root);
-    size_t pos = 0;
-    size_t iterations = 0;
-    static const size_t kBookmarkParseMaxStack = 128;
-    static const size_t kBookmarkParseMaxIterations = 200000;
-    while (pos < content.size()) {
-        if (++iterations > kBookmarkParseMaxIterations) {
-            fprintf(stderr, "[ck-browser] parse aborted: too many iterations (%zu)\n", iterations);
-            break;
-        }
-        size_t lt = content.find('<', pos);
-        if (lt == std::string::npos) break;
-        size_t gt = content.find('>', lt);
-        if (gt == std::string::npos) {
-            fprintf(stderr, "[ck-browser] parse_netscape_bookmarks: missing closing '>' after pos=%zu\n", lt);
-            break;
-        }
-        std::string tag = content.substr(lt + 1, gt - lt - 1);
-        std::string tag_preview = tag.substr(0, std::min(tag.size(), (size_t)128));
-        fprintf(stderr,
-                "[ck-browser] parse loop pos=%zu lt=%zu gt=%zu stack=%zu tag_preview='%s'\n",
-                pos,
-                lt,
-                gt,
-                stack.size(),
-                tag_preview.c_str());
-        size_t name_start = 0;
-        while (name_start < tag.size() && isspace((unsigned char)tag[name_start])) {
-            name_start++;
-        }
-        if (name_start >= tag.size()) {
-            pos = gt + 1;
-            continue;
-        }
-        bool closing = false;
-        if (tag[name_start] == '/') {
-            closing = true;
-            name_start++;
-        }
-        size_t name_end = name_start;
-        while (name_end < tag.size() && !isspace((unsigned char)tag[name_end])) {
-            name_end++;
-        }
-        std::string name = tag.substr(name_start, name_end - name_start);
-        for (char &c : name) {
-            c = std::toupper((unsigned char)c);
-        }
-        if (closing) {
-            if (name == "DL") {
-                if (stack.size() > 1) {
-                    stack.pop_back();
-                } else {
-                    fprintf(stderr, "[ck-browser] parse_netscape_bookmarks: extra </DL> at pos=%zu\n", pos);
-                }
-            }
-            pos = gt + 1;
-            continue;
-        }
-        if (name == "DL" || name == "P" || name == "DT") {
-            pos = gt + 1;
-            continue;
-        }
-        if (name == "H3") {
-            std::string folder_name;
-            size_t end_pos;
-            if (extract_tag_text(content, gt + 1, "</H3>", end_pos, folder_name)) {
-                BookmarkGroup *parent = stack.back();
-                std::string trimmed = trim_whitespace(folder_name);
-                BookmarkGroup *child = find_or_create_child_group(parent, trimmed);
-                if (child) {
-                    fprintf(stderr,
-                            "[ck-browser] parse bookmark folder='%s' parent='%s' child='%s'\n",
-                            trimmed.c_str(),
-                            parent ? parent->name.c_str() : "(null)",
-                            child->name.c_str());
-                    if (stack.size() < kBookmarkParseMaxStack) {
-                        stack.push_back(child);
-                    } else {
-                        fprintf(stderr, "[ck-browser] bookmark stack overflow, resetting\n");
-                        stack.clear();
-                        stack.push_back(root);
-                    }
-                }
-                pos = end_pos;
-                continue;
-            }
-            fprintf(stderr, "[ck-browser] parse_netscape_bookmarks could not find </H3> after pos=%zu\n", gt + 1);
-        } else if (name == "A") {
-            std::string href;
-            parse_attribute_value(tag, "HREF", href);
-            std::string show_in_menu;
-            parse_attribute_value(tag, "SHOW_IN_MENU", show_in_menu);
-            std::string icon_value;
-            parse_attribute_value(tag, "ICON", icon_value);
-            std::string link_text;
-            size_t end_pos;
-            if (extract_tag_text(content, gt + 1, "</A>", end_pos, link_text) && !href.empty()) {
-                BookmarkGroup *current = stack.back();
-                if (!current) current = root;
-                auto entry = std::make_unique<BookmarkEntry>();
-                entry->name = trim_whitespace(link_text);
-                entry->url = href;
-                entry->show_in_menu = (show_in_menu == "1" || show_in_menu == "true" || show_in_menu == "yes");
-                if (!icon_value.empty()) {
-                    std::string payload;
-                    if (extract_base64_payload(icon_value, payload)) {
-                        std::vector<unsigned char> icon_bytes;
-                        if (base64_decode(payload, icon_bytes)) {
-                            entry->icon_png = icon_bytes;
-                            entry->icon_width = 0;
-                            entry->icon_height = 0;
-                        }
-                    }
-                }
-                fprintf(stderr,
-                        "[ck-browser] parse bookmark entry name='%s' url='%s' show=%s\n",
-                        entry->name.c_str(),
-                        entry->url.c_str(),
-                        show_in_menu.c_str());
-                current->entries.emplace_back(std::move(entry));
-                pos = end_pos;
-                continue;
-            }
-            fprintf(stderr, "[ck-browser] parse_netscape_bookmarks could not parse <A> entry near pos=%zu\n", gt + 1);
-        }
-        pos = gt + 1;
-    }
-}
-
-static void
-save_bookmarks_to_file()
-{
-    LOG_ENTER("root=%p", (void *)g_bookmark_root.get());
-    if (!g_bookmark_root) {
-        LOG_ENTER("no bookmark root, skipping save");
-        return;
-    }
-    const char *path = get_bookmarks_file_path();
-    if (!path || path[0] == '\0') {
-        LOG_ENTER("no bookmark path available, skipping save");
-        return;
-    }
-    fprintf(stderr, "[ck-browser] saving bookmarks to %s\n", path);
-    ensure_path_directory(path);
-    FILE *f = fopen(path, "wb");
-    if (!f) return;
-    write_netscape_bookmarks(f, g_bookmark_root.get());
-    fclose(f);
-    g_bookmarks_file_mtime = get_file_mtime(path);
-}
-
-	static std::unique_ptr<BookmarkGroup>
-	load_bookmarks_from_file()
-{
-    const char *path = get_bookmarks_file_path();
-    if (!path || path[0] == '\0') return nullptr;
-    fprintf(stderr, "[ck-browser] loading bookmarks from %s\n", path);
-    time_t new_mtime = get_file_mtime(path);
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        fprintf(stderr, "[ck-browser] load_bookmarks_from_file failed to open %s\n", path);
-        g_bookmarks_file_mtime = new_mtime;
-        return nullptr;
-    }
-    std::string content;
-    char buffer[4096];
-    size_t read = 0;
-    while ((read = fread(buffer, 1, sizeof(buffer), f)) > 0) {
-        content.append(buffer, read);
-    }
-    fclose(f);
-    auto root = std::make_unique<BookmarkGroup>();
-    root->name = "Bookmarks Menu";
-    parse_netscape_bookmarks(content, root.get());
-    g_bookmarks_file_mtime = new_mtime;
-    fprintf(stderr,
-            "[ck-browser] bookmarks loaded, groups=%zu entries=%zu\n",
-            root->children.size(),
-            root->entries.size());
-    if (root->children.empty() && root->entries.empty()) {
-        fprintf(stderr, "[ck-browser] bookmarks file parsed but produced no children; falling back to default tree\n");
-        return create_default_bookmark_tree();
-    }
-    return root;
-}
-
-static void
-bookmark_file_monitor_timer_cb(XtPointer client_data, XtIntervalId *id)
-{
-    (void)client_data;
-    (void)id;
-    const char *path = get_bookmarks_file_path();
-    if (path && path[0]) {
-        struct stat st;
-        if (stat(path, &st) == 0) {
-            time_t current = st.st_mtime;
-            if (current == 0) {
-                current = get_file_mtime(path);
-            }
-            if (current != g_bookmarks_file_mtime) {
-                fprintf(stderr, "[ck-browser] bookmark monitor detected change (current=%ld prior=%ld)\n",
-                        (long)current, (long)g_bookmarks_file_mtime);
-                std::unique_ptr<BookmarkGroup> loaded = load_bookmarks_from_file();
-                if (loaded) {
-                    g_bookmark_root = std::move(loaded);
-                    BookmarkGroup *selected = g_bookmark_root.get();
-                    if (!g_bookmark_root->children.empty()) {
-                        selected = g_bookmark_root->children[0].get();
-                    }
-                    g_selected_bookmark_group = selected ? selected : g_bookmark_root.get();
-                    rebuild_bookmarks_menu_items();
-                }
-            }
-        } else if (g_bookmarks_file_mtime != 0) {
-            g_bookmarks_file_mtime = 0;
-            std::unique_ptr<BookmarkGroup> fallback = create_default_bookmark_tree();
-            if (fallback) {
-                g_bookmark_root = std::move(fallback);
-                BookmarkGroup *selected = g_bookmark_root.get();
-                if (!g_bookmark_root->children.empty()) {
-                    selected = g_bookmark_root->children[0].get();
-                }
-                g_selected_bookmark_group = selected ? selected : g_bookmark_root.get();
-                rebuild_bookmarks_menu_items();
-            }
-        }
-    }
-    if (g_app) {
-        XtAppAddTimeOut(g_app, 1000, bookmark_file_monitor_timer_cb, NULL);
-    }
-}
-
-static BookmarkEntry *
-find_bookmark_by_url(BookmarkGroup *group, const std::string &url, BookmarkGroup **out_group)
-{
-    if (!group || url.empty()) return NULL;
-    for (const auto &entry : group->entries) {
-        if (entry && entry->url == url) {
-            if (out_group) *out_group = group;
-            return entry.get();
-        }
-    }
-    for (const auto &child : group->children) {
-        BookmarkEntry *found = find_bookmark_by_url(child.get(), url, out_group);
-        if (found) return found;
-    }
-    return NULL;
-}
-
-static BookmarkGroup *
-find_bookmark_parent_group(BookmarkGroup *group, BookmarkEntry *entry)
-{
-    if (!group || !entry) return NULL;
-    for (const auto &child_entry : group->entries) {
-        if (child_entry.get() == entry) {
-            return group;
-        }
-    }
-    for (const auto &child : group->children) {
-        BookmarkGroup *found = find_bookmark_parent_group(child.get(), entry);
-        if (found) return found;
-    }
-    return NULL;
-}
-
-static std::unique_ptr<BookmarkEntry>
-detach_bookmark_entry_from_group(BookmarkGroup *group, BookmarkEntry *entry)
-{
-    if (!group || !entry) return nullptr;
-    auto &entries = group->entries;
-    for (auto it = entries.begin(); it != entries.end(); ++it) {
-        if (it->get() == entry) {
-            std::unique_ptr<BookmarkEntry> detached = std::move(*it);
-            entries.erase(it);
-            return detached;
-        }
-    }
-    return nullptr;
-}
-
-static void
 bookmark_dialog_populate_group_list(BookmarkDialogContext *ctx, Widget list, BookmarkGroup *group, int depth)
 {
     if (!ctx || !list || !group) return;
@@ -4623,7 +3933,7 @@ bookmark_dialog_group_list_selection_cb(Widget w, XtPointer client_data, XtPoint
     int pos = cbs->item_position - 1;
     if (pos < 0 || pos >= (int)ctx->group_entries.size()) return;
     ctx->selected_group = ctx->group_entries[pos];
-    g_selected_bookmark_group = ctx->selected_group;
+    set_selected_bookmark_group(ctx->selected_group);
 }
 
 static void
@@ -4825,8 +4135,9 @@ on_bookmark_dialog_save(Widget w, XtPointer client_data, XtPointer call_data)
         add_to_menu = set;
     }
     BookmarkGroup *root_group = ensure_bookmark_groups();
+    BookmarkGroup *selected_group = get_selected_bookmark_group();
     BookmarkGroup *target_group = ctx->selected_group ? ctx->selected_group :
-                                   (g_selected_bookmark_group ? g_selected_bookmark_group : root_group);
+                                   (selected_group ? selected_group : root_group);
     if (!target_group && root_group) {
         target_group = root_group;
     }
@@ -4879,8 +4190,10 @@ on_bookmark_dialog_save(Widget w, XtPointer client_data, XtPointer call_data)
         XtDestroyWidget(ctx->dialog);
     }
     delete ctx;
+    BookmarkGroup *final_selection = target_group ? target_group : root_group;
+    set_selected_bookmark_group(final_selection);
     rebuild_bookmarks_menu_items();
-    save_bookmarks_to_file();
+    save_bookmarks_and_refresh_mtime();
 }
 
 static void
@@ -4903,9 +4216,11 @@ show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry, BookmarkGroup *e
             }
         }
     }
-    BookmarkGroup *initial_group = entry_group ? entry_group :
-                                    (g_selected_bookmark_group ? g_selected_bookmark_group : root);
-    g_selected_bookmark_group = initial_group;
+    BookmarkGroup *initial_group = entry_group ? entry_group : get_selected_bookmark_group();
+    if (!initial_group) {
+        initial_group = root;
+    }
+    set_selected_bookmark_group(initial_group);
     BookmarkDialogContext *ctx = new BookmarkDialogContext();
     ctx->editing_entry = entry;
     ctx->editing_group = entry_group;
@@ -5070,7 +4385,7 @@ show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry, BookmarkGroup *e
             }
         }
         ctx->selected_group = ctx->group_entries[selected_index];
-        g_selected_bookmark_group = ctx->selected_group;
+        set_selected_bookmark_group(ctx->selected_group);
         XmListSelectPos(group_list, selected_index + 1, False);
     }
 

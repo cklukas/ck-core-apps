@@ -472,9 +472,9 @@ class BrowserClient : public CefClient,
 	            default_open_link_new_tab_cmd_,
 	            default_open_link_new_window_cmd_);
 
-	    model->InsertItemAt(0, 26500, "Open Link in New Tab (CK)");
-	    model->InsertItemAt(1, 26501, "Open Link in New Window (CK)");
-	    model->InsertSeparatorAt(2);
+	    // model->InsertItemAt(0, 26500, "Open Link in New Tab (CK)");
+	    // model->InsertItemAt(1, 26501, "Open Link in New Window (CK)");
+	    // model->InsertSeparatorAt(2);
 	  }
 
 	  bool OnContextMenuCommand(CefRefPtr<CefBrowser> browser,

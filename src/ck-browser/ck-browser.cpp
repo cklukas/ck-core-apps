@@ -162,10 +162,6 @@ static Widget g_tab_stack = NULL;
 static Widget g_tab_box = NULL;
 static Widget g_about_shell = NULL;
 static Widget g_url_field = NULL;
-static Widget g_back_button = NULL;
-static Widget g_forward_button = NULL;
-static Widget g_nav_back = NULL;
-static Widget g_nav_forward = NULL;
 static Widget g_home_button = NULL;
 static Widget g_home_button_menu = NULL;
 static Widget g_security_label = NULL;
@@ -259,15 +255,15 @@ bool is_tab_selected(const BrowserTab *tab);
 void set_current_tab(BrowserTab *tab);
 static void tab_selection_handler(BrowserTab *tab, BrowserTab *previous);
 void schedule_tab_browser_creation(BrowserTab *tab);
-static void on_back(Widget w, XtPointer client_data, XtPointer call_data);
-static void on_forward(Widget w, XtPointer client_data, XtPointer call_data);
-static void on_reload(Widget w, XtPointer client_data, XtPointer call_data);
-static void on_home(Widget w, XtPointer client_data, XtPointer call_data);
-static void on_enter_url(Widget w, XtPointer client_data, XtPointer call_data);
-static void on_go_back_menu(Widget w, XtPointer client_data, XtPointer call_data);
-static void on_go_forward_menu(Widget w, XtPointer client_data, XtPointer call_data);
-static void on_reload_menu(Widget w, XtPointer client_data, XtPointer call_data);
-static void on_open_file_menu(Widget w, XtPointer client_data, XtPointer call_data);
+void on_back(Widget w, XtPointer client_data, XtPointer call_data);
+void on_forward(Widget w, XtPointer client_data, XtPointer call_data);
+void on_reload(Widget w, XtPointer client_data, XtPointer call_data);
+void on_home(Widget w, XtPointer client_data, XtPointer call_data);
+void on_enter_url(Widget w, XtPointer client_data, XtPointer call_data);
+void on_go_back_menu(Widget w, XtPointer client_data, XtPointer call_data);
+void on_go_forward_menu(Widget w, XtPointer client_data, XtPointer call_data);
+void on_reload_menu(Widget w, XtPointer client_data, XtPointer call_data);
+void on_open_file_menu(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_file_open_dialog_ok(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_file_open_dialog_cancel(Widget w, XtPointer client_data, XtPointer call_data);
 void set_status_label_text(const char *text);
@@ -277,9 +273,9 @@ static void log_widget_size(const char *context, Widget widget);
 static void on_main_window_resize(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_tab_stack_resize(Widget w, XtPointer client_data, XtPointer call_data);
 static void resize_cef_browser_to_area(BrowserTab *tab, const char *reason);
-static void on_zoom_reset(Widget w, XtPointer client_data, XtPointer call_data);
-static void on_zoom_in(Widget w, XtPointer client_data, XtPointer call_data);
-static void on_zoom_out(Widget w, XtPointer client_data, XtPointer call_data);
+void on_zoom_reset(Widget w, XtPointer client_data, XtPointer call_data);
+void on_zoom_in(Widget w, XtPointer client_data, XtPointer call_data);
+void on_zoom_out(Widget w, XtPointer client_data, XtPointer call_data);
 static void collect_bookmark_groups(BookmarkGroup *group,
                                     std::vector<BookmarkGroup *> &entries,
                                     std::vector<std::string> &labels,
@@ -337,8 +333,8 @@ static void show_bookmark_manager_dialog();
 static void set_security_label_text(const char *text);
 static void focus_motif_widget(Widget widget);
 void browser_set_focus(BrowserTab *tab, bool focus);
-static void on_url_focus(Widget w, XtPointer client_data, XtPointer call_data);
-static void on_url_button_press(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch);
+void on_url_focus(Widget w, XtPointer client_data, XtPointer call_data);
+void on_url_button_press(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch);
 void on_browser_area_button_press(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch);
 static Widget pick_adjacent_tab_page(Widget current_page);
 std::string extract_host_from_url(const std::string &url);
@@ -371,20 +367,20 @@ std::string load_homepage_file();
 static void save_homepage_file(const std::string &url, const char *reason);
 static void wm_save_yourself_cb(Widget w, XtPointer client_data, XtPointer call_data);
 static void restore_tabs_from_session_data(SessionData *data);
-static void on_restore_session(Widget w, XtPointer client_data, XtPointer call_data);
-static void on_new_window(Widget w, XtPointer client_data, XtPointer call_data);
+void on_restore_session(Widget w, XtPointer client_data, XtPointer call_data);
+void on_new_window(Widget w, XtPointer client_data, XtPointer call_data);
 void resize_devtools_to_area(BrowserTab *tab, const char *reason);
 static void on_devtools_area_resize(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_devtools_shell_wm_delete(Widget w, XtPointer client_data, XtPointer call_data);
 static void ensure_home_button_menu();
-static void on_home_button_press(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch);
+void on_home_button_press(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch);
 static void on_home_menu_set_blank(Widget w, XtPointer client_data, XtPointer call_data);
 static void on_home_menu_use_current(Widget w, XtPointer client_data, XtPointer call_data);
 static int count_open_browsers();
 static void begin_shutdown_sequence(const char *reason);
 static void focus_url_field_timer(XtPointer client_data, XtIntervalId *id);
-static void on_add_bookmark_menu(Widget w, XtPointer client_data, XtPointer call_data);
-static void on_open_bookmark_manager_menu(Widget w, XtPointer client_data, XtPointer call_data);
+void on_add_bookmark_menu(Widget w, XtPointer client_data, XtPointer call_data);
+void on_open_bookmark_manager_menu(Widget w, XtPointer client_data, XtPointer call_data);
 
 BrowserTab::~BrowserTab() = default;
 
@@ -705,7 +701,7 @@ static void restore_tabs_from_session_data(SessionData *data)
     }
 }
 
-static void on_restore_session(Widget w, XtPointer client_data, XtPointer call_data)
+void on_restore_session(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
     (void)client_data;
@@ -1218,7 +1214,7 @@ static void log_widget_size(const char *context, Widget widget)
     fprintf(stderr, "[ck-browser] %s size %dx%d\n", context, (int)width, (int)height);
 }
 
-static void on_zoom_reset(Widget w, XtPointer client_data, XtPointer call_data)
+void on_zoom_reset(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
     (void)client_data;
@@ -1230,7 +1226,7 @@ static void on_zoom_reset(Widget w, XtPointer client_data, XtPointer call_data)
     TabManager::instance().zoomReset(tab);
 }
 
-static void on_zoom_in(Widget w, XtPointer client_data, XtPointer call_data)
+void on_zoom_in(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
     (void)client_data;
@@ -1242,7 +1238,7 @@ static void on_zoom_in(Widget w, XtPointer client_data, XtPointer call_data)
     TabManager::instance().zoomIn(tab);
 }
 
-static void on_zoom_out(Widget w, XtPointer client_data, XtPointer call_data)
+void on_zoom_out(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
     (void)client_data;
@@ -1419,7 +1415,7 @@ static void on_file_open_dialog_cancel(Widget w, XtPointer client_data, XtPointe
     close_file_open_dialog();
 }
 
-static void on_open_file_menu(Widget w, XtPointer client_data, XtPointer call_data)
+void on_open_file_menu(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
     (void)client_data;
@@ -1600,7 +1596,7 @@ void on_browser_resize(Widget w, XtPointer client_data, XtPointer call_data)
     resize_cef_browser_to_area(tab, "browser area resize");
 }
 
-static void on_url_activate(Widget w, XtPointer client_data, XtPointer call_data)
+void on_url_activate(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)client_data;
     (void)call_data;
@@ -1628,7 +1624,7 @@ static void on_url_activate(Widget w, XtPointer client_data, XtPointer call_data
     load_url_for_tab(active, normalized);
 }
 
-static void on_back(Widget w, XtPointer client_data, XtPointer call_data)
+void on_back(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
     (void)client_data;
@@ -1638,7 +1634,7 @@ static void on_back(Widget w, XtPointer client_data, XtPointer call_data)
     TabManager::instance().goBack(tab);
 }
 
-static void on_forward(Widget w, XtPointer client_data, XtPointer call_data)
+void on_forward(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
     (void)client_data;
@@ -1648,7 +1644,7 @@ static void on_forward(Widget w, XtPointer client_data, XtPointer call_data)
     TabManager::instance().goForward(tab);
 }
 
-static void on_reload(Widget w, XtPointer client_data, XtPointer call_data)
+void on_reload(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
     (void)client_data;
@@ -1678,7 +1674,7 @@ static void on_reload(Widget w, XtPointer client_data, XtPointer call_data)
     TabManager::instance().reloadTab(tab);
 }
 
-static void on_home(Widget w, XtPointer client_data, XtPointer call_data)
+void on_home(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
     (void)client_data;
@@ -1704,7 +1700,7 @@ static void focus_url_field_timer(XtPointer client_data, XtIntervalId *id)
     if (value) XtFree(value);
 }
 
-static void on_enter_url(Widget w, XtPointer client_data, XtPointer call_data)
+void on_enter_url(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
     (void)client_data;
@@ -1721,17 +1717,17 @@ static void on_enter_url(Widget w, XtPointer client_data, XtPointer call_data)
     }
 }
 
-static void on_go_back_menu(Widget w, XtPointer client_data, XtPointer call_data)
+void on_go_back_menu(Widget w, XtPointer client_data, XtPointer call_data)
 {
     on_back(w, client_data, call_data);
 }
 
-static void on_go_forward_menu(Widget w, XtPointer client_data, XtPointer call_data)
+void on_go_forward_menu(Widget w, XtPointer client_data, XtPointer call_data)
 {
     on_forward(w, client_data, call_data);
 }
 
-static void on_reload_menu(Widget w, XtPointer client_data, XtPointer call_data)
+void on_reload_menu(Widget w, XtPointer client_data, XtPointer call_data)
 {
     on_reload(w, client_data, call_data);
 }
@@ -1955,7 +1951,7 @@ void focus_browser_area(BrowserTab *tab)
     }
 }
 
-static void on_url_focus(Widget w, XtPointer client_data, XtPointer call_data)
+void on_url_focus(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)client_data;
     (void)call_data;
@@ -1968,7 +1964,7 @@ static void on_url_focus(Widget w, XtPointer client_data, XtPointer call_data)
     focus_motif_widget(w);
 }
 
-static void on_url_button_press(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch)
+void on_url_button_press(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch)
 {
     (void)client_data;
     (void)event;
@@ -2472,7 +2468,7 @@ static void ensure_home_button_menu()
     g_home_button_menu = menu;
 }
 
-static void on_home_button_press(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch)
+void on_home_button_press(Widget w, XtPointer client_data, XEvent *event, Boolean *continue_to_dispatch)
 {
     (void)w;
     (void)client_data;
@@ -2526,7 +2522,7 @@ void detach_tab_clients(BrowserTab *tab)
     }
 }
 
-static void on_new_tab(Widget w, XtPointer client_data, XtPointer call_data)
+void on_new_tab(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
     (void)client_data;
@@ -2547,7 +2543,7 @@ static void on_new_tab(Widget w, XtPointer client_data, XtPointer call_data)
     update_all_tab_labels("new tab");
 }
 
-static void on_new_window(Widget w, XtPointer client_data, XtPointer call_data)
+void on_new_window(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
     (void)client_data;
@@ -2559,7 +2555,7 @@ static void on_new_window(Widget w, XtPointer client_data, XtPointer call_data)
     BrowserApp::instance().spawn_new_browser_window(url);
 }
 
-static void on_close_tab(Widget w, XtPointer client_data, XtPointer call_data)
+void on_close_tab(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
     (void)client_data;
@@ -2700,7 +2696,7 @@ static void on_about_destroy(Widget w, XtPointer client_data, XtPointer call_dat
     g_about_shell = NULL;
 }
 
-static void on_help_about(Widget w, XtPointer client_data, XtPointer call_data)
+void on_help_about(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
     (void)client_data;
@@ -2726,7 +2722,7 @@ static void on_help_about(Widget w, XtPointer client_data, XtPointer call_data)
     XtPopup(shell, XtGrabNone);
 }
 
-static void on_help_view(Widget w, XtPointer client_data, XtPointer call_data)
+void on_help_view(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
     (void)client_data;
@@ -2741,7 +2737,7 @@ static void on_help_view(Widget w, XtPointer client_data, XtPointer call_data)
     XtManageChild(dialog);
 }
 
-static void on_add_bookmark_menu(Widget w, XtPointer client_data, XtPointer call_data)
+void on_add_bookmark_menu(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
     (void)client_data;
@@ -2750,7 +2746,7 @@ static void on_add_bookmark_menu(Widget w, XtPointer client_data, XtPointer call
     show_add_bookmark_dialog(get_selected_tab());
 }
 
-static void on_open_bookmark_manager_menu(Widget w, XtPointer client_data, XtPointer call_data)
+void on_open_bookmark_manager_menu(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
     (void)client_data;
@@ -4360,7 +4356,7 @@ show_add_bookmark_dialog(BrowserTab *tab, BookmarkEntry *entry, BookmarkGroup *e
     XtManageChild(dialog);
 }
 
-static void on_menu_exit(Widget w, XtPointer client_data, XtPointer call_data)
+void on_menu_exit(Widget w, XtPointer client_data, XtPointer call_data)
 {
     (void)w;
     (void)call_data;
@@ -4371,346 +4367,6 @@ static void on_menu_exit(Widget w, XtPointer client_data, XtPointer call_data)
     }
     save_last_session_file("menu exit");
     begin_shutdown_sequence("menu exit");
-}
-
-static Widget create_menu_bar(Widget parent)
-{
-    Widget menu_bar = XmCreateMenuBar(parent, xm_name("browserMenuBar"), NULL, 0);
-    XtVaSetValues(menu_bar,
-                  XmNtopAttachment, XmATTACH_FORM,
-                  XmNleftAttachment, XmATTACH_FORM,
-                  XmNrightAttachment, XmATTACH_FORM,
-                  NULL);
-    XtManageChild(menu_bar);
-
-    Widget file_menu = create_cascade_menu(menu_bar, "File", "fileMenu", 'F');
-    Widget file_new_window = create_menu_item(file_menu, "fileNewWindow", "New Window");
-    Widget file_new_tab = create_menu_item(file_menu, "fileNewTab", "New Tab");
-    Widget file_close_tab = create_menu_item(file_menu, "fileCloseTab", "Close Tab");
-    Widget file_open_file =
-        create_menu_item(file_menu, "fileOpenFile", "Open File...");
-    XtVaCreateManagedWidget("fileSep", xmSeparatorGadgetClass, file_menu, NULL);
-    Widget file_exit = create_menu_item(file_menu, "fileExit", "Exit");
-
-    Widget nav_menu = create_cascade_menu(menu_bar, "Navigate", "navigateMenu", 'N');
-    Widget nav_back = create_menu_item(nav_menu, "navBack", "Go Back");
-    Widget nav_forward = create_menu_item(nav_menu, "navForward", "Go Forward");
-    Widget nav_reload = create_menu_item(nav_menu, "navReload", "Reload Page");
-    Widget nav_open_url = create_menu_item(nav_menu, "navOpenUrl", "Open URL");
-    g_nav_back = nav_back;
-    g_nav_forward = nav_forward;
-
-    Widget bookmarks_menu =
-        create_cascade_menu(menu_bar, "Bookmarks", "bookmarksMenu", 'B');
-    g_bookmarks_menu = bookmarks_menu;
-    Widget bookmark_add = create_menu_item(bookmarks_menu, "bookmarkAdd", "Add Page...");
-    Widget bookmark_open_manager =
-        create_menu_item(bookmarks_menu, "bookmarkOpenManager", "Open Bookmark Manager...");
-    XtVaCreateManagedWidget("bookmarkFavoritesSep",
-                            xmSeparatorGadgetClass, bookmarks_menu, NULL);
-    XtVaSetValues(bookmark_add, XmNmnemonic, 'A', NULL);
-    XtVaSetValues(bookmark_open_manager, XmNmnemonic, 'O', NULL);
-    XtAddCallback(bookmark_add, XmNactivateCallback, on_add_bookmark_menu, NULL);
-    XtAddCallback(bookmark_open_manager, XmNactivateCallback,
-                  on_open_bookmark_manager_menu, NULL);
-
-    Widget view_menu = create_cascade_menu(menu_bar, "View", "viewMenu", 'V');
-    Widget view_zoom_in = create_menu_item(view_menu, "viewZoomIn", "Zoom In");
-    Widget view_zoom_out = create_menu_item(view_menu, "viewZoomOut", "Zoom Out");
-    Widget view_zoom_reset = create_menu_item(view_menu, "viewZoomReset", "Reset Zoom");
-    set_menu_accelerator(view_zoom_in, "Ctrl<Key>plus", "Ctrl+Plus");
-    set_menu_accelerator(view_zoom_out, "Ctrl<Key>minus", "Ctrl+Minus");
-    set_menu_accelerator(view_zoom_reset, "Ctrl<Key>0", "Ctrl+0");
-    XtVaCreateManagedWidget("viewSep1", xmSeparatorGadgetClass, view_menu, NULL);
-
-    Widget help_menu = XmCreatePulldownMenu(menu_bar, xm_name("helpMenu"), NULL, 0);
-    XmString help_label = make_string("Help");
-    Widget help_cascade = XtVaCreateManagedWidget(
-        "helpCascade",
-        xmCascadeButtonGadgetClass, menu_bar,
-        XmNlabelString, help_label,
-        XmNmnemonic, 'H',
-        XmNsubMenuId, help_menu,
-        NULL);
-    XmStringFree(help_label);
-    XtVaSetValues(menu_bar, XmNmenuHelpWidget, help_cascade, NULL);
-
-    Widget help_view = create_menu_item(help_menu, "helpView", "View Help");
-    Widget help_about = create_menu_item(help_menu, "helpAbout", "About");
-
-    XtVaSetValues(file_new_window, XmNmnemonic, 'N', NULL);
-    XtVaSetValues(file_new_tab, XmNmnemonic, 'T', NULL);
-    XtVaSetValues(file_close_tab, XmNmnemonic, 'C', NULL);
-    XtVaSetValues(file_open_file, XmNmnemonic, 'O', NULL);
-    XtVaSetValues(file_exit, XmNmnemonic, 'X', NULL);
-
-    set_menu_accelerator(file_new_window, "Ctrl<Key>N", "Ctrl+N");
-    set_menu_accelerator(file_new_tab, "Ctrl<Key>T", "Ctrl+T");
-    set_menu_accelerator(file_close_tab, "Ctrl<Key>W", "Ctrl+W");
-    set_menu_accelerator(file_open_file, "Ctrl<Key>O", "Ctrl+O");
-    set_menu_accelerator(file_exit, "Alt<Key>F4", "Alt+F4");
-
-    XtVaSetValues(nav_back, XmNmnemonic, 'B', NULL);
-    XtVaSetValues(nav_forward, XmNmnemonic, 'F', NULL);
-    XtVaSetValues(nav_reload, XmNmnemonic, 'R', NULL);
-    XtVaSetValues(nav_open_url, XmNmnemonic, 'O', NULL);
-    set_menu_accelerator(nav_back, "Alt<Key>osfLeft", "Alt+Left");
-    set_menu_accelerator(nav_forward, "Alt<Key>osfRight", "Alt+Right");
-    Widget nav_restore = create_menu_item(nav_menu, "navRestoreSession", "Restore Session");
-    set_menu_accelerator(nav_reload, "Ctrl<Key>R", "Ctrl+R");
-    set_menu_accelerator(nav_open_url, "Ctrl<Key>L", "Ctrl+L");
-
-    XtAddCallback(file_new_window, XmNactivateCallback, on_new_window, NULL);
-    XtAddCallback(file_new_tab, XmNactivateCallback, on_new_tab, NULL);
-    XtAddCallback(file_close_tab, XmNactivateCallback, on_close_tab, NULL);
-    XtAddCallback(file_open_file, XmNactivateCallback, on_open_file_menu, NULL);
-    XtAddCallback(nav_open_url, XmNactivateCallback, on_enter_url, NULL);
-    XtAddCallback(file_exit, XmNactivateCallback, on_menu_exit, g_app);
-    XtAddCallback(nav_back, XmNactivateCallback, on_go_back_menu, NULL);
-    XtAddCallback(nav_forward, XmNactivateCallback, on_go_forward_menu, NULL);
-    XtAddCallback(nav_reload, XmNactivateCallback, on_reload_menu, NULL);
-    XtAddCallback(nav_restore, XmNactivateCallback, on_restore_session, NULL);
-    XtAddCallback(view_zoom_in, XmNactivateCallback, on_zoom_in, NULL);
-    XtAddCallback(view_zoom_out, XmNactivateCallback, on_zoom_out, NULL);
-    XtAddCallback(view_zoom_reset, XmNactivateCallback, on_zoom_reset, NULL);
-    XtAddCallback(help_view, XmNactivateCallback, on_help_view, NULL);
-    XtAddCallback(help_about, XmNactivateCallback, on_help_about, NULL);
-
-    rebuild_bookmarks_menu_items();
-
-    return menu_bar;
-}
-
-static Widget create_toolbar(Widget parent, Widget attach_top)
-{
-    Widget toolbar = XmCreateForm(parent, xm_name("browserToolbar"), NULL, 0);
-    XtVaSetValues(toolbar,
-                  XmNtopAttachment, XmATTACH_WIDGET,
-                  XmNtopWidget, attach_top,
-                  XmNleftAttachment, XmATTACH_FORM,
-                  XmNrightAttachment, XmATTACH_FORM,
-                  XmNtopOffset, 6,
-                  XmNleftOffset, 10,
-                  XmNrightOffset, 10,
-                  NULL);
-    XtManageChild(toolbar);
-
-    Widget button_row = XmCreateRowColumn(toolbar, xm_name("toolbarButtons"), NULL, 0);
-    XtVaSetValues(button_row,
-                  XmNorientation, XmHORIZONTAL,
-                  XmNpacking, XmPACK_TIGHT,
-                  XmNspacing, 12,
-                  XmNmarginWidth, 6,
-                  XmNmarginHeight, 4,
-                  XmNleftAttachment, XmATTACH_FORM,
-                  XmNtopAttachment, XmATTACH_FORM,
-                  XmNbottomAttachment, XmATTACH_FORM,
-                  NULL);
-    XtManageChild(button_row);
-
-    XmString back_label = make_string("Back");
-    Widget back_button = XtVaCreateManagedWidget("backButton", xmPushButtonWidgetClass, button_row,
-                            XmNlabelString, back_label, NULL);
-    XmStringFree(back_label);
-    XtAddCallback(back_button, XmNactivateCallback, on_back, NULL);
-    g_back_button = back_button;
-
-    XmString forward_label = make_string("Forward");
-    Widget forward_button = XtVaCreateManagedWidget("forwardButton", xmPushButtonWidgetClass, button_row,
-                            XmNlabelString, forward_label, NULL);
-    XmStringFree(forward_label);
-    XtAddCallback(forward_button, XmNactivateCallback, on_forward, NULL);
-    g_forward_button = forward_button;
-
-    TabManager::instance().registerNavigationWidgets(back_button,
-                                                     forward_button,
-                                                     g_nav_back,
-                                                     g_nav_forward);
-
-    XmString reload_label = make_string("Reload");
-    Widget reload_button = XtVaCreateManagedWidget("reloadButton", xmPushButtonWidgetClass, button_row,
-                            XmNlabelString, reload_label, NULL);
-    XmStringFree(reload_label);
-    XtAddCallback(reload_button, XmNactivateCallback, on_reload, NULL);
-    TabManager::instance().registerReloadButton(reload_button);
-
-    XmString home_label = make_string("Home");
-    Widget home_button = XtVaCreateManagedWidget("homeButton", xmPushButtonWidgetClass, button_row,
-                            XmNlabelString, home_label, NULL);
-    XmStringFree(home_label);
-    XtAddCallback(home_button, XmNactivateCallback, on_home, NULL);
-    XtAddEventHandler(home_button, ButtonPressMask, False, on_home_button_press, NULL);
-    g_home_button = home_button;
-
-    int icon_size = desired_favicon_size();
-    Widget favicon = XtVaCreateManagedWidget(
-        "favicon",
-        xmLabelGadgetClass, toolbar,
-        XmNlabelType, XmPIXMAP,
-        XmNlabelPixmap, XmUNSPECIFIED_PIXMAP,
-        XmNrecomputeSize, False,
-        XmNwidth, icon_size,
-        XmNheight, icon_size,
-        XmNalignment, XmALIGNMENT_CENTER,
-        XmNleftAttachment, XmATTACH_WIDGET,
-        XmNleftWidget, button_row,
-        XmNleftOffset, 6,
-        XmNtopAttachment, XmATTACH_FORM,
-        XmNbottomAttachment, XmATTACH_FORM,
-        NULL);
-    TabManager::instance().registerFaviconLabel(favicon);
-
-    Widget url_field = XtVaCreateManagedWidget(
-        "urlField",
-        xmTextFieldWidgetClass, toolbar,
-        XmNvalue, (g_homepage_url.empty() ? kInitialBrowserUrl : g_homepage_url.c_str()),
-        XmNresizable, True,
-        XmNcolumns, 80,
-        XmNeditable, True,
-        XmNleftAttachment, XmATTACH_WIDGET,
-        XmNleftWidget, favicon,
-        XmNleftOffset, 8,
-        XmNrightAttachment, XmATTACH_FORM,
-        XmNtopAttachment, XmATTACH_FORM,
-        XmNbottomAttachment, XmATTACH_FORM,
-        NULL);
-
-    XtVaSetValues(url_field, XmNcursorPositionVisible, True, NULL);
-    XtAddCallback(url_field, XmNactivateCallback, on_url_activate, NULL);
-    XtAddCallback(url_field, XmNfocusCallback, on_url_focus, NULL);
-    XtAddEventHandler(url_field, ButtonPressMask, False, on_url_button_press, NULL);
-    g_url_field = url_field;
-    XmProcessTraversal(url_field, XmTRAVERSE_CURRENT);
-    TabManager::instance().registerUrlField(url_field);
-
-    return toolbar;
-}
-
-static Widget create_status_segment(Widget parent, const char *name, const char *text, Widget *out_label)
-{
-    Widget frame = XmCreateFrame(parent, (String)name, NULL, 0);
-    XtVaSetValues(frame,
-                  XmNshadowType, XmSHADOW_IN,
-                  XmNmarginWidth, 4,
-                  XmNmarginHeight, 2,
-                  NULL);
-    XtManageChild(frame);
-
-    XmString xm_text = make_string(text);
-    Widget label = XtVaCreateManagedWidget(
-        "statusLabel",
-        xmLabelGadgetClass, frame,
-        XmNlabelString, xm_text,
-        XmNalignment, XmALIGNMENT_BEGINNING,
-        XmNmarginLeft, 4,
-        XmNmarginRight, 4,
-        NULL);
-    XmStringFree(xm_text);
-    if (out_label) {
-        *out_label = label;
-    }
-    return frame;
-}
-
-static Widget create_zoom_segment(Widget parent)
-{
-    Widget frame = XmCreateFrame(parent, (String)"statusZoom", NULL, 0);
-    XtVaSetValues(frame,
-                  XmNshadowType, XmSHADOW_IN,
-                  XmNmarginWidth, 4,
-                  XmNmarginHeight, 2,
-                  NULL);
-    XtManageChild(frame);
-
-    Widget row = XmCreateRowColumn(frame, xm_name("statusZoomRow"), NULL, 0);
-    XtVaSetValues(row,
-                  XmNorientation, XmHORIZONTAL,
-                  XmNpacking, XmPACK_TIGHT,
-                  XmNspacing, 6,
-                  XmNmarginWidth, 4,
-                  XmNmarginHeight, 2,
-                  NULL);
-    XtManageChild(row);
-
-    XmString minus_label = make_string("-");
-    Widget minus_btn = XtVaCreateManagedWidget("zoomMinus", xmPushButtonGadgetClass, row,
-                                               XmNlabelString, minus_label,
-                                               XmNmarginWidth, 4,
-                                               XmNmarginHeight, 0,
-                                               NULL);
-    XmStringFree(minus_label);
-    XtAddCallback(minus_btn, XmNactivateCallback, on_zoom_out, NULL);
-
-    XmString zoom_label = make_string("Zoom: 100%");
-    Widget zoom_btn = XtVaCreateManagedWidget("zoomReset", xmPushButtonGadgetClass, row,
-                                              XmNlabelString, zoom_label,
-                                              XmNshadowThickness, 0,
-                                              XmNmarginWidth, 4,
-                                              XmNmarginHeight, 0,
-                                              NULL);
-    XmStringFree(zoom_label);
-    XtAddCallback(zoom_btn, XmNactivateCallback, on_zoom_reset, NULL);
-
-    XmString plus_label = make_string("+");
-    Widget plus_btn = XtVaCreateManagedWidget("zoomPlus", xmPushButtonGadgetClass, row,
-                                              XmNlabelString, plus_label,
-                                              XmNmarginWidth, 4,
-                                              XmNmarginHeight, 0,
-                                              NULL);
-    XmStringFree(plus_label);
-    XtAddCallback(plus_btn, XmNactivateCallback, on_zoom_in, NULL);
-
-    TabManager::instance().registerZoomControls(zoom_btn, minus_btn, plus_btn);
-
-    return frame;
-}
-
-static Widget create_status_bar(Widget parent)
-{
-    Widget status_form = XmCreateForm(parent, xm_name("browserStatusBar"), NULL, 0);
-    XtVaSetValues(status_form,
-                  XmNfractionBase, 100,
-                  XmNbottomAttachment, XmATTACH_FORM,
-                  XmNleftAttachment, XmATTACH_FORM,
-                  XmNrightAttachment, XmATTACH_FORM,
-                  XmNbottomOffset, 6,
-                  XmNleftOffset, 10,
-                  XmNrightOffset, 10,
-                  NULL);
-    XtManageChild(status_form);
-
-    Widget status_left_label = NULL;
-    Widget status_left = create_status_segment(status_form, "statusMain", "", &status_left_label);
-    TabManager::instance().registerStatusLabel(status_left_label);
-    Widget status_center = create_status_segment(status_form, "statusSecurity", "Security: None", &g_security_label);
-    Widget status_right = create_zoom_segment(status_form);
-
-    XtVaSetValues(status_left,
-                  XmNleftAttachment, XmATTACH_FORM,
-                  XmNrightAttachment, XmATTACH_POSITION,
-                  XmNrightPosition, 60,
-                  XmNtopAttachment, XmATTACH_FORM,
-                  XmNbottomAttachment, XmATTACH_FORM,
-                  NULL);
-    XtVaSetValues(status_center,
-                  XmNleftAttachment, XmATTACH_POSITION,
-                  XmNleftPosition, 60,
-                  XmNrightAttachment, XmATTACH_POSITION,
-                  XmNrightPosition, 85,
-                  XmNtopAttachment, XmATTACH_FORM,
-                  XmNbottomAttachment, XmATTACH_FORM,
-                  XmNleftOffset, 6,
-                  NULL);
-    XtVaSetValues(status_right,
-                  XmNleftAttachment, XmATTACH_POSITION,
-                  XmNleftPosition, 85,
-                  XmNrightAttachment, XmATTACH_FORM,
-                  XmNtopAttachment, XmATTACH_FORM,
-                  XmNbottomAttachment, XmATTACH_FORM,
-                  XmNleftOffset, 6,
-                  NULL);
-
-    return status_form;
 }
 
 char *xm_name(const char *name)
@@ -4806,9 +4462,21 @@ int run_browser_ui_loop(int argc, char *argv[], const BrowserPreflightState &pre
                   NULL);
     XtManageChild(main_form);
 
-    Widget menu_bar = create_menu_bar(main_form);
-    Widget toolbar = create_toolbar(main_form, menu_bar);
-    Widget status_bar = create_status_bar(main_form);
+    UiBuilder::MenuHandles menu_handles;
+    Widget menu_bar = UiBuilder::createMenuBar(main_form, &menu_handles);
+    g_bookmarks_menu = menu_handles.bookmarks_menu;
+    rebuild_bookmarks_menu_items();
+    UiBuilder::ToolbarHandles toolbar_handles;
+    Widget toolbar = UiBuilder::createToolbar(main_form, menu_bar, &menu_handles, &toolbar_handles);
+    g_url_field = toolbar_handles.url_field;
+    g_home_button = toolbar_handles.home_button;
+    if (g_url_field) {
+        const char *initial_value = g_homepage_url.empty() ? kInitialBrowserUrl : g_homepage_url.c_str();
+        XmTextFieldSetString(g_url_field, const_cast<char *>(initial_value));
+    }
+    UiBuilder::StatusBarHandles status_handles;
+    Widget status_bar = UiBuilder::createStatusBar(main_form, &status_handles);
+    g_security_label = status_handles.security_label;
 
     Widget tab_stack = XmCreateTabStack(main_form, xm_name("browserTabStack"), NULL, 0);
     XtVaSetValues(tab_stack,

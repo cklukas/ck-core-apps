@@ -80,9 +80,8 @@
 
 ## Phase 4 – `UiBuilder`
 - [ ] Factor all menu/tab bar builders, dialogs (Add Bookmark, Bookmark Manager), and widget helpers into `ui_builder.*`, using `TabManager`/`BookmarkManager` APIs for data.
-  - [ ] Add a new `ui_builder.h`/`ui_builder.cpp` that exposes builders for menus, toolbars, and dialogs.
-  - [ ] Move the existing menu/tab bar creation helpers (`create_menu_bar`, `create_toolbar`, `create_status_bar`, navigation menu code) into `ui_builder`.
-  - [ ] Relocate the bookmark dialogs (`show_add_bookmark_dialog`, `show_bookmark_manager_dialog`, related callbacks) and their context structs into the new module.
+  - [x] Move the menu/toolbar/status bar builders and navigation menu setup into `ui_builder.*`, wiring TabManager handles and forwarding callbacks via UiBuilder helpers.
+  - [ ] Relocate the bookmark dialogs (`show_add_bookmark_dialog`, `show_bookmark_manager_dialog`, related callbacks) and their context structs into `ui_builder.*`.
   - [ ] Update `ck-browser.cpp` to call `UiBuilder` APIs instead of embedding these builders directly, keeping widget-specific state localized.
 - [ ] Maintain Xm-based layout code here; the module should register callbacks that call back into the managers rather than mutating globals.
 - [ ] Move dialog contexts (`BookmarkDialogContext`, manager contexts) under this module so state stays alongside the widgets they own.

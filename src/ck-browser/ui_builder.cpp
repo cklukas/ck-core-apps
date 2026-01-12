@@ -3,12 +3,13 @@
 #include <Xm/ArrowB.h>
 #include <Xm/CascadeBG.h>
 #include <Xm/Frame.h>
+#include <Xm/Form.h>
 #include <Xm/LabelG.h>
 #include <Xm/MenuShell.h>
 #include <Xm/PushBG.h>
 #include <Xm/PushB.h>
 #include <Xm/RowColumn.h>
-#include <Xm/SeparatorG.h>
+#include <Xm/SeparatoG.h>
 #include <Xm/TextF.h>
 #include <Xm/ToggleB.h>
 
@@ -31,9 +32,16 @@ extern void on_home_button_press(Widget, XtPointer, XEvent *, Boolean *);
 extern void on_url_activate(Widget, XtPointer, XtPointer);
 extern void on_url_focus(Widget, XtPointer, XtPointer);
 extern void on_url_button_press(Widget, XtPointer, XEvent *, Boolean *);
+extern void on_zoom_in(Widget, XtPointer, XtPointer);
 extern void on_zoom_out(Widget, XtPointer, XtPointer);
 extern void on_zoom_reset(Widget, XtPointer, XtPointer);
-extern void on_zoom_in(Widget, XtPointer, XtPointer);
+extern void on_menu_exit(Widget, XtPointer, XtPointer);
+extern void on_enter_url(Widget, XtPointer, XtPointer);
+extern void on_go_back_menu(Widget, XtPointer, XtPointer);
+extern void on_go_forward_menu(Widget, XtPointer, XtPointer);
+extern void on_reload_menu(Widget, XtPointer, XtPointer);
+extern void on_restore_session(Widget, XtPointer, XtPointer);
+extern char *xm_name(const char *name);
 extern const char *kInitialBrowserUrl;
 
 namespace {
@@ -41,7 +49,101 @@ static XmString make_string_internal(const char *text)
 {
     return XmStringCreateLocalized((String)(text ? text : ""));
 }
-Widget create_menu_item_internal(Widget parent, const char *name, const char *label, Pixmap icon);
+
+static Widget create_menu_item_internal(Widget parent, const char *name, const char *label, Pixmap icon)
+{
+    if (!parent) return NULL;
+    XmString xm_label = make_string_internal(label);
+    Widget item = XtVaCreateManagedWidget(name,
+                                          xmPushButtonGadgetClass,
+                                          parent,
+                                          XmNlabelString, xm_label,
+                                          NULL);
+    XmStringFree(xm_label);
+    if (icon != XmUNSPECIFIED_PIXMAP) {
+        XtVaSetValues(item, XmNlabelType, XmPIXMAP, XmNlabelPixmap, icon, NULL);
+    }
+    return item;
+}
+
+static Widget create_status_segment(Widget parent, const char *name, const char *text, Widget *out_label)
+{
+    Widget frame = XmCreateFrame(parent, (String)name, NULL, 0);
+    XtVaSetValues(frame,
+                  XmNshadowType, XmSHADOW_IN,
+                  XmNmarginWidth, 4,
+                  XmNmarginHeight, 2,
+                  NULL);
+    XtManageChild(frame);
+
+    XmString xm_text = make_string_internal(text);
+    Widget label = XtVaCreateManagedWidget(
+        "statusLabel",
+        xmLabelGadgetClass, frame,
+        XmNlabelString, xm_text,
+        XmNalignment, XmALIGNMENT_BEGINNING,
+        XmNmarginLeft, 4,
+        XmNmarginRight, 4,
+        NULL);
+    XmStringFree(xm_text);
+    if (out_label) {
+        *out_label = label;
+    }
+    return frame;
+}
+
+static Widget create_zoom_segment(Widget parent)
+{
+    Widget frame = XmCreateFrame(parent, (String)"statusZoom", NULL, 0);
+    XtVaSetValues(frame,
+                  XmNshadowType, XmSHADOW_IN,
+                  XmNmarginWidth, 4,
+                  XmNmarginHeight, 2,
+                  NULL);
+    XtManageChild(frame);
+
+    Widget row = XmCreateRowColumn(frame, xm_name("statusZoomRow"), NULL, 0);
+    XtVaSetValues(row,
+                  XmNorientation, XmHORIZONTAL,
+                  XmNpacking, XmPACK_TIGHT,
+                  XmNspacing, 6,
+                  XmNmarginWidth, 4,
+                  XmNmarginHeight, 2,
+                  NULL);
+    XtManageChild(row);
+
+    XmString minus_label = make_string_internal("-");
+    Widget minus_btn = XtVaCreateManagedWidget("zoomMinus", xmPushButtonWidgetClass, row,
+                                               XmNlabelString, minus_label,
+                                               XmNmarginWidth, 4,
+                                               XmNmarginHeight, 0,
+                                               NULL);
+    XmStringFree(minus_label);
+    XtAddCallback(minus_btn, XmNactivateCallback, on_zoom_out, NULL);
+
+    XmString zoom_label = make_string_internal("Zoom: 100%");
+    Widget zoom_btn = XtVaCreateManagedWidget("zoomReset", xmPushButtonWidgetClass, row,
+                                              XmNlabelString, zoom_label,
+                                              XmNshadowThickness, 0,
+                                              XmNmarginWidth, 4,
+                                              XmNmarginHeight, 0,
+                                              NULL);
+    XmStringFree(zoom_label);
+    XtAddCallback(zoom_btn, XmNactivateCallback, on_zoom_reset, NULL);
+
+    XmString plus_label = make_string_internal("+");
+    Widget plus_btn = XtVaCreateManagedWidget("zoomPlus", xmPushButtonWidgetClass, row,
+                                              XmNlabelString, plus_label,
+                                              XmNmarginWidth, 4,
+                                              XmNmarginHeight, 0,
+                                              NULL);
+    XmStringFree(plus_label);
+    XtAddCallback(plus_btn, XmNactivateCallback, on_zoom_in, NULL);
+
+    TabManager::instance().registerZoomControls(zoom_btn, minus_btn, plus_btn);
+
+    return frame;
+}
 } // namespace
 
 namespace UiBuilder {
@@ -60,7 +162,7 @@ Widget create_cascade_menu(Widget menu_bar, const char *label, const char *name,
 {
     XmString xm_label = make_string(label);
     Widget menu = XmCreatePulldownMenu(menu_bar, const_cast<String>(name), NULL, 0);
-    Widget cascade = XtVaCreateManagedWidget(
+    XtVaCreateManagedWidget(
         name,
         xmCascadeButtonGadgetClass,
         menu_bar,
@@ -103,6 +205,7 @@ Widget createMenuBar(Widget parent, MenuHandles *handles_out)
     Widget nav_forward = create_menu_item(nav_menu, "navForward", "Go Forward");
     Widget nav_reload = create_menu_item(nav_menu, "navReload", "Reload Page");
     Widget nav_open_url = create_menu_item(nav_menu, "navOpenUrl", "Open URL");
+    Widget nav_restore = create_menu_item(nav_menu, "navRestoreSession", "Restore Session");
 
     Widget bookmarks_menu = create_cascade_menu(menu_bar, "Bookmarks", "bookmarksMenu", 'B');
     Widget bookmark_add = create_menu_item(bookmarks_menu, "bookmarkAdd", "Add Page...");
@@ -131,8 +234,8 @@ Widget createMenuBar(Widget parent, MenuHandles *handles_out)
     XmStringFree(help_label);
     XtVaSetValues(menu_bar, XmNmenuHelpWidget, help_cascade, NULL);
 
-    create_menu_item(help_menu, "helpView", "View Help");
-    create_menu_item(help_menu, "helpAbout", "About");
+    Widget help_view = create_menu_item(help_menu, "helpView", "View Help");
+    Widget help_about = create_menu_item(help_menu, "helpAbout", "About");
 
     set_menu_accelerator(file_new_window, "Ctrl<Key>N", "Ctrl+N");
     set_menu_accelerator(file_new_tab, "Ctrl<Key>T", "Ctrl+T");
@@ -144,6 +247,16 @@ Widget createMenuBar(Widget parent, MenuHandles *handles_out)
     set_menu_accelerator(nav_reload, "Ctrl<Key>R", "Ctrl+R");
     set_menu_accelerator(nav_open_url, "Ctrl<Key>L", "Ctrl+L");
 
+    XtVaSetValues(file_new_window, XmNmnemonic, 'N', NULL);
+    XtVaSetValues(file_new_tab, XmNmnemonic, 'T', NULL);
+    XtVaSetValues(file_close_tab, XmNmnemonic, 'C', NULL);
+    XtVaSetValues(file_open_file, XmNmnemonic, 'O', NULL);
+    XtVaSetValues(file_exit, XmNmnemonic, 'X', NULL);
+    XtVaSetValues(nav_back, XmNmnemonic, 'B', NULL);
+    XtVaSetValues(nav_forward, XmNmnemonic, 'F', NULL);
+    XtVaSetValues(nav_reload, XmNmnemonic, 'R', NULL);
+    XtVaSetValues(nav_open_url, XmNmnemonic, 'O', NULL);
+
     XtAddCallback(file_new_window, XmNactivateCallback, on_new_window, NULL);
     XtAddCallback(file_new_tab, XmNactivateCallback, on_new_tab, NULL);
     XtAddCallback(file_close_tab, XmNactivateCallback, on_close_tab, NULL);
@@ -152,15 +265,26 @@ Widget createMenuBar(Widget parent, MenuHandles *handles_out)
     XtAddCallback(bookmark_open_manager, XmNactivateCallback, on_open_bookmark_manager_menu, NULL);
     XtAddCallback(help_view, XmNactivateCallback, on_help_view, NULL);
     XtAddCallback(help_about, XmNactivateCallback, on_help_about, NULL);
+    XtAddCallback(nav_open_url, XmNactivateCallback, on_enter_url, NULL);
+    XtAddCallback(file_exit, XmNactivateCallback, on_menu_exit, NULL);
+    XtAddCallback(nav_back, XmNactivateCallback, on_go_back_menu, NULL);
+    XtAddCallback(nav_forward, XmNactivateCallback, on_go_forward_menu, NULL);
+    XtAddCallback(nav_reload, XmNactivateCallback, on_reload_menu, NULL);
+    XtAddCallback(nav_restore, XmNactivateCallback, on_restore_session, NULL);
+    XtAddCallback(view_zoom_in, XmNactivateCallback, on_zoom_in, NULL);
+    XtAddCallback(view_zoom_out, XmNactivateCallback, on_zoom_out, NULL);
+    XtAddCallback(view_zoom_reset, XmNactivateCallback, on_zoom_reset, NULL);
 
     if (handles_out) {
         handles_out->bookmarks_menu = bookmarks_menu;
+        handles_out->nav_back = nav_back;
+        handles_out->nav_forward = nav_forward;
     }
 
     return menu_bar;
 }
 
-Widget createToolbar(Widget parent, Widget attach_top, ToolbarHandles *handles_out)
+Widget createToolbar(Widget parent, Widget attach_top, const MenuHandles *menu_handles, ToolbarHandles *handles_out)
 {
     Widget toolbar = XmCreateForm(parent, xm_name("browserToolbar"), NULL, 0);
     XtVaSetValues(toolbar,
@@ -195,14 +319,20 @@ Widget createToolbar(Widget parent, Widget attach_top, ToolbarHandles *handles_o
 
     XmString forward_label = make_string("Forward");
     Widget forward_button = XtVaCreateManagedWidget("forwardButton", xmPushButtonWidgetClass, button_row,
-                                                     XmNlabelString, forward_label, NULL);
+                                                    XmNlabelString, forward_label, NULL);
     XmStringFree(forward_label);
     XtAddCallback(forward_button, XmNactivateCallback, on_forward, NULL);
 
+    Widget nav_back_widget = NULL;
+    Widget nav_forward_widget = NULL;
+    if (menu_handles) {
+        nav_back_widget = menu_handles->nav_back;
+        nav_forward_widget = menu_handles->nav_forward;
+    }
     TabManager::instance().registerNavigationWidgets(back_button,
                                                      forward_button,
-                                                     0,
-                                                     0);
+                                                     nav_back_widget,
+                                                     nav_forward_widget);
 
     XmString reload_label = make_string("Reload");
     Widget reload_button = XtVaCreateManagedWidget("reloadButton", xmPushButtonWidgetClass, button_row,
@@ -254,6 +384,7 @@ Widget createToolbar(Widget parent, Widget attach_top, ToolbarHandles *handles_o
     XtAddCallback(url_field, XmNactivateCallback, on_url_activate, NULL);
     XtAddCallback(url_field, XmNfocusCallback, on_url_focus, NULL);
     XtAddEventHandler(url_field, ButtonPressMask, False, on_url_button_press, NULL);
+    XmProcessTraversal(url_field, XmTRAVERSE_CURRENT);
     TabManager::instance().registerUrlField(url_field);
 
     if (handles_out) {
@@ -313,22 +444,8 @@ Widget createStatusBar(Widget parent, StatusBarHandles *handles_out)
     return status_form;
 }
 
-} // namespace UiBuilder
-
-namespace {
-Widget create_menu_item_internal(Widget parent, const char *name, const char *label, Pixmap icon)
+void UiBuilderInit()
 {
-    if (!parent) return NULL;
-    XmString xm_label = UiBuilder::make_string(label);
-    Widget item = XtVaCreateManagedWidget(name,
-                                          xmPushButtonGadgetClass,
-                                          parent,
-                                          XmNlabelString, xm_label,
-                                          NULL);
-    XmStringFree(xm_label);
-    if (icon != XmUNSPECIFIED_PIXMAP) {
-        XtVaSetValues(item, XmNlabelType, XmPIXMAP, XmNlabelPixmap, icon, NULL);
-    }
-    return item;
 }
-} // namespace
+
+} // namespace UiBuilder

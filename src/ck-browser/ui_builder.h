@@ -18,6 +18,8 @@ struct StatusBarHandles {
 
 struct MenuHandles {
     Widget bookmarks_menu = NULL;
+    Widget nav_back = NULL;
+    Widget nav_forward = NULL;
 };
 
 XmString make_string(const char *text);
@@ -27,7 +29,7 @@ Widget create_cascade_menu(Widget menu_bar, const char *label, const char *name,
 void set_menu_accelerator(Widget menu_item, const char *accel, const char *accel_text);
 
 Widget createMenuBar(Widget parent, MenuHandles *handles_out);
-Widget createToolbar(Widget parent, Widget attach_top, ToolbarHandles *handles_out);
+Widget createToolbar(Widget parent, Widget attach_top, const MenuHandles *menu_handles, ToolbarHandles *handles_out);
 Widget createStatusBar(Widget parent, StatusBarHandles *handles_out);
 
 void UiBuilderInit();

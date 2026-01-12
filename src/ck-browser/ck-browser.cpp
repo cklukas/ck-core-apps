@@ -2622,7 +2622,6 @@ static void on_close_tab(Widget w, XtPointer client_data, XtPointer call_data)
     BrowserTab *tab = get_tab_for_widget(selected);
     if (tab) {
         browser_set_focus(tab, false);
-        close_tab_browser(tab);
     }
     XtDestroyWidget(selected);
 }

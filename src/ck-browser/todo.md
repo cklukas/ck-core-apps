@@ -54,14 +54,14 @@
 - [x] Surface events (new tab request, load finished) through a small interface so UI modules can react without depending on Xm.
 
 -## Phase 2 – `TabManager`
-- [ ] Move `BrowserTab` state, tab creation/destruction, navigation buttons, reload/stop logic, zoom helpers, and favicon updates into `tab_manager.*`.
+- [x] Move `BrowserTab` state, tab creation/destruction, navigation buttons, reload/stop logic, zoom helpers, and favicon updates into `tab_manager.*`.
   - [x] Move tab cleanup helpers (detach/remove/clear) into `TabManager` so `ck-browser.cpp` no longer knows about the old globals.
   - [x] Create `tab_manager.h`/`tab_manager.cpp` that owns the `BrowserTab` data structures and exposes helpers like `createTab`, `closeTab`, `selectTab`, and `getCurrentTab`.
   - [x] Move the Xm widget creation helper (`create_tab_page`) and label updates into `TabManager` so the module owns the tab data lifecycle (added `TabManager::createTab` and rerouted callers).
   - [x] Relocate the implementation of `create_tab_page` into `tab_manager.cpp` so it no longer lives inside `ck-browser.cpp`.
   - [x] Delegate tab selection (`set_current_tab`/`select_tab_page`) to `TabManager` so event code talks through the manager (added TabManager selection handler and registered `tab_selection_handler`).
   - [x] Move toolbar/tab-stack helpers (`schedule_tab_browser_creation` scheduling) into `TabManager` once the basic creation/selection APIs are in place (introduced `scheduleBrowserCreation`).
-  - [ ] Relocate navigation/reload handling, zoom controls, and favicon/icon cache updates into `TabManager` methods so BrowserApp can manipulate tabs through a clean interface.
+  - [x] Relocate navigation/reload handling, zoom controls, and favicon/icon cache updates into `TabManager` methods so BrowserApp can manipulate tabs through a clean interface.
     - [x] Move navigation button wiring and the back/forward helpers into `TabManager`.
     - [x] Move reload/stop button behavior and state updates into `TabManager`.
     - [x] Move zoom controls, button updates, and polling into `TabManager`.

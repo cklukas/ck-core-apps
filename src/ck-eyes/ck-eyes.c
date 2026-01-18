@@ -237,17 +237,16 @@ static void draw_eyes(Display *display, Drawable drawable, GC gc,
     int right_cx2 = right_x + (int)rx;
     int cy2 = top_y + (int)ry;
 
-    int pupil_w = eye_w / 3;
-    int pupil_h = eye_h / 3;
-    if (pupil_w < 6) pupil_w = 6;
-    if (pupil_h < 6) pupil_h = 6;
+    int pupil_size = eye_w < eye_h ? eye_w : eye_h;
+    pupil_size /= 3;
+    if (pupil_size < 6) pupil_size = 6;
 
     int outline = (min_dim * 2) / 100;
     if (outline < 1) outline = 1;
     outline *= 2;
 
-    double eff_rx = rx - outline - pupil_w / 2.0 - 1.0;
-    double eff_ry = ry - outline - pupil_h / 2.0 - 1.0;
+    double eff_rx = rx - outline - pupil_size / 2.0 - 1.0;
+    double eff_ry = ry - outline - pupil_size / 2.0 - 1.0;
     if (eff_rx < 1.0) eff_rx = 1.0;
     if (eff_ry < 1.0) eff_ry = 1.0;
 
@@ -258,8 +257,8 @@ static void draw_eyes(Display *display, Drawable drawable, GC gc,
     if (norm < 1.0) norm = 1.0;
     double scale = 1.0 / norm;
 
-    int left_px = left_cx2 + (int)(dx * scale) - pupil_w / 2;
-    int left_py = cy2 + (int)(dy * scale) - pupil_h / 2;
+    int left_px = left_cx2 + (int)(dx * scale) - pupil_size / 2;
+    int left_py = cy2 + (int)(dy * scale) - pupil_size / 2;
 
     dx = target_x - right_cx2;
     dy = target_y - cy2;
@@ -268,8 +267,8 @@ static void draw_eyes(Display *display, Drawable drawable, GC gc,
     if (norm < 1.0) norm = 1.0;
     scale = 1.0 / norm;
 
-    int right_px = right_cx2 + (int)(dx * scale) - pupil_w / 2;
-    int right_py = cy2 + (int)(dy * scale) - pupil_h / 2;
+    int right_px = right_cx2 + (int)(dx * scale) - pupil_size / 2;
+    int right_py = cy2 + (int)(dy * scale) - pupil_size / 2;
 
     XSetLineAttributes(display, gc, outline, LineSolid, CapRound, JoinRound);
     XSetForeground(display, gc, white);
@@ -279,8 +278,8 @@ static void draw_eyes(Display *display, Drawable drawable, GC gc,
     XDrawArc(display, drawable, gc, left_x, top_y, eye_w, eye_h, 0, 360 * 64);
     XDrawArc(display, drawable, gc, right_x, top_y, eye_w, eye_h, 0, 360 * 64);
 
-    XFillArc(display, drawable, gc, left_px, left_py, pupil_w, pupil_h, 0, 360 * 64);
-    XFillArc(display, drawable, gc, right_px, right_py, pupil_w, pupil_h, 0, 360 * 64);
+    XFillArc(display, drawable, gc, left_px, left_py, pupil_size, pupil_size, 0, 360 * 64);
+    XFillArc(display, drawable, gc, right_px, right_py, pupil_size, pupil_size, 0, 360 * 64);
 
     XSetLineAttributes(display, gc, 1, LineSolid, CapRound, JoinRound);
 }

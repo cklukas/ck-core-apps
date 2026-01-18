@@ -33,6 +33,7 @@
 #include <Xm/Xm.h>
 #include <Xm/Form.h>
 #include <Xm/LabelG.h>
+#include <Dt/WmSettings.h>
 
 #include "vertical_meter.h"
 #include "../shared/session_utils.h"
@@ -88,6 +89,14 @@ static Pixel g_icon_bar_icon_color = 0;
 static Pixel g_icon_segment_color = 0;
 static int g_icon_colors_inited = 0;
 static int g_icon_bar_icon_color_ready = 0;
+static int g_show_open_icons = 0;
+static int g_last_iconified = -1;
+static int g_last_show_open_icons = -1;
+static Window g_dtwm_window = None;
+static Atom g_dtwm_settings_atom = None;
+static int g_logged_no_wm_window = 0;
+static int g_logged_settings_fail = 0;
+static int g_logged_window_ids = 0;
 
 /* ---------- Helper: CPU usage from /proc/stat ---------- */
 
@@ -410,19 +419,183 @@ window_is_iconified(void)
 }
 
 static void
-update_window_title_with_cpu(int cpu_percent, int iconified)
+update_window_title_with_cpu(int cpu_percent, int iconified, int show_open_icons)
 {
     if (!g_toplevel) return;
 
+    Display *display = XtDisplay(g_toplevel);
+    Window window = (display && XtIsRealized(g_toplevel)) ? XtWindow(g_toplevel) : None;
     char title[64];
+    char icon_name[64];
     if (iconified) {
         snprintf(title, sizeof(title), "CPU %d%%", cpu_percent);
+        snprintf(icon_name, sizeof(icon_name), "CPU %d%%", cpu_percent);
     } else {
         snprintf(title, sizeof(title), "System Load");
+        snprintf(icon_name, sizeof(icon_name), "CPU %d%%", cpu_percent);
     }
 
-    XtVaSetValues(g_toplevel, XmNtitle, title,
-                  XmNiconName, title, NULL);
+    if (iconified) {
+        XtVaSetValues(g_toplevel, XmNtitle, title,
+                      XmNiconName, icon_name, NULL);
+    } else {
+        XtVaSetValues(g_toplevel, XmNiconName, icon_name, NULL);
+        if (g_last_iconified == 1 || g_last_show_open_icons != show_open_icons) {
+            XtVaSetValues(g_toplevel, XmNtitle, title, NULL);
+        }
+    }
+
+    if (display && window != None) {
+        XTextProperty text_prop;
+        char *list = icon_name;
+        if (XStringListToTextProperty(&list, 1, &text_prop)) {
+            XSetWMIconName(display, window, &text_prop);
+            if (text_prop.value) {
+                XFree(text_prop.value);
+            }
+        }
+
+        Atom utf8 = XInternAtom(display, "UTF8_STRING", True);
+        Atom net_icon = XInternAtom(display, "_NET_WM_ICON_NAME", True);
+        if (utf8 != None && net_icon != None) {
+            XChangeProperty(display, window, net_icon, utf8, 8, PropModeReplace,
+                            (unsigned char *)icon_name,
+                            (int)strlen(icon_name));
+        }
+    }
+}
+
+static Window
+get_dtwm_workspace_window(Display *display)
+{
+    if (!display) return None;
+    int screen = DefaultScreen(display);
+    Window root = RootWindow(display, screen);
+    Atom info_atom = XInternAtom(display, "_MOTIF_WM_INFO", False);
+    if (info_atom != None) {
+        Atom actual = None;
+        int format = 0;
+        unsigned long nitems = 0;
+        unsigned long bytes_after = 0;
+        unsigned char *data = NULL;
+
+        int status = XGetWindowProperty(display, root, info_atom, 0, 2, False,
+                                        AnyPropertyType, &actual, &format,
+                                        &nitems, &bytes_after, &data);
+        if (status == Success && data && format == 32 && nitems >= 2) {
+            unsigned long *info = (unsigned long *)data;
+            Window wm_window = (Window)info[1];
+            XFree(data);
+            return wm_window;
+        }
+        if (data) XFree(data);
+    }
+
+    Atom ws_atom = XInternAtom(display, "_DT_WORKSPACE_LIST", True);
+    if (ws_atom == None) return None;
+    Atom actual = None;
+    int format = 0;
+    unsigned long nitems = 0;
+    unsigned long bytes_after = 0;
+    unsigned char *data = NULL;
+    int status = XGetWindowProperty(display, root, ws_atom, 0, 16, False,
+                                    AnyPropertyType, &actual, &format,
+                                    &nitems, &bytes_after, &data);
+    if (status != Success || !data || format != 32 || nitems < 1) {
+        if (data) XFree(data);
+        return None;
+    }
+
+    Window wm_window = ((Window *)data)[0];
+    XFree(data);
+    return wm_window;
+}
+
+static void
+ensure_dtwm_monitor(Display *display)
+{
+    if (!display || g_dtwm_window != None) return;
+    g_dtwm_window = get_dtwm_workspace_window(display);
+    if (!g_dtwm_window) return;
+    XSelectInput(display, g_dtwm_window, PropertyChangeMask);
+    g_dtwm_settings_atom = XInternAtom(display, _XA_DT_WM_SETTINGS_V1, True);
+}
+
+static int
+read_dtwm_show_open_icons(Display *display)
+{
+    if (!display) return 0;
+    Window wm_window = get_dtwm_workspace_window(display);
+    if (!wm_window) {
+        if (!g_logged_no_wm_window) {
+            fprintf(stderr, "[ck-load] dtwm settings: WM window not found\n");
+            g_logged_no_wm_window = 1;
+        }
+        return 0;
+    }
+
+    Atom prop = XInternAtom(display, _XA_DT_WM_SETTINGS_V1, True);
+    if (prop == None) {
+        if (!g_logged_settings_fail) {
+            fprintf(stderr, "[ck-load] dtwm settings: atom not available\n");
+            g_logged_settings_fail = 1;
+        }
+        return 0;
+    }
+
+    Atom actual = None;
+    int format = 0;
+    unsigned long nitems = 0;
+    unsigned long bytes_after = 0;
+    unsigned char *data = NULL;
+    Window root = RootWindow(display, DefaultScreen(display));
+    if (!g_logged_window_ids) {
+        fprintf(stderr, "[ck-load] dtwm settings: wm_window=0x%lx root=0x%lx\n",
+                (unsigned long)wm_window, (unsigned long)root);
+        g_logged_window_ids = 1;
+    }
+
+    int status = XGetWindowProperty(display, wm_window, prop, 0, 2, False,
+                                    XA_CARDINAL, &actual, &format,
+                                    &nitems, &bytes_after, &data);
+    if (status != Success || !data || format != 32 || nitems < 2 ||
+        actual != XA_CARDINAL) {
+        if (data) XFree(data);
+        data = NULL;
+        actual = None;
+        format = 0;
+        nitems = 0;
+        bytes_after = 0;
+        status = XGetWindowProperty(display, root, prop, 0, 2, False,
+                                    XA_CARDINAL, &actual, &format,
+                                    &nitems, &bytes_after, &data);
+    }
+
+    if (status != Success || !data || format != 32 || nitems < 2 ||
+        actual != XA_CARDINAL) {
+        if (data) XFree(data);
+        if (!g_logged_settings_fail) {
+            fprintf(stderr,
+                    "[ck-load] dtwm settings: read failed (status=%d format=%d nitems=%lu type=%lu)\n",
+                    status, format, nitems, (unsigned long)actual);
+            g_logged_settings_fail = 1;
+        }
+        return 0;
+    }
+
+    unsigned long *values = (unsigned long *)data;
+    unsigned long version = values[0];
+    unsigned long flags = values[1];
+    int enabled = (version == DT_WM_SETTINGS_V1_VERSION) &&
+                  ((flags & DT_WM_SETTINGS_V1_SHOW_OPEN_WINDOW_ICONS) != 0);
+    XFree(data);
+    if (g_logged_settings_fail || g_last_show_open_icons != enabled) {
+        fprintf(stderr,
+                "[ck-load] dtwm settings: version=%lu flags=0x%lx show_open_icons=%d\n",
+                version, flags, enabled);
+    }
+    g_logged_settings_fail = 0;
+    return enabled;
 }
 
 static double
@@ -648,30 +821,50 @@ refresh_dynamic_icon(int cpu_percent, int ram_percent)
     Display *display = XtDisplay(g_toplevel);
     if (!display) return;
 
+    ensure_dtwm_monitor(display);
+    if (g_dtwm_window != None && g_dtwm_settings_atom != None) {
+        XEvent event;
+        while (XCheckWindowEvent(display, g_dtwm_window, PropertyChangeMask, &event)) {
+            if (event.type == PropertyNotify &&
+                event.xproperty.atom == g_dtwm_settings_atom) {
+                g_show_open_icons = read_dtwm_show_open_icons(display);
+            }
+        }
+    }
+
+    int iconified = window_is_iconified();
+    if (g_last_iconified == -1 || (g_last_iconified == 1 && !iconified)) {
+        g_show_open_icons = read_dtwm_show_open_icons(display);
+    }
+    int update_icon = iconified || g_show_open_icons;
+
     ensure_icon_resources(display);
     update_icon_colors();
     int screen = (g_icon_screen >= 0) ? g_icon_screen : DefaultScreen(display);
     Pixel icon_fill = g_icon_colors_inited ? get_icon_bar_icon_color(display) :
                       BlackPixel(display, screen);
     Pixmap root = RootWindow(display, screen);
-    Pixmap new_pixmap = XCreatePixmap(display, root, ICON_WIDTH, ICON_HEIGHT,
-                                      DefaultDepth(display, screen));
-    if (new_pixmap == None) return;
+    Pixmap new_pixmap = None;
+    if (update_icon) {
+        new_pixmap = XCreatePixmap(display, root, ICON_WIDTH, ICON_HEIGHT,
+                                   DefaultDepth(display, screen));
+        if (new_pixmap == None) return;
 
-    draw_icon_bars(display, new_pixmap, cpu_percent, ram_percent, icon_fill);
-    XFlush(display);
-    Pixmap prev_pixmap = g_icon_pixmap;
-    g_icon_pixmap = new_pixmap;
-    XtVaSetValues(g_toplevel, XmNiconPixmap, g_icon_pixmap, NULL);
-    if (XtIsRealized(g_toplevel)) {
-        update_wm_icon_pixmap(display);
+        draw_icon_bars(display, new_pixmap, cpu_percent, ram_percent, icon_fill);
+        XFlush(display);
+        Pixmap prev_pixmap = g_icon_pixmap;
+        g_icon_pixmap = new_pixmap;
+        XtVaSetValues(g_toplevel, XmNiconPixmap, g_icon_pixmap, NULL);
+        if (XtIsRealized(g_toplevel)) {
+            update_wm_icon_pixmap(display);
+        }
+        if (prev_pixmap != None) {
+            XFreePixmap(display, prev_pixmap);
+        }
     }
-    int iconic = window_is_iconified();
-    update_window_title_with_cpu(cpu_percent, iconic);
-
-    if (prev_pixmap != None) {
-        XFreePixmap(display, prev_pixmap);
-    }
+    update_window_title_with_cpu(cpu_percent, iconified, g_show_open_icons);
+    g_last_iconified = iconified;
+    g_last_show_open_icons = g_show_open_icons;
 }
 
 /* ---------- Timer callback: update all meters ---------- */

@@ -20,8 +20,10 @@ CEF_WRAPPER_CFLAGS := -I$(CEF_WRAPPER_SRC_DIR) -Ithird_party/cef
 CDE_PREFIX ?= /usr/local/CDE
 CDE_INC ?= $(CDE_PREFIX)/include
 CDE_LIB ?= $(CDE_PREFIX)/lib
+# Optional CDE source tree include (for newer headers like Dt/WmSettings.h).
+CDE_SRC_INC ?= /home/klukas/git/cde/cde/include
 
-CDE_CFLAGS := -I$(CDE_INC)
+CDE_CFLAGS := -I$(CDE_INC) $(if $(wildcard $(CDE_SRC_INC)/Dt/WmSettings.h),-I$(CDE_SRC_INC),)
 CDE_LDFLAGS := -L$(CDE_LIB)
 CDE_LIBS := -lDtSvc -lDtXinerama -lDtWidget -ltt -lXm -lXt -lSM -lICE -lXinerama -lX11 -lXpm
 CEF_CFLAGS := -Ithird_party/cef/include -Ithird_party/cef/include/include
@@ -43,6 +45,7 @@ PROGRAMS := $(BIN_DIR)/ck-about \
             $(BIN_DIR)/ck-clock \
             $(BIN_DIR)/ck-calc \
             $(BIN_DIR)/ck-character-map \
+            $(BIN_DIR)/ck-eyes \
             $(BIN_DIR)/ck-browser \
             $(BIN_DIR)/ck-nibbles \
             $(BIN_DIR)/ck-mines \
@@ -59,6 +62,7 @@ ck-clock: $(BIN_DIR)/ck-clock
 ck-calc: $(BIN_DIR)/ck-calc
 ck-character-map: $(BIN_DIR)/ck-character-map
 ck-browser: $(BIN_DIR)/ck-browser
+ck-eyes: $(BIN_DIR)/ck-eyes
 ck-nibbles: $(BIN_DIR)/ck-nibbles
 ck-mines: $(BIN_DIR)/ck-mines
 ck-plasma-1: $(BIN_DIR)/ck-plasma-1
@@ -93,6 +97,10 @@ $(BIN_DIR)/ck-calc: src/ck-calc/ck-calc.c src/ck-calc/app_state_utils.c src/ck-c
 # ck-character-map
 $(BIN_DIR)/ck-character-map: src/ck-character-map/ck-character-map.c src/shared/session_utils.c src/shared/session_utils.h src/shared/about_dialog.c src/shared/about_dialog.h | $(BIN_DIR)
 	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-character-map/ck-character-map.c src/shared/session_utils.c src/shared/about_dialog.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
+
+# ck-eyes
+$(BIN_DIR)/ck-eyes: src/ck-eyes/ck-eyes.c src/shared/session_utils.c src/shared/session_utils.h | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-eyes/ck-eyes.c src/shared/session_utils.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS) -lm
 
 # ck-browser
 $(BIN_DIR)/ck-browser: src/ck-browser/ck-browser.cpp \

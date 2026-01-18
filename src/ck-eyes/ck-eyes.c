@@ -32,13 +32,16 @@ static Widget g_draw = NULL;
 static Display *g_display = NULL;
 static GC g_gc = None;
 static Pixmap g_icon_pixmap = None;
+static Pixmap g_icon_mask = None;
 static GC g_icon_gc = None;
+static GC g_icon_mask_gc = None;
 static int g_iconified = 0;
 static int g_logged_missing_icon_geom = 0;
 static int g_logged_pointer_fail = 0;
 static int g_logged_using_screen_mapping = 0;
 static int g_icon_w = ICON_SIZE_FALLBACK;
 static int g_icon_h = ICON_SIZE_FALLBACK;
+static int g_eye_style = 1;
 
 static char g_exec_path[PATH_MAX] = "ck-eyes";
 static SessionData *session_data = NULL;
@@ -187,23 +190,99 @@ static void draw_eye(Display *display, Drawable drawable, GC gc,
 static void draw_eyes(Display *display, Drawable drawable, GC gc,
                       int width, int height,
                       int target_x, int target_y,
-                      unsigned long bg, unsigned long fg)
+                      unsigned long bg, unsigned long fg,
+                      int style)
 {
     unsigned long white = WhitePixel(display, DefaultScreen(display));
     XSetForeground(display, gc, bg);
     XFillRectangle(display, drawable, gc, 0, 0, width, height);
 
-    int eye_radius = (width < height ? width : height) / 4;
+    int min_dim = (width < height ? width : height);
+    int eye_radius = min_dim / 4;
     if (eye_radius < 6) eye_radius = 6;
 
     int center_y = height / 2;
     int left_cx = width / 2 - eye_radius;
     int right_cx = width / 2 + eye_radius;
 
-    draw_eye(display, drawable, gc, left_cx, center_y, eye_radius,
-             target_x, target_y, bg, fg, white);
-    draw_eye(display, drawable, gc, right_cx, center_y, eye_radius,
-             target_x, target_y, bg, fg, white);
+    if (style == 0) {
+        draw_eye(display, drawable, gc, left_cx, center_y, eye_radius,
+                 target_x, target_y, bg, fg, white);
+        draw_eye(display, drawable, gc, right_cx, center_y, eye_radius,
+                 target_x, target_y, bg, fg, white);
+        return;
+    }
+
+    int pad = (min_dim * 5) / 100;
+    if (pad < 1) pad = 1;
+    int gap = pad * 2;
+    int avail_w = width - 2 * pad;
+    int eye_h = height - 2 * pad;
+    if (avail_w <= 0 || eye_h <= 0) return;
+    int eye_w = (avail_w - gap) / 2;
+    if (eye_w < 2) eye_w = 2;
+    if (eye_w * 2 + gap > avail_w) {
+        eye_w = (avail_w - gap) / 2;
+        if (eye_w < 2) eye_w = 2;
+    }
+    if (eye_h < 2) eye_h = 2;
+
+    int left_x = width / 2 - gap / 2 - eye_w;
+    int right_x = width / 2 + gap / 2;
+    int top_y = pad;
+
+    double rx = eye_w / 2.0;
+    double ry = eye_h / 2.0;
+    int left_cx2 = left_x + (int)rx;
+    int right_cx2 = right_x + (int)rx;
+    int cy2 = top_y + (int)ry;
+
+    int pupil_w = eye_w / 3;
+    int pupil_h = eye_h / 3;
+    if (pupil_w < 6) pupil_w = 6;
+    if (pupil_h < 6) pupil_h = 6;
+
+    int outline = (min_dim * 2) / 100;
+    if (outline < 1) outline = 1;
+    outline *= 2;
+
+    double eff_rx = rx - outline - pupil_w / 2.0 - 1.0;
+    double eff_ry = ry - outline - pupil_h / 2.0 - 1.0;
+    if (eff_rx < 1.0) eff_rx = 1.0;
+    if (eff_ry < 1.0) eff_ry = 1.0;
+
+    double dx = target_x - left_cx2;
+    double dy = target_y - cy2;
+    double norm = (eff_rx > 0.0 && eff_ry > 0.0) ?
+                  sqrt((dx * dx) / (eff_rx * eff_rx) + (dy * dy) / (eff_ry * eff_ry)) : 0.0;
+    if (norm < 1.0) norm = 1.0;
+    double scale = 1.0 / norm;
+
+    int left_px = left_cx2 + (int)(dx * scale) - pupil_w / 2;
+    int left_py = cy2 + (int)(dy * scale) - pupil_h / 2;
+
+    dx = target_x - right_cx2;
+    dy = target_y - cy2;
+    norm = (eff_rx > 0.0 && eff_ry > 0.0) ?
+           sqrt((dx * dx) / (eff_rx * eff_rx) + (dy * dy) / (eff_ry * eff_ry)) : 0.0;
+    if (norm < 1.0) norm = 1.0;
+    scale = 1.0 / norm;
+
+    int right_px = right_cx2 + (int)(dx * scale) - pupil_w / 2;
+    int right_py = cy2 + (int)(dy * scale) - pupil_h / 2;
+
+    XSetLineAttributes(display, gc, outline, LineSolid, CapRound, JoinRound);
+    XSetForeground(display, gc, white);
+    XFillArc(display, drawable, gc, left_x, top_y, eye_w, eye_h, 0, 360 * 64);
+    XFillArc(display, drawable, gc, right_x, top_y, eye_w, eye_h, 0, 360 * 64);
+    XSetForeground(display, gc, fg);
+    XDrawArc(display, drawable, gc, left_x, top_y, eye_w, eye_h, 0, 360 * 64);
+    XDrawArc(display, drawable, gc, right_x, top_y, eye_w, eye_h, 0, 360 * 64);
+
+    XFillArc(display, drawable, gc, left_px, left_py, pupil_w, pupil_h, 0, 360 * 64);
+    XFillArc(display, drawable, gc, right_px, right_py, pupil_w, pupil_h, 0, 360 * 64);
+
+    XSetLineAttributes(display, gc, 1, LineSolid, CapRound, JoinRound);
 }
 
 static void update_icon_size_from_wm(Display *display)
@@ -299,6 +378,10 @@ static void update_wm_icon_pixmap(Display *display, Window window, Pixmap pixmap
     }
     local.flags |= IconPixmapHint;
     local.icon_pixmap = pixmap;
+    if (g_icon_mask != None) {
+        local.flags |= IconMaskHint;
+        local.icon_mask = g_icon_mask;
+    }
     XSetWMHints(display, window, &local);
 }
 
@@ -321,7 +404,8 @@ static void draw_window_eyes(int target_x, int target_y)
                   XmNforeground, &fg,
                   NULL);
 
-    draw_eyes(display, window, g_gc, (int)w, (int)h, target_x, target_y, bg, fg);
+    draw_eyes(display, window, g_gc, (int)w, (int)h, target_x, target_y, bg, fg,
+              g_eye_style);
 }
 
 static void update_icon_eyes(int target_x, int target_y, int icon_w, int icon_h)
@@ -342,19 +426,71 @@ static void update_icon_eyes(int target_x, int target_y, int icon_w, int icon_h)
         XFreePixmap(display, g_icon_pixmap);
         g_icon_pixmap = None;
     }
+    if (g_icon_mask != None) {
+        XFreePixmap(display, g_icon_mask);
+        g_icon_mask = None;
+    }
     g_icon_pixmap = XCreatePixmap(display, root, (unsigned int)icon_w,
                                   (unsigned int)icon_h,
                                   DefaultDepth(display, screen));
+    g_icon_mask = XCreatePixmap(display, root, (unsigned int)icon_w,
+                                (unsigned int)icon_h, 1);
     if (g_icon_pixmap == None) return;
+    if (g_icon_mask == None) return;
 
     Pixel bg = WhitePixel(display, screen);
     Pixel fg = BlackPixel(display, screen);
     draw_eyes(display, g_icon_pixmap, g_icon_gc,
-              icon_w, icon_h, target_x, target_y, bg, fg);
+              icon_w, icon_h, target_x, target_y, bg, fg, g_eye_style);
+
+    ensure_gc(display, g_icon_mask, &g_icon_mask_gc);
+    XSetForeground(display, g_icon_mask_gc, 0);
+    XFillRectangle(display, g_icon_mask, g_icon_mask_gc, 0, 0,
+                   (unsigned int)icon_w, (unsigned int)icon_h);
+    XSetForeground(display, g_icon_mask_gc, 1);
+    if (g_eye_style == 0) {
+        int eye_radius = (icon_w < icon_h ? icon_w : icon_h) / 4;
+        if (eye_radius < 6) eye_radius = 6;
+        int center_y = icon_h / 2;
+        int left_cx = icon_w / 2 - eye_radius;
+        int right_cx = icon_w / 2 + eye_radius;
+        XFillArc(display, g_icon_mask, g_icon_mask_gc,
+                 left_cx - eye_radius, center_y - eye_radius,
+                 eye_radius * 2, eye_radius * 2, 0, 360 * 64);
+        XFillArc(display, g_icon_mask, g_icon_mask_gc,
+                 right_cx - eye_radius, center_y - eye_radius,
+                 eye_radius * 2, eye_radius * 2, 0, 360 * 64);
+    } else {
+        int min_dim = icon_w < icon_h ? icon_w : icon_h;
+        int pad = (min_dim * 5) / 100;
+        if (pad < 1) pad = 1;
+        int gap = pad * 2;
+        int avail_w = icon_w - 2 * pad;
+        int eye_h = icon_h - 2 * pad;
+        if (avail_w <= 0 || eye_h <= 0) {
+            eye_h = 2;
+            avail_w = 2;
+        }
+        int eye_w = (avail_w - gap) / 2;
+        if (eye_w < 2) eye_w = 2;
+        if (eye_w * 2 + gap > avail_w) {
+            eye_w = (avail_w - gap) / 2;
+            if (eye_w < 2) eye_w = 2;
+        }
+        if (eye_h < 2) eye_h = 2;
+        int left_x = icon_w / 2 - gap / 2 - eye_w;
+        int right_x = icon_w / 2 + gap / 2;
+        int top_y = pad;
+        XFillArc(display, g_icon_mask, g_icon_mask_gc,
+                 left_x, top_y, eye_w, eye_h, 0, 360 * 64);
+        XFillArc(display, g_icon_mask, g_icon_mask_gc,
+                 right_x, top_y, eye_w, eye_h, 0, 360 * 64);
+    }
     XFlush(display);
 
     update_wm_icon_pixmap(display, window, g_icon_pixmap);
     XtVaSetValues(g_toplevel, XmNiconPixmap, g_icon_pixmap, NULL);
+    XtVaSetValues(g_toplevel, XmNiconMask, g_icon_mask, NULL);
 }
 
 static void expose_cb(Widget w, XtPointer client_data, XtPointer call_data)
@@ -377,6 +513,17 @@ static void expose_cb(Widget w, XtPointer client_data, XtPointer call_data)
         draw_window_eyes(win_rel_x, win_rel_y);
     } else {
         draw_window_eyes(0, 0);
+    }
+}
+
+static void input_event_handler(Widget w, XtPointer client_data,
+                                XEvent *event, Boolean *cont)
+{
+    (void)w;
+    (void)client_data;
+    (void)cont;
+    if (event && event->type == ButtonPress) {
+        g_eye_style = (g_eye_style + 1) % 2;
     }
 }
 
@@ -419,12 +566,18 @@ static void update_cb(XtPointer client_data, XtIntervalId *id)
     }
 
     if (g_iconified) {
-        int icon_x = 0, icon_y = 0, icon_w = g_icon_w, icon_h = g_icon_h;
+        int icon_x = 0, icon_y = 0, geom_w = 0, geom_h = 0;
         if (get_icon_geometry(g_display, XtWindow(g_toplevel),
-                              &icon_x, &icon_y, &icon_w, &icon_h)) {
-            int target_x = pointer_ok ? (root_x - icon_x) : (icon_w / 2);
-            int target_y = pointer_ok ? (root_y - icon_y) : (icon_h / 2);
-            update_icon_eyes(target_x, target_y, icon_w, icon_h);
+                              &icon_x, &icon_y, &geom_w, &geom_h)) {
+            int target_x = g_icon_w / 2;
+            int target_y = g_icon_h / 2;
+            if (pointer_ok) {
+                if (geom_w < 1) geom_w = 1;
+                if (geom_h < 1) geom_h = 1;
+                target_x = (root_x - icon_x) * g_icon_w / geom_w;
+                target_y = (root_y - icon_y) * g_icon_h / geom_h;
+            }
+            update_icon_eyes(target_x, target_y, g_icon_w, g_icon_h);
         } else {
             if (!g_logged_missing_icon_geom) {
                 fprintf(stderr, "[ck-eyes] icon geometry unavailable; using center\n");
@@ -488,6 +641,7 @@ int main(int argc, char *argv[])
     );
 
     XtAddCallback(g_draw, XmNexposeCallback, expose_cb, NULL);
+    XtAddEventHandler(g_draw, ButtonPressMask, False, input_event_handler, NULL);
 
     XtVaSetValues(g_toplevel,
                   XmNtitle, "Eyes",

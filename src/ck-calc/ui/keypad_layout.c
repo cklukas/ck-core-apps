@@ -395,7 +395,7 @@ void ck_calc_rebuild_keypad(AppState *app)
     }
 
     /* Row 1 */
-    row_anchor = create_key_button(keypad, "backBtn", "◀", NULL, False, offset + 0, 1, col_step, ck_calc_cb_backspace, NULL);
+    row_anchor = create_key_button(keypad, "backBtn", "<", NULL, False, offset + 0, 1, col_step, ck_calc_cb_backspace, NULL);
     app->btn_back = row_anchor;
     row_top = row_anchor;
     if (offset > 0) {

@@ -1051,6 +1051,17 @@ static void focus_handler(Widget w, XtPointer client_data, XEvent *event, Boolea
     }
 }
 
+static void shell_map_handler(Widget w, XtPointer client_data, XEvent *event, Boolean *cont)
+{
+    (void)w;
+    (void)cont;
+    if (!event || event->type != MapNotify) return;
+    AppState *app = (AppState *)client_data;
+    if (!app) return;
+    ck_calc_apply_current_mode_width(app);
+    ck_calc_lock_shell_dimensions(app);
+}
+
 static void build_ui(AppState *app)
 {
     if (!app) return;
@@ -1059,6 +1070,8 @@ static void build_ui(AppState *app)
     XtVaSetValues(main_form,
                   XmNmarginWidth,  0,
                   XmNmarginHeight, 0,
+                  XmNnoResize, True,
+                  XmNresizePolicy, XmRESIZE_NONE,
                   NULL);
     XtManageChild(main_form);
     app->main_form = main_form;
@@ -1360,20 +1373,12 @@ int main(int argc, char *argv[])
     ck_calc_apply_current_mode_width(&app);
     ck_calc_lock_shell_dimensions(&app);
 
-    Dimension init_h = 0;
-    XtVaGetValues(app.shell, XmNheight, &init_h, NULL);
-    if (init_h < 200) {
-        XtVaSetValues(app.shell,
-                      XmNheight, (Dimension)360,
-                      XmNminHeight, (Dimension)360,
-                      NULL);
-    }
-
     XtRealizeWidget(app.shell);
     ck_calc_apply_wm_hints(&app);
     ck_calc_lock_shell_dimensions(&app);
 
     /* Keyboard handler for shortcuts/digits */
+    XtAddEventHandler(app.shell, StructureNotifyMask, False, shell_map_handler, (XtPointer)&app);
     XtAddEventHandler(app.shell, KeyPressMask, True, key_press_handler, NULL);
     XtAddEventHandler(app.shell, KeyReleaseMask, True, key_release_handler, NULL);
     XtAddEventHandler(app.shell, FocusChangeMask, False, focus_handler, NULL);

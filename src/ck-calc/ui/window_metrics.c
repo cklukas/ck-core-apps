@@ -43,8 +43,8 @@ void ck_calc_apply_current_mode_width(AppState *app)
 void ck_calc_apply_wm_hints(AppState *app)
 {
     if (!app || !app->shell) return;
-    unsigned int decor = MWM_DECOR_BORDER | MWM_DECOR_TITLE | MWM_DECOR_MENU | MWM_DECOR_MINIMIZE;
-    unsigned int funcs = MWM_FUNC_MOVE | MWM_FUNC_CLOSE | MWM_FUNC_MINIMIZE;
+    unsigned int decor = MWM_DECOR_ALL ^ (MWM_DECOR_RESIZEH | MWM_DECOR_MAXIMIZE);
+    unsigned int funcs = MWM_FUNC_ALL ^ (MWM_FUNC_RESIZE | MWM_FUNC_MAXIMIZE);
     XtVaSetValues(app->shell,
                   XmNmwmDecorations, decor,
                   XmNmwmFunctions,   funcs,
@@ -58,8 +58,26 @@ void ck_calc_lock_shell_dimensions(AppState *app)
 
     Dimension shell_w = 0, shell_h = 0;
     Dimension form_w = 0, form_h = 0;
+    Dimension pref_h = 0;
+    Dimension desired_w = get_desired_width(app);
     XtVaGetValues(app->shell, XmNwidth, &shell_w, XmNheight, &shell_h, NULL);
     XtVaGetValues(app->main_form, XmNwidth, &form_w, XmNheight, &form_h, NULL);
+
+    if (shell_h <= 1 || form_h <= 1) {
+        fprintf(stderr,
+                "[ck-calc] lock_shell_dimensions deferred shell=%ux%u form=%ux%u\n",
+                (unsigned)shell_w, (unsigned)shell_h,
+                (unsigned)form_w, (unsigned)form_h);
+        XtRealizeWidget(app->shell);
+        XtVaSetValues(app->shell, XmNwidth, desired_w, XmNheight, 360, NULL);
+        XtVaGetValues(app->shell, XmNwidth, &shell_w, XmNheight, &shell_h, NULL);
+        XtVaGetValues(app->main_form, XmNwidth, &form_w, XmNheight, &form_h, NULL);
+        fprintf(stderr,
+                "[ck-calc] lock_shell_dimensions retry shell=%ux%u form=%ux%u\n",
+                (unsigned)shell_w, (unsigned)shell_h,
+                (unsigned)form_w, (unsigned)form_h);
+        if (shell_h <= 1 || form_h <= 1) return;
+    }
 
     if (!app->chrome_inited && shell_h > form_h) {
         app->chrome_dy = shell_h - form_h;
@@ -68,10 +86,16 @@ void ck_calc_lock_shell_dimensions(AppState *app)
 
     if (form_h == 0 || shell_w == 0) return;
 
-    Dimension desired_h = form_h;
+    XtWidgetGeometry pref;
+    memset(&pref, 0, sizeof(pref));
+    if (XtQueryGeometry(app->main_form, NULL, &pref) == XtGeometryYes && pref.height > 0) {
+        pref_h = pref.height;
+    }
+
+    Dimension desired_h = pref_h > 0 ? pref_h : form_h;
     if (app->chrome_inited) desired_h += app->chrome_dy;
 
-    Dimension desired_w = get_desired_width(app);
+    /* desired_w already computed above */
 
     XtVaSetValues(app->shell,
                   XmNwidth,      desired_w,
@@ -80,4 +104,11 @@ void ck_calc_lock_shell_dimensions(AppState *app)
                   XmNminHeight,  desired_h,
                   XmNmaxHeight,  desired_h,
                   NULL);
+
+    fprintf(stderr,
+            "[ck-calc] lock_shell_dimensions shell=%ux%u form=%ux%u pref_h=%u chrome=%u desired_h=%u\n",
+            (unsigned)shell_w, (unsigned)shell_h,
+            (unsigned)form_w, (unsigned)form_h,
+            (unsigned)pref_h, (unsigned)app->chrome_dy,
+            (unsigned)desired_h);
 }

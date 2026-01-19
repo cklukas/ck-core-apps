@@ -90,6 +90,7 @@ static void session_save_cb(Widget w, XtPointer client_data, XtPointer call_data
     if (!session_data) return;
 
     session_capture_geometry(w, session_data, "x", "y", "w", "h");
+    session_data_set_int(session_data, "eye_style", g_eye_style);
     session_save(w, session_data, g_exec_path);
 }
 
@@ -648,6 +649,11 @@ int main(int argc, char *argv[])
                   NULL);
 
     if (session_data && session_load(g_toplevel, session_data)) {
+        int style = session_data_get_int(session_data, "eye_style", g_eye_style);
+        if (style < 0 || style > 1) {
+            style = g_eye_style;
+        }
+        g_eye_style = style;
         session_apply_geometry(g_toplevel, session_data, "x", "y", "w", "h");
     }
 

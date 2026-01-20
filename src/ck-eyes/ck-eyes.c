@@ -207,6 +207,7 @@ static void draw_eyes(Display *display, Drawable drawable, GC gc,
     int right_cx = width / 2 + eye_radius;
 
     if (style == 0) {
+        XSetLineAttributes(display, gc, 2, LineSolid, CapRound, JoinRound);
         draw_eye(display, drawable, gc, left_cx, center_y, eye_radius,
                  target_x, target_y, bg, fg, white);
         draw_eye(display, drawable, gc, right_cx, center_y, eye_radius,

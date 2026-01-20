@@ -24,7 +24,7 @@
 #include "../shared/session_utils.h"
 
 #define UPDATE_INTERVAL_MS 50
-#define ICON_SIZE_FALLBACK 64
+#define ICON_SIZE_FALLBACK 48
 
 static XtAppContext app_context;
 static Widget g_toplevel = NULL;

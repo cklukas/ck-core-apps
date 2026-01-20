@@ -145,26 +145,79 @@ Boolean session_apply_geometry(Widget toplevel, SessionData *data,
                                const char *key_w, const char *key_h)
 {
     if (!toplevel || !data) return False;
-    int have_any = 0;
-    int x = session_data_get_int(data, key_x, 0);
-    int y = session_data_get_int(data, key_y, 0);
-    int w = session_data_get_int(data, key_w, 0);
-    int h = session_data_get_int(data, key_h, 0);
+    int have_x = (key_x && session_data_get(data, key_x));
+    int have_y = (key_y && session_data_get(data, key_y));
+    int have_w = (key_w && session_data_get(data, key_w));
+    int have_h = (key_h && session_data_get(data, key_h));
 
-    if (key_w && session_data_get(data, key_w)) have_any = 1;
-    if (key_h && session_data_get(data, key_h)) have_any = 1;
-    if (!have_any) return False;
+    if (!have_x && !have_y && !have_w && !have_h) return False;
+
+    Position cur_x = 0;
+    Position cur_y = 0;
+    Dimension cur_w = 0;
+    Dimension cur_h = 0;
+    XtVaGetValues(toplevel,
+                  XmNx,      &cur_x,
+                  XmNy,      &cur_y,
+                  XmNwidth,  &cur_w,
+                  XmNheight, &cur_h,
+                  NULL);
+
+    int x = have_x ? session_data_get_int(data, key_x, (int)cur_x) : (int)cur_x;
+    int y = have_y ? session_data_get_int(data, key_y, (int)cur_y) : (int)cur_y;
+    int w = have_w ? session_data_get_int(data, key_w, (int)cur_w) : (int)cur_w;
+    int h = have_h ? session_data_get_int(data, key_h, (int)cur_h) : (int)cur_h;
+
+    Dimension min_w_d = 0;
+    Dimension min_h_d = 0;
+    XtVaGetValues(toplevel,
+                  XmNminWidth,  &min_w_d,
+                  XmNminHeight, &min_h_d,
+                  NULL);
+
+    int min_w = (int)min_w_d;
+    int min_h = (int)min_h_d;
+    int apply_size = (have_w && have_h);
+    if (apply_size) {
+        if (w <= 1 || h <= 1) {
+            apply_size = 0;
+        } else if ((min_w > 0 && w < min_w) || (min_h > 0 && h < min_h)) {
+            apply_size = 0;
+        }
+    }
 
     Display *dpy = XtDisplay(toplevel);
-    clamp_to_screen(dpy, &x, &y, &w, &h);
+    if (apply_size) {
+        if (have_x || have_y) {
+            clamp_to_screen(dpy, &x, &y, &w, &h);
+        } else {
+            int screen = DefaultScreen(dpy);
+            int sw = DisplayWidth(dpy, screen);
+            int sh = DisplayHeight(dpy, screen);
+            if (sw > 0 && w > sw) w = sw;
+            if (sh > 0 && h > sh) h = sh;
+        }
+    } else if (have_x || have_y) {
+        int tmp_w = (int)cur_w;
+        int tmp_h = (int)cur_h;
+        clamp_to_screen(dpy, &x, &y, &tmp_w, &tmp_h);
+    }
 
-    XtVaSetValues(toplevel,
-                  XmNx,      (Position)x,
-                  XmNy,      (Position)y,
-                  XmNwidth,  (Dimension)w,
-                  XmNheight, (Dimension)h,
-                  NULL);
-    return True;
+    if (have_x || have_y) {
+        XtVaSetValues(toplevel,
+                      XmNx, (Position)x,
+                      XmNy, (Position)y,
+                      NULL);
+    }
+
+    if (apply_size) {
+        XtVaSetValues(toplevel,
+                      XmNwidth,  (Dimension)w,
+                      XmNheight, (Dimension)h,
+                      NULL);
+    }
+
+    return (have_x || have_y || apply_size) ? True : False;
 }
 
 Boolean session_load(Widget toplevel, SessionData *data)

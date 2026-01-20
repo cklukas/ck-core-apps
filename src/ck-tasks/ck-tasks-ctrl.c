@@ -56,7 +56,6 @@ typedef struct {
 static void window_collection_init(WindowCollection *collection);
 static int window_collection_add_unique(WindowCollection *collection, Window window);
 static void window_collection_add_from_atom(Display *dpy, Window root, const char *atom_name, WindowCollection *collection);
-static void window_collection_add_recursive(Display *dpy, Window window, WindowCollection *collection);
 static int query_client_list(Display *dpy, Window root, Window **out_list, unsigned long *out_count);
 static int window_property_contains_atom(Display *dpy, Window window, Atom property, Atom value);
 static int get_window_wm_state(Display *dpy, Window window, long *state_out);
@@ -546,33 +545,6 @@ static void window_collection_add_from_atom(Display *dpy, Window root, const cha
         }
     }
     if (data) XFree(data);
-}
-
-static void window_collection_add_recursive(Display *dpy, Window window, WindowCollection *collection)
-{
-    if (!dpy || !collection) return;
-    Window root_return = 0;
-    Window parent_return = 0;
-    Window *children = NULL;
-    unsigned int nchildren = 0;
-    if (!XQueryTree(dpy, window, &root_return, &parent_return, &children, &nchildren)) return;
-    for (unsigned int i = 0; i < nchildren; ++i) {
-        Window child = children[i];
-        XWindowAttributes attrs;
-        if (XGetWindowAttributes(dpy, child, &attrs) == 0) {
-            window_collection_add_recursive(dpy, child, collection);
-            continue;
-        }
-        if (attrs.class != InputOutput) {
-            window_collection_add_recursive(dpy, child, collection);
-            continue;
-        }
-        if (!attrs.override_redirect) {
-            window_collection_add_unique(collection, child);
-        }
-        window_collection_add_recursive(dpy, child, collection);
-    }
-    if (children) XFree(children);
 }
 
 static int window_property_contains_atom(Display *dpy, Window window, Atom property, Atom value)

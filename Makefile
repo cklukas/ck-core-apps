@@ -14,7 +14,7 @@ CEF_WRAPPER_SRC_DIR := third_party/cef/libcef_dll
 CEF_WRAPPER_SRCS := $(shell find $(CEF_WRAPPER_SRC_DIR) -name '*.cc' | sort)
 CEF_WRAPPER_OBJS := $(patsubst $(CEF_WRAPPER_SRC_DIR)/%.cc,$(BUILD_DIR)/cef-wrapper/%.o,$(CEF_WRAPPER_SRCS))
 CEF_WRAPPER_LIB := $(BUILD_DIR)/libcef_dll_wrapper.a
-CEF_WRAPPER_CFLAGS := -I$(CEF_WRAPPER_SRC_DIR) -Ithird_party/cef
+CEF_WRAPPER_CFLAGS := -I$(CEF_WRAPPER_SRC_DIR) -Ithird_party/cef -Wno-attributes
 
 # CDE include/lib paths (override on CLI if different on your system)
 CDE_PREFIX ?= /usr/local/CDE
@@ -30,6 +30,20 @@ CEF_CFLAGS := -Ithird_party/cef/include -Ithird_party/cef/include/include
 CEF_LDFLAGS := -Lthird_party/cef/lib
 CEF_LIBS := -lcef -ldl -lpthread
 CEF_RPATH := -Wl,-rpath,$(abspath third_party/cef/lib)
+XFT_CFLAGS := $(shell pkg-config --cflags xft 2>/dev/null)
+XFT_LIBS := $(shell pkg-config --libs xft 2>/dev/null)
+
+# check for ck-coins dependency (libcurl headers)
+CURL_CFLAGS := $(shell pkg-config --cflags libcurl 2>/dev/null)
+CURL_LIBS := $(shell pkg-config --libs libcurl 2>/dev/null)
+CURL_HEADER := $(firstword \
+  $(wildcard /usr/include/curl/curl.h) \
+  $(wildcard /usr/include/*-linux-gnu/curl/curl.h) \
+  $(if $(CURL_CFLAGS),$(shell pkg-config --variable=includedir libcurl 2>/dev/null)/curl/curl.h,) \
+)
+ifeq ($(CURL_HEADER),)
+  $(warning libcurl dev headers not found. Install: sudo apt-get install libcurl4-openssl-dev)
+endif
 
 $(CEF_WRAPPER_LIB): $(CEF_WRAPPER_OBJS)
 	$(AR) rcs $@ $^
@@ -47,12 +61,13 @@ PROGRAMS := $(BIN_DIR)/ck-about \
             $(BIN_DIR)/ck-character-map \
             $(BIN_DIR)/ck-grab \
             $(BIN_DIR)/ck-eyes \
+            $(BIN_DIR)/ck-coins \
             $(BIN_DIR)/ck-browser \
             $(BIN_DIR)/ck-nibbles \
             $(BIN_DIR)/ck-mines \
             $(BIN_DIR)/ck-plasma-1
 
-.PHONY: all clean ck-about ck-load ck-tasks ck-mixer ck-clock ck-calc ck-character-map ck-grab ck-browser ck-nibbles ck-mines ck-plasma-1
+.PHONY: all clean ck-about ck-load ck-tasks ck-mixer ck-clock ck-calc ck-character-map ck-grab ck-browser ck-eyes ck-coins ck-nibbles ck-mines ck-plasma-1
 
 all: $(PROGRAMS)
 
@@ -65,6 +80,7 @@ ck-character-map: $(BIN_DIR)/ck-character-map
 ck-grab: $(BIN_DIR)/ck-grab
 ck-browser: $(BIN_DIR)/ck-browser
 ck-eyes: $(BIN_DIR)/ck-eyes
+ck-coins: $(BIN_DIR)/ck-coins
 ck-nibbles: $(BIN_DIR)/ck-nibbles
 ck-mines: $(BIN_DIR)/ck-mines
 ck-plasma-1: $(BIN_DIR)/ck-plasma-1
@@ -110,6 +126,10 @@ $(BIN_DIR)/ck-grab: src/ck-grab/ck-grab.c src/ck-grab/ck-grab-camera.pm src/shar
 # ck-eyes
 $(BIN_DIR)/ck-eyes: src/ck-eyes/ck-eyes.c src/shared/session_utils.c src/shared/session_utils.h | $(BIN_DIR)
 	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-eyes/ck-eyes.c src/shared/session_utils.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS) -lm
+
+# ck-coins (NEW)
+$(BIN_DIR)/ck-coins: src/ck-coins/ck-coins.c src/shared/session_utils.c src/shared/session_utils.h src/shared/about_dialog.c src/shared/about_dialog.h | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) $(XFT_CFLAGS) $(CURL_CFLAGS) src/ck-coins/ck-coins.c src/shared/session_utils.c src/shared/about_dialog.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS) $(if $(XFT_LIBS),$(XFT_LIBS),-lXft) -lfontconfig -lfreetype $(if $(CURL_LIBS),$(CURL_LIBS),-lcurl) -lm
 
 # ck-browser
 $(BIN_DIR)/ck-browser: src/ck-browser/ck-browser.cpp \

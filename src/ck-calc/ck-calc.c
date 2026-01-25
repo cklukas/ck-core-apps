@@ -1327,6 +1327,7 @@ int main(int argc, char *argv[])
                                   &argc, argv,
                                   NULL,
                                   XmNtitle, "Calculator",
+                                  XmNiconName, "Calculator",
                                   XmNkeyboardFocusPolicy, XmEXPLICIT,
                                   NULL);
 

@@ -2708,14 +2708,14 @@ void on_help_about(Widget w, XtPointer client_data, XtPointer call_data)
     }
 
     Widget shell = NULL;
-    Widget notebook = about_dialog_build(g_toplevel, "about_browser", "About Internet Browser", &shell);
+    Widget notebook = about_dialog_build(g_toplevel, "about_browser", "About Internet Web Browser", &shell);
     if (!notebook || !shell) return;
 
     about_add_standard_pages(notebook, 1,
-                             "Internet Browser",
-                             "Internet Browser",
-                             "A placeholder browser shell for CK-Core.\n"
-                             "Tabs, navigation controls, and status display are ready.",
+                             "Web Browser",
+                             "Internet Web Browser",
+                             "A simple-to-use integrated web browser for CK-Core.\n"
+                             "Based on Chromium browser engine.",
                              True);
     XtAddCallback(shell, XmNdestroyCallback, on_about_destroy, NULL);
     g_about_shell = shell;
@@ -4448,8 +4448,8 @@ int run_browser_ui_loop(int argc, char *argv[], const BrowserPreflightState &pre
     g_toplevel = toplevel;
     DtInitialize(XtDisplay(toplevel), toplevel, xm_name("CkBrowser"), xm_name("CkBrowser"));
     XtVaSetValues(toplevel,
-                  XmNtitle, "Internet Browser",
-                  XmNiconName, "Internet Browser",
+                  XmNtitle, "Internet Web Browser",
+                  XmNiconName, "Browser",
                   XmNwidth, 1280,
                   XmNheight, 900,
                   NULL);

@@ -51,7 +51,7 @@ export LD_LIBRARY_PATH="$work/motif-prefix/lib"
 (cd "$cde_source/cde" && ./autogen.sh && \
     ./configure CFLAGS='-O1 -g0' CXXFLAGS='-O1 -g0' && \
     make -j4 && make -j4 check && \
-    make -j1 install DESTDIR="$work/cde-stage")
+    fakeroot -- make -j1 install DESTDIR="$work/cde-stage")
 readelf -dW "$cde_source/cde/programs/dtwm/.libs/dtwm" | grep -F 'libXm.so.9'
 
 cde_prefix="$work/cde-stage/usr/dt"

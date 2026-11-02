@@ -40,10 +40,10 @@ features:
     title: Games and demos
     details: Mines, Nibbles and animated plasma exercise the same native desktop stack.
     link: apps.md
-  - icon: ":white_check_mark:"
-    title: Built with CDE
-    details: GitHub and rpi4 CI build latest Motif, CDE and the native application suite as a matched stack.
-    link: ci.md
+  - icon: ":desktop_computer:"
+    title: CK Core CDE
+    details: Explore the maintained desktop environment where the suite integrates with sessions, windows and desktop icons.
+    link: https://cklukas.github.io/ck-core-cde/
   - icon: "🏗️"
     title: CK Core Motif
     details: Explore the maintained native Xt toolkit that supplies the suite's widgets, resources and ABI.

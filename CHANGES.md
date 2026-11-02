@@ -25,5 +25,5 @@
   CI documentation, with GitHub Pages and rpi4 publication configuration.
 - Document all implemented dynamic icons: Clock, System Load, Eyes, Browser,
   Coins and the Plasma demo.
-- Cross-link CK Core Apps and CK Core Motif from the documentation header and
-  front-page feature panels.
+- Cross-link CK Core Apps, CK Core CDE and CK Core Motif from the documentation
+  header and front-page project panels.

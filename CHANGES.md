@@ -27,3 +27,4 @@
   Coins and the Plasma demo.
 - Cross-link CK Core Apps, CK Core CDE and CK Core Motif from the documentation
   header and front-page project panels.
+- Build GitHub Pages and rpi4 documentation with ckdocs v0.10.1.

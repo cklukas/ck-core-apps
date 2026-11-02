@@ -17,6 +17,8 @@ site:
         url: https://cklukas.github.io/ck-core-cde/
       - title: CK Core Motif
         url: https://cklukas.github.io/ck-core-motif/
+      - title: ck-core-fs-lib
+        url: https://cklukas.github.io/ck-core-fs-lib/
 source: docs
 home: docs/index.md
 search: true

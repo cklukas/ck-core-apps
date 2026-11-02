@@ -2,6 +2,8 @@
 
 ## 2026-11-02
 
+- Interlink the CK Core Apps, CDE, Motif and ck-core-fs-lib documentation sites
+  through their site selectors and front-page project panels.
 - Put related CK Core documentation links in the left-side site selector
   rather than the right-side header links.
 - Make Clock query dtwm's advertised icon geometry and render responsive,

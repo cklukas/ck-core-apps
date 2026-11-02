@@ -48,6 +48,10 @@ features:
     title: CK Core Motif
     details: Explore the maintained native Xt toolkit that supplies the suite's widgets, resources and ABI.
     link: https://cklukas.github.io/ck-core-motif/
+  - icon: ":file_folder:"
+    title: ck-core-fs-lib
+    details: Explore the headless, cross-platform filesystem engine and stable C ABI shared by native CK Core clients.
+    link: https://cklukas.github.io/ck-core-fs-lib/
 ---
 
 # A companion suite, not a CDE fork

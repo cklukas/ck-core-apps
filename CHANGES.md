@@ -15,7 +15,8 @@
   normal/increased pairs: 32×32 / 64×64 and 48×48 / 96×96.
 - Use a two-row BTC/USD layout at 32×32 so currency and price never overlap.
 - Keep the System Load icon label stable at narrow sizes: once the `CPU` prefix
-  no longer fits, use percentage-only labels until the icon geometry changes.
+  no longer fits in the actual Motif label font, use percentage-only labels
+  until the icon geometry changes.
 - Require CK Core Motif ABI 9 at build and runtime, with separate Motif and CDE
   prefixes and a preflight that rejects mismatched headers or libraries.
 - Add GitHub and rpi4 CI that build the latest CK Core Motif, CK Core CDE and

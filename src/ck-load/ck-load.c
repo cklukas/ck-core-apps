@@ -95,7 +95,6 @@ static int g_icon_bar_icon_color_ready = 0;
 static int g_icon_width = ICON_SIZE_FALLBACK;
 static int g_icon_height = ICON_SIZE_FALLBACK;
 static CkLoadIconLabelState g_icon_label_state = CK_LOAD_ICON_LABEL_STATE_INIT;
-static XFontStruct *g_icon_label_font = NULL;
 static int g_show_open_icons = 0;
 static int g_last_iconified = -1;
 static int g_last_show_open_icons = -1;
@@ -437,15 +436,20 @@ update_window_title_with_cpu(int cpu_percent, int iconified, int show_open_icons
     char full_icon_name[64];
     int full_label_width;
     int available_width;
+    XmFontList font_list = NULL;
+    XmString full_icon_string = NULL;
 
     snprintf(full_icon_name, sizeof(full_icon_name), "CPU %d%%", cpu_percent);
-    if (!g_icon_label_font && display) {
-        g_icon_label_font = XLoadQueryFont(display, "fixed");
+    if (value_labels[METER_CPU]) {
+        XtVaGetValues(value_labels[METER_CPU], XmNfontList, &font_list, NULL);
     }
-    full_label_width = g_icon_label_font
-        ? XTextWidth(g_icon_label_font, full_icon_name,
-                     (int)strlen(full_icon_name))
+    if (font_list) {
+        full_icon_string = XmStringCreateLocalized(full_icon_name);
+    }
+    full_label_width = full_icon_string
+        ? (int)XmStringWidth(font_list, full_icon_string)
         : (int)strlen(full_icon_name) * 6;
+    if (full_icon_string) XmStringFree(full_icon_string);
     available_width = g_icon_width + ICON_LABEL_CONTENT_ALLOWANCE;
 
     if (ck_load_icon_label_use_cpu_prefix(&g_icon_label_state,
@@ -1292,9 +1296,5 @@ static void session_save_cb(Widget w, XtPointer client_data, XtPointer call_data
     XtAppAddTimeOut(app_context, UPDATE_INTERVAL_MS, update_meters_cb, NULL);
 
     XtAppMainLoop(app_context);
-    if (g_icon_label_font) {
-        XFreeFont(XtDisplay(toplevel), g_icon_label_font);
-        g_icon_label_font = NULL;
-    }
     return 0;
 }

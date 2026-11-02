@@ -72,7 +72,7 @@ PROGRAMS := $(BIN_DIR)/ck-about \
             $(BIN_DIR)/ck-mines \
             $(BIN_DIR)/ck-plasma-1
 
-.PHONY: all clean check-motif ck-about ck-load ck-tasks ck-mixer ck-clock ck-calc ck-character-map ck-grab ck-browser ck-eyes ck-coins ck-nibbles ck-mines ck-plasma-1
+.PHONY: all clean check check-motif ck-about ck-load ck-tasks ck-mixer ck-clock ck-calc ck-character-map ck-grab ck-browser ck-eyes ck-coins ck-nibbles ck-mines ck-plasma-1
 
 all: $(PROGRAMS)
 
@@ -85,6 +85,14 @@ $(BUILD_DIR)/motif-abi-check: tests/motif_abi_check.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -I$(MOTIF_INC) $< -o $@ \
 		-L$(MOTIF_LIB) -Wl,-rpath,$(MOTIF_LIB) -lXm -lXt -lX11
+
+check: $(BUILD_DIR)/ck-load-icon-label-state-test
+	$<
+
+$(BUILD_DIR)/ck-load-icon-label-state-test: tests/ck_load_icon_label_state_test.c src/ck-load/icon_label_state.c src/ck-load/icon_label_state.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) tests/ck_load_icon_label_state_test.c \
+		src/ck-load/icon_label_state.c -o $@
 
 ck-about: $(BIN_DIR)/ck-about
 ck-load: $(BIN_DIR)/ck-load
@@ -108,8 +116,8 @@ $(BIN_DIR)/ck-about: src/ck-about/ck-about.c src/shared/session_utils.c src/shar
 	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-about/ck-about.c src/shared/session_utils.c src/shared/about_dialog.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
 
 # ck-load
-$(BIN_DIR)/ck-load: src/ck-load/ck-load.c src/ck-load/vertical_meter.c src/ck-load/vertical_meter.h src/shared/session_utils.c src/shared/session_utils.h | $(BIN_DIR)
-	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-load/ck-load.c src/ck-load/vertical_meter.c src/shared/session_utils.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
+$(BIN_DIR)/ck-load: src/ck-load/ck-load.c src/ck-load/vertical_meter.c src/ck-load/vertical_meter.h src/ck-load/icon_label_state.c src/ck-load/icon_label_state.h src/shared/session_utils.c src/shared/session_utils.h | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-load/ck-load.c src/ck-load/vertical_meter.c src/ck-load/icon_label_state.c src/shared/session_utils.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
 
 # ck-tasks
 $(BIN_DIR)/ck-tasks: src/ck-tasks/ck-tasks.c src/ck-tasks/ck-tasks-ctrl.c src/ck-tasks/ck-tasks-model.c src/ck-tasks/ck-tasks-ui.c src/ck-tasks/ck-tasks-tab-processes.c src/ck-tasks/ck-tasks-tab-applications.c src/ck-tasks/ck-tasks-tab-performance.c src/ck-tasks/ck-tasks-tab-networking.c src/ck-tasks/ck-tasks-tab-services.c src/ck-tasks/ck-tasks-tab-users.c src/ck-tasks/ck-tasks-tab-simple.c src/ck-tasks/ck-tasks-ui-helpers.c src/ck-load/vertical_meter.c src/shared/session_utils.c src/shared/session_utils.h src/shared/about_dialog.c src/shared/about_dialog.h src/shared/ck-table/ck_table.c src/shared/table/table_widget.c src/shared/gridlayout/gridlayout.c | $(BIN_DIR)

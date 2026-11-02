@@ -63,6 +63,10 @@ pixel-digital time occupies the upper band while the date sits beside stacked
 weekday and month labels. At 64×64 and 96×96, it follows the full vertical
 calendar design; 96×96 uses the larger seven-segment time display.
 
+System Load keeps its icon label stable as the percentage changes. If the full
+`CPU N%` form becomes too wide, that icon-size setting switches to `N%` and
+keeps the compact form until CDE advertises a different icon geometry.
+
 ### Low-resolution CDE pair
 
 | Application | Normal, 32×32 | Increased, 64×64 |

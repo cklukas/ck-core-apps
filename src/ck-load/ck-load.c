@@ -36,6 +36,7 @@
 #include <Dt/WmSettings.h>
 
 #include "vertical_meter.h"
+#include "icon_label_state.h"
 #include "../shared/session_utils.h"
 
 #define NUM_METERS 6
@@ -63,6 +64,9 @@ enum {
 #define ICON_BORDER_INSET 4
 #define ICON_BAR_BG_DARKEN_FACTOR 0.4
 #define ICON_MIN_BRIGHTNESS_DIFF 0.45
+/* dtwm's label content is six pixels wider than WM_ICON_SIZE with its
+ * standard icon frame (padding plus internal/external bevels). */
+#define ICON_LABEL_CONTENT_ALLOWANCE 6
 
 #ifndef DRAW_ICON_DEBUG_CIRCLES
 #define DRAW_ICON_DEBUG_CIRCLES 0
@@ -90,6 +94,8 @@ static int g_icon_colors_inited = 0;
 static int g_icon_bar_icon_color_ready = 0;
 static int g_icon_width = ICON_SIZE_FALLBACK;
 static int g_icon_height = ICON_SIZE_FALLBACK;
+static CkLoadIconLabelState g_icon_label_state = CK_LOAD_ICON_LABEL_STATE_INIT;
+static XFontStruct *g_icon_label_font = NULL;
 static int g_show_open_icons = 0;
 static int g_last_iconified = -1;
 static int g_last_show_open_icons = -1;
@@ -428,12 +434,32 @@ update_window_title_with_cpu(int cpu_percent, int iconified, int show_open_icons
     Window window = (display && XtIsRealized(g_toplevel)) ? XtWindow(g_toplevel) : None;
     char title[64];
     char icon_name[64];
+    char full_icon_name[64];
+    int full_label_width;
+    int available_width;
+
+    snprintf(full_icon_name, sizeof(full_icon_name), "CPU %d%%", cpu_percent);
+    if (!g_icon_label_font && display) {
+        g_icon_label_font = XLoadQueryFont(display, "fixed");
+    }
+    full_label_width = g_icon_label_font
+        ? XTextWidth(g_icon_label_font, full_icon_name,
+                     (int)strlen(full_icon_name))
+        : (int)strlen(full_icon_name) * 6;
+    available_width = g_icon_width + ICON_LABEL_CONTENT_ALLOWANCE;
+
+    if (ck_load_icon_label_use_cpu_prefix(&g_icon_label_state,
+                                           g_icon_width, g_icon_height,
+                                           full_label_width, available_width)) {
+        snprintf(icon_name, sizeof(icon_name), "%s", full_icon_name);
+    } else {
+        snprintf(icon_name, sizeof(icon_name), "%d%%", cpu_percent);
+    }
+
     if (iconified) {
-        snprintf(title, sizeof(title), "CPU %d%%", cpu_percent);
-        snprintf(icon_name, sizeof(icon_name), "CPU %d%%", cpu_percent);
+        snprintf(title, sizeof(title), "%s", full_icon_name);
     } else {
         snprintf(title, sizeof(title), "System Load");
-        snprintf(icon_name, sizeof(icon_name), "CPU %d%%", cpu_percent);
     }
 
     if (iconified) {
@@ -1266,5 +1292,9 @@ static void session_save_cb(Widget w, XtPointer client_data, XtPointer call_data
     XtAppAddTimeOut(app_context, UPDATE_INTERVAL_MS, update_meters_cb, NULL);
 
     XtAppMainLoop(app_context);
+    if (g_icon_label_font) {
+        XFreeFont(XtDisplay(toplevel), g_icon_label_font);
+        g_icon_label_font = NULL;
+    }
     return 0;
 }

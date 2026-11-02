@@ -679,6 +679,57 @@ static void update_icon_pixmap_for_selected(void)
                           DefaultColormap(dpy, screen), "black", &xft_fg);
     }
 
+    if (iw <= 32 || ih <= 32) {
+        char market[32];
+        const char *symbol = (c && c->symbol[0]) ? c->symbol : "COIN";
+        snprintf(market, sizeof(market), "%s/USD", symbol);
+
+        int market_size = 0;
+        int compact_price_size = 0;
+        int row_gap = 1;
+        int compact_pad = 2;
+        int market_h = (ih * 36) / 100;
+        int price_h = ih - market_h - row_gap - 2 * compact_pad;
+        if (market_h < 7) market_h = 7;
+        if (price_h < 9) price_h = 9;
+
+        XftFont *market_font = xft_pick_font_for_slot(
+            dpy, screen, market, iw - 2 * compact_pad, market_h,
+            market_h, 4, &market_size);
+        XftFont *compact_price_font = xft_pick_font_for_slot(
+            dpy, screen, pricebuf, iw - 2 * compact_pad, price_h,
+            price_h, 6, &compact_price_size);
+
+        if (market_font && compact_price_font) {
+            int market_w = xft_text_width(dpy, market_font, market);
+            int price_w = xft_text_width(dpy, compact_price_font, pricebuf);
+            int market_x = (iw - market_w) / 2;
+            int price_x = (iw - price_w) / 2;
+            int market_y = compact_pad + market_font->ascent;
+            int price_y = ih - compact_pad - compact_price_font->descent;
+            if (market_x < compact_pad) market_x = compact_pad;
+            if (price_x < compact_pad) price_x = compact_pad;
+
+            XftDrawStringUtf8(xft_draw, &xft_fg, market_font,
+                              market_x, market_y,
+                              (const FcChar8 *)market, (int)strlen(market));
+            XftDrawStringUtf8(xft_draw, &xft_fg, compact_price_font,
+                              price_x, price_y,
+                              (const FcChar8 *)pricebuf, (int)strlen(pricebuf));
+        }
+
+        if (market_font) XftFontClose(dpy, market_font);
+        if (compact_price_font) XftFontClose(dpy, compact_price_font);
+        XftColorFree(dpy, DefaultVisual(dpy, screen),
+                     DefaultColormap(dpy, screen), &xft_fg);
+        XftDrawDestroy(xft_draw);
+        XFlush(dpy);
+        update_wm_icon_pixmap(dpy, win, g_icon_pixmap);
+        XtVaSetValues(g_toplevel, XmNiconPixmap, g_icon_pixmap,
+                      XmNiconMask, g_icon_mask, NULL);
+        return;
+    }
+
     int min_name = 6;
     int min_usd = 6;
     int min_price = 8;

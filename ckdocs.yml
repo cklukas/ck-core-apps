@@ -13,6 +13,8 @@ site:
       icon: github
     - title: CK Core CDE
       url: https://cklukas.github.io/ck-core-cde/
+    - title: CK Core Motif
+      url: https://cklukas.github.io/ck-core-motif/
 source: docs
 home: docs/index.md
 search: true

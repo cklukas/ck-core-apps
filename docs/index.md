@@ -44,6 +44,10 @@ features:
     title: Built with CDE
     details: GitHub and rpi4 CI build latest Motif, CDE and the native application suite as a matched stack.
     link: ci.md
+  - icon: "🏗️"
+    title: CK Core Motif
+    details: Explore the maintained native Xt toolkit that supplies the suite's widgets, resources and ABI.
+    link: https://cklukas.github.io/ck-core-motif/
 ---
 
 # A companion suite, not a CDE fork

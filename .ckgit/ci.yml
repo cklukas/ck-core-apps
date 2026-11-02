@@ -34,6 +34,10 @@ jobs:
           test -n "$TMPDIR"
           test -n "$CKGIT_SISTER_CK_CORE_MOTIF"
           test -n "$CKGIT_SISTER_CK_CORE_CDE"
+          if ! pkg-config --exists alsa; then
+            echo "runner needs the libasound2-dev package for ck-mixer" >&2
+            exit 1
+          fi
           run_id="$(git rev-parse HEAD)"
           scripts/build-native.sh \
             "$CKGIT_SISTER_CK_CORE_MOTIF" \

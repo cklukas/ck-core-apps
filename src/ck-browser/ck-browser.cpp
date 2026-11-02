@@ -4465,7 +4465,6 @@ int run_browser_ui_loop(int argc, char *argv[], const BrowserPreflightState &pre
     UiBuilder::MenuHandles menu_handles;
     Widget menu_bar = UiBuilder::createMenuBar(main_form, &menu_handles);
     g_bookmarks_menu = menu_handles.bookmarks_menu;
-    rebuild_bookmarks_menu_items();
     UiBuilder::ToolbarHandles toolbar_handles;
     Widget toolbar = UiBuilder::createToolbar(main_form, menu_bar, &menu_handles, &toolbar_handles);
     g_url_field = toolbar_handles.url_field;

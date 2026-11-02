@@ -2,6 +2,17 @@
 
 ## 2026-11-02
 
+- Make Clock query dtwm's advertised icon geometry and render responsive,
+  readable layouts at both normal 48×48 and increased 96×96 sizes, including
+  a compact pixel-digital time band and side-by-side small-date composition.
+- Make System Load, Plasma and Browser follow the same dtwm icon-size contract
+  instead of publishing fixed 96×96 pixmaps that are cropped at normal size.
+- Build the Browser and CEF wrapper as C++20, as required by current CEF
+  distributions.
+- Build the Browser bookmarks menu once after widget realization and CEF
+  initialization, avoiding stale child destruction during startup.
+- Add uConsole comparison screenshots of dynamic application icons at both
+  normal/increased pairs: 32×32 / 64×64 and 48×48 / 96×96.
 - Require CK Core Motif ABI 9 at build and runtime, with separate Motif and CDE
   prefixes and a preflight that rejects mismatched headers or libraries.
 - Add GitHub and rpi4 CI that build the latest CK Core Motif, CK Core CDE and

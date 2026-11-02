@@ -55,8 +55,7 @@ enum {
 /* Maxima in "percent" units for all meters */
 #define PERCENT_MAX 100
 #define LOAD_PERCENT_DEFAULT_MAX 100
-#define ICON_WIDTH 96
-#define ICON_HEIGHT 96
+#define ICON_SIZE_FALLBACK 48
 #define ICON_MARGIN 4
 #define ICON_BAR_GAP 4
 #define ICON_SEGMENT_HEIGHT 2
@@ -89,6 +88,8 @@ static Pixel g_icon_bar_icon_color = 0;
 static Pixel g_icon_segment_color = 0;
 static int g_icon_colors_inited = 0;
 static int g_icon_bar_icon_color_ready = 0;
+static int g_icon_width = ICON_SIZE_FALLBACK;
+static int g_icon_height = ICON_SIZE_FALLBACK;
 static int g_show_open_icons = 0;
 static int g_last_iconified = -1;
 static int g_last_show_open_icons = -1;
@@ -673,6 +674,43 @@ get_icon_bar_icon_color(Display *display)
 }
 
 static void
+update_icon_size_from_wm(Display *display)
+{
+    int count = 0;
+    XIconSize *sizes = NULL;
+    int best_w = ICON_SIZE_FALLBACK;
+    int best_h = ICON_SIZE_FALLBACK;
+    int found_w = 0;
+    int found_h = 0;
+
+    if (display &&
+        XGetIconSizes(display,
+                      RootWindow(display, DefaultScreen(display)),
+                      &sizes, &count) &&
+        sizes && count > 0) {
+        for (int i = 0; i < count; ++i) {
+            int w = sizes[i].max_width > 0
+                        ? sizes[i].max_width
+                        : sizes[i].min_width;
+            int h = sizes[i].max_height > 0
+                        ? sizes[i].max_height
+                        : sizes[i].min_height;
+            if (w > 0 && (!found_w || w > best_w)) {
+                best_w = w;
+                found_w = 1;
+            }
+            if (h > 0 && (!found_h || h > best_h)) {
+                best_h = h;
+                found_h = 1;
+            }
+        }
+    }
+    if (sizes) XFree(sizes);
+    g_icon_width = best_w;
+    g_icon_height = best_h;
+}
+
+static void
 draw_icon_bars(Display *display, Pixmap pixmap, int cpu_percent, int ram_percent,
                unsigned long fill_color)
 {
@@ -688,12 +726,24 @@ draw_icon_bars(Display *display, Pixmap pixmap, int cpu_percent, int ram_percent
     unsigned long bottom_color = g_icon_colors_inited ? g_icon_bottom_shadow :
                                   BlackPixel(display, screen);
 
-    XSetForeground(display, g_icon_gc, bg);
-    XFillRectangle(display, pixmap, g_icon_gc, 0, 0, ICON_WIDTH, ICON_HEIGHT);
+    int margin = g_icon_width * ICON_MARGIN / 96;
+    int bar_gap = g_icon_width * ICON_BAR_GAP / 96;
+    int border_inset = g_icon_width * ICON_BORDER_INSET / 96;
+    int segment_height = g_icon_height * ICON_SEGMENT_HEIGHT / 96;
+    int segment_gap = g_icon_height * ICON_SEGMENT_GAP / 96;
+    if (margin < 2) margin = 2;
+    if (bar_gap < 2) bar_gap = 2;
+    if (border_inset < 1) border_inset = 1;
+    if (segment_height < 1) segment_height = 1;
+    if (segment_gap < 1) segment_gap = 1;
 
-    int available_width = ICON_WIDTH - ICON_MARGIN * 2;
-    int bar_height = ICON_HEIGHT - ICON_MARGIN * 2;
-    int bar_width = (available_width - ICON_BAR_GAP) / 2;
+    XSetForeground(display, g_icon_gc, bg);
+    XFillRectangle(display, pixmap, g_icon_gc, 0, 0,
+                   g_icon_width, g_icon_height);
+
+    int available_width = g_icon_width - margin * 2;
+    int bar_height = g_icon_height - margin * 2;
+    int bar_width = (available_width - bar_gap) / 2;
     if (bar_height <= 0 || bar_width <= 0) return;
 
     if (cpu_percent < 0) cpu_percent = 0;
@@ -701,40 +751,40 @@ draw_icon_bars(Display *display, Pixmap pixmap, int cpu_percent, int ram_percent
     if (ram_percent < 0) ram_percent = 0;
     if (ram_percent > 100) ram_percent = 100;
 
-    int cpu_x = ICON_MARGIN;
-    int ram_x = ICON_MARGIN + bar_width + ICON_BAR_GAP;
+    int cpu_x = margin;
+    int ram_x = margin + bar_width + bar_gap;
 
-    int inner_height = bar_height - ICON_BORDER_INSET * 2;
+    int inner_height = bar_height - border_inset * 2;
     if (inner_height < 1) inner_height = 1;
-    int inner_top = ICON_MARGIN + ICON_BORDER_INSET;
+    int inner_top = margin + border_inset;
     int inner_bottom = inner_top + inner_height - 1;
-    int inner_width = bar_width - ICON_BORDER_INSET * 2;
+    int inner_width = bar_width - border_inset * 2;
 
-    int segment_stride = ICON_SEGMENT_HEIGHT + ICON_SEGMENT_GAP;
+    int segment_stride = segment_height + segment_gap;
     int max_segments = 0;
     if (segment_stride > 0 && inner_height > 0) {
-        max_segments = (inner_height + ICON_SEGMENT_GAP) / segment_stride;
+        max_segments = (inner_height + segment_gap) / segment_stride;
         if (max_segments < 1) max_segments = 1;
     }
 
     int cpu_segments = (cpu_percent * max_segments + 50) / 100;
     if (cpu_segments > max_segments) cpu_segments = max_segments;
-    int cpu_inner_x = cpu_x + ICON_BORDER_INSET;
+    int cpu_inner_x = cpu_x + border_inset;
     if (inner_width < 1) inner_width = 1;
 
     XSetForeground(display, g_icon_gc, fill);
     XFillRectangle(display, pixmap, g_icon_gc,
-                   cpu_x, ICON_MARGIN, bar_width, bar_height);
+                   cpu_x, margin, bar_width, bar_height);
     XSetForeground(display, g_icon_gc, segment_color);
     for (int i = 0; i < cpu_segments; ++i) {
         int seg_bottom = inner_bottom - i * segment_stride;
-        int seg_top = seg_bottom - ICON_SEGMENT_HEIGHT + 1;
+        int seg_top = seg_bottom - segment_height + 1;
         if (seg_top < inner_top) break;
         XFillRectangle(display, pixmap, g_icon_gc,
-                       cpu_inner_x, seg_top, inner_width, ICON_SEGMENT_HEIGHT);
+                       cpu_inner_x, seg_top, inner_width, segment_height);
     }
-    int cpu_top = ICON_MARGIN;
-    int cpu_bottom = ICON_MARGIN + bar_height - 1;
+    int cpu_top = margin;
+    int cpu_bottom = margin + bar_height - 1;
     int cpu_left = cpu_x;
     int cpu_right = cpu_x + bar_width - 1;
 
@@ -747,21 +797,21 @@ draw_icon_bars(Display *display, Pixmap pixmap, int cpu_percent, int ram_percent
 
     int ram_segments = (ram_percent * max_segments + 50) / 100;
     if (ram_segments > max_segments) ram_segments = max_segments;
-    int ram_inner_x = ram_x + ICON_BORDER_INSET;
+    int ram_inner_x = ram_x + border_inset;
 
     XSetForeground(display, g_icon_gc, fill);
     XFillRectangle(display, pixmap, g_icon_gc,
-                   ram_x, ICON_MARGIN, bar_width, bar_height);
+                   ram_x, margin, bar_width, bar_height);
     XSetForeground(display, g_icon_gc, segment_color);
     for (int i = 0; i < ram_segments; ++i) {
         int seg_bottom = inner_bottom - i * segment_stride;
-        int seg_top = seg_bottom - ICON_SEGMENT_HEIGHT + 1;
+        int seg_top = seg_bottom - segment_height + 1;
         if (seg_top < inner_top) break;
         XFillRectangle(display, pixmap, g_icon_gc,
-                       ram_inner_x, seg_top, inner_width, ICON_SEGMENT_HEIGHT);
+                       ram_inner_x, seg_top, inner_width, segment_height);
     }
-    int ram_top = ICON_MARGIN;
-    int ram_bottom = ICON_MARGIN + bar_height - 1;
+    int ram_top = margin;
+    int ram_bottom = margin + bar_height - 1;
     int ram_left = ram_x;
     int ram_right = ram_x + bar_width - 1;
 
@@ -772,13 +822,14 @@ draw_icon_bars(Display *display, Pixmap pixmap, int cpu_percent, int ram_percent
     XDrawLine(display, pixmap, g_icon_gc, ram_left, ram_bottom, ram_right, ram_bottom);
     XDrawLine(display, pixmap, g_icon_gc, ram_right, ram_top, ram_right, ram_bottom);
 
-    int circle_radius = (ICON_WIDTH < ICON_HEIGHT ? ICON_WIDTH : ICON_HEIGHT) / 2;
-    circle_radius -= ICON_MARGIN + 1;
+    int circle_radius = (g_icon_width < g_icon_height
+                             ? g_icon_width : g_icon_height) / 2;
+    circle_radius -= margin + 1;
     if (circle_radius < 1) circle_radius = 1;
     if (DRAW_ICON_DEBUG_CIRCLES) {
         XSetForeground(display, g_icon_gc, BlackPixel(display, screen));
-        int cx = ICON_WIDTH / 2;
-        int cy = ICON_HEIGHT / 2;
+        int cx = g_icon_width / 2;
+        int cy = g_icon_height / 2;
         int diameter = circle_radius * 2;
         XDrawArc(display, pixmap, g_icon_gc,
                  cx - circle_radius, cy - circle_radius,
@@ -839,6 +890,7 @@ refresh_dynamic_icon(int cpu_percent, int ram_percent)
     int update_icon = iconified || g_show_open_icons;
 
     ensure_icon_resources(display);
+    update_icon_size_from_wm(display);
     update_icon_colors();
     int screen = (g_icon_screen >= 0) ? g_icon_screen : DefaultScreen(display);
     Pixel icon_fill = g_icon_colors_inited ? get_icon_bar_icon_color(display) :
@@ -846,7 +898,8 @@ refresh_dynamic_icon(int cpu_percent, int ram_percent)
     Pixmap root = RootWindow(display, screen);
     Pixmap new_pixmap = None;
     if (update_icon) {
-        new_pixmap = XCreatePixmap(display, root, ICON_WIDTH, ICON_HEIGHT,
+        new_pixmap = XCreatePixmap(display, root,
+                                   g_icon_width, g_icon_height,
                                    DefaultDepth(display, screen));
         if (new_pixmap == None) return;
 

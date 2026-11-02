@@ -2,7 +2,7 @@ CC ?= cc
 CXX ?= c++
 AR ?= ar
 CFLAGS ?= -O2 -Wall -Isrc -Ilib
-CXXFLAGS ?= -O2 -Wall -Isrc -Ilib -std=c++17
+CXXFLAGS ?= -O2 -Wall -Isrc -Ilib -std=c++20
 
 .DEFAULT_GOAL := all
 

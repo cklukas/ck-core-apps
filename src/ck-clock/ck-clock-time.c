@@ -359,6 +359,67 @@ static void draw_led_time(cairo_t *cr,
     }
 }
 
+static void draw_compact_digital_time(cairo_t *cr,
+                                      int hour,
+                                      int minute,
+                                      double zone_x,
+                                      double zone_y,
+                                      double zone_w,
+                                      double zone_h,
+                                      double r,
+                                      double g,
+                                      double b)
+{
+    static const unsigned char rows[10][5] = {
+        {7, 5, 5, 5, 7}, {2, 6, 2, 2, 7}, {7, 1, 7, 4, 7},
+        {7, 1, 7, 1, 7}, {5, 5, 7, 1, 1}, {7, 4, 7, 1, 7},
+        {7, 4, 7, 5, 7}, {7, 1, 1, 1, 1}, {7, 5, 7, 5, 7},
+        {7, 5, 7, 1, 7}
+    };
+    char text[8];
+    snprintf(text, sizeof(text), "%d:%02d", hour, minute);
+
+    int units_w = 0;
+    size_t len = strlen(text);
+    for (size_t i = 0; i < len; ++i) {
+        units_w += text[i] == ':' ? 1 : 3;
+        if (i + 1 < len) units_w += 1;
+    }
+    int scale_x = (int)floor(zone_w / (double)units_w);
+    int scale_y = (int)floor(zone_h / 5.0);
+    int scale = scale_x < scale_y ? scale_x : scale_y;
+    if (scale < 1) scale = 1;
+
+    double draw_w = units_w * scale;
+    double draw_h = 5 * scale;
+    double x = floor(zone_x + (zone_w - draw_w) / 2.0);
+    double y = floor(zone_y + (zone_h - draw_h) / 2.0);
+
+    cairo_save(cr);
+    cairo_set_antialias(cr, CAIRO_ANTIALIAS_NONE);
+    cairo_set_source_rgb(cr, r, g, b);
+    for (size_t i = 0; i < len; ++i) {
+        if (text[i] == ':') {
+            cairo_rectangle(cr, x, y + scale, scale, scale);
+            cairo_rectangle(cr, x, y + 3 * scale, scale, scale);
+            x += 2 * scale;
+            continue;
+        }
+        int digit = text[i] - '0';
+        for (int row = 0; row < 5; ++row) {
+            for (int col = 0; col < 3; ++col) {
+                if (rows[digit][row] & (1u << (2 - col))) {
+                    cairo_rectangle(cr, x + col * scale,
+                                    y + row * scale, scale, scale);
+                }
+            }
+        }
+        x += 4 * scale;
+    }
+    cairo_fill(cr);
+    cairo_restore(cr);
+}
+
 static void draw_calendar_paper(cairo_t *cr,
                                 CkClockApp *app,
                                 double cal_left,
@@ -379,52 +440,114 @@ static void draw_calendar_paper(cairo_t *cr,
     cairo_rectangle(cr, cal_left, cal_top, cal_width, cal_height);
     cairo_fill(cr);
 
-    double spacing = cal_height * 0.05;
-    if (spacing < 4.0) spacing = 4.0;
-    double label_padding = cal_height * 0.02;
-    if (label_padding < 2.0) label_padding = 2.0;
-
-    cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
-
     char day_buf[8];
     snprintf(day_buf, sizeof(day_buf), "%d", app->current_local_tm.tm_mday);
-    cairo_set_font_size(cr, day_font);
-    cairo_text_extents_t day_ext = {0};
-    cairo_text_extents(cr, day_buf, &day_ext);
+    const char *weekday =
+        ck_clock_weekday_labels[(app->current_local_tm.tm_wday + 7) % 7];
+    const char *month =
+        ck_clock_month_labels[app->current_local_tm.tm_mon % 12];
 
-    double remaining_height = cal_height - day_ext.height - 2.0 * spacing - label_padding;
-    if (remaining_height < 0.0) remaining_height = 0.0;
-    double label_font = (remaining_height / 2.0) * 1.15;
-    double label_max = day_font / 1.5;
-    if (label_font > label_max) label_font = label_max;
-    if (label_font < 10.0) label_font = 10.0;
-    weekday_font = label_font;
-    month_font = weekday_font;
+    if (cal_width <= 48.0) {
+        double inset = fmax(1.0, fmin(cal_width, cal_height) * 0.06);
+        double content_w = fmax(1.0, cal_width - 2.0 * inset);
+        double content_h = fmax(1.0, cal_height - 2.0 * inset);
+        double day_w = content_w * 0.52;
+        double label_w = content_w - day_w;
+        double day_x = cal_left + inset + day_w / 2.0;
+        double label_x = cal_left + inset + day_w + label_w / 2.0;
+
+        cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_NORMAL,
+                               CAIRO_FONT_WEIGHT_BOLD);
+        double fitted_day = ck_clock_fit_font_size(cr, day_buf,
+                                                   day_w * 0.88,
+                                                   content_h * 0.86);
+        if (fitted_day < day_font) day_font = fitted_day;
+        double fitted_weekday = ck_clock_fit_font_size(cr, weekday,
+                                                       label_w * 0.92,
+                                                       content_h * 0.34);
+        if (fitted_weekday < weekday_font) weekday_font = fitted_weekday;
+
+        cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_ITALIC,
+                               CAIRO_FONT_WEIGHT_BOLD);
+        double fitted_month = ck_clock_fit_font_size(cr, month,
+                                                     label_w * 0.92,
+                                                     content_h * 0.34);
+        if (fitted_month < month_font) month_font = fitted_month;
+
+        cairo_set_source_rgb(cr, text_r, text_g, text_b);
+        cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_NORMAL,
+                               CAIRO_FONT_WEIGHT_BOLD);
+        cairo_set_font_size(cr, day_font);
+        ck_clock_draw_centered_text(cr, day_buf, day_x,
+                                    cal_top + cal_height / 2.0, NULL, NULL);
+        cairo_set_font_size(cr, weekday_font);
+        ck_clock_draw_centered_text(cr, weekday, label_x,
+                                    cal_top + inset + content_h * 0.28,
+                                    NULL, NULL);
+        cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_ITALIC,
+                               CAIRO_FONT_WEIGHT_BOLD);
+        cairo_set_font_size(cr, month_font);
+        ck_clock_draw_centered_text(cr, month, label_x,
+                                    cal_top + inset + content_h * 0.72,
+                                    NULL, NULL);
+        return;
+    }
+
+    /*
+     * Treat the calendar as three bounded rows.  The old placement derived
+     * the label positions from the numeral's glyph extents; at icon sizes its
+     * fixed 10px label floor made the weekday oversized and pushed the month
+     * below the paper.  Independent rows keep all three glyphs balanced and
+     * fully inside the icon at every scale.
+     */
+    bool compact = cal_height < 80.0;
+    double inset_x = fmax(compact ? 1.0 : 2.0,
+                          cal_width * (compact ? 0.06 : 0.08));
+    double inset_y = fmax(compact ? 1.0 : 2.0,
+                          cal_height * (compact ? 0.03 : 0.055));
+    double content_w = fmax(1.0, cal_width - 2.0 * inset_x);
+    double content_h = fmax(1.0, cal_height - 2.0 * inset_y);
+    double label_row_h = content_h * (compact ? 0.17 : 0.22);
+    double day_row_h = content_h * (compact ? 0.66 : 0.56);
+
+    cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_NORMAL,
+                           CAIRO_FONT_WEIGHT_BOLD);
+    double fitted_weekday = ck_clock_fit_font_size(cr, weekday,
+                                                   content_w,
+                                                   label_row_h *
+                                                       (compact ? 0.86 : 0.72));
+    if (fitted_weekday < weekday_font) weekday_font = fitted_weekday;
+    double fitted_day = ck_clock_fit_font_size(cr, day_buf,
+                                               content_w * 0.78,
+                                               day_row_h *
+                                                   (compact ? 1.0 : 0.84));
+    if (fitted_day < day_font) day_font = fitted_day;
+
+    cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_ITALIC,
+                           CAIRO_FONT_WEIGHT_BOLD);
+    double fitted_month = ck_clock_fit_font_size(cr, month,
+                                                 content_w,
+                                                 label_row_h *
+                                                     (compact ? 0.86 : 0.72));
+    if (fitted_month < month_font) month_font = fitted_month;
 
     double center_x = cal_left + cal_width / 2.0;
-    double space_remain = cal_height - day_ext.height;
-    if (space_remain < 0.0) space_remain = 0.0;
-    double half_space = space_remain / 2.0;
-    double weekday_y = cal_top + half_space / 2.0;
-    double day_y     = cal_top + half_space + day_ext.height / 2.0;
-    double month_y   = cal_top + half_space + day_ext.height + half_space / 2.0;
+    double weekday_y = cal_top + inset_y + label_row_h / 2.0;
+    double day_y = cal_top + inset_y + label_row_h + day_row_h / 2.0;
+    double month_y = cal_top + cal_height - inset_y - label_row_h / 2.0;
 
     cairo_set_source_rgb(cr, text_r, text_g, text_b);
     cairo_set_font_size(cr, day_font);
-    ck_clock_draw_centered_text(cr, day_buf, center_x, day_y, &day_ext, NULL);
+    cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_NORMAL,
+                           CAIRO_FONT_WEIGHT_BOLD);
+    ck_clock_draw_centered_text(cr, day_buf, center_x, day_y, NULL, NULL);
 
     cairo_set_font_size(cr, weekday_font);
-    ck_clock_draw_centered_text(cr,
-                                ck_clock_weekday_labels[(app->current_local_tm.tm_wday + 7) % 7],
-                                center_x, weekday_y,
-                                NULL, NULL);
+    ck_clock_draw_centered_text(cr, weekday, center_x, weekday_y, NULL, NULL);
 
     cairo_select_font_face(cr, "sans", CAIRO_FONT_SLANT_ITALIC, CAIRO_FONT_WEIGHT_BOLD);
     cairo_set_font_size(cr, month_font);
-    ck_clock_draw_centered_text(cr,
-                                ck_clock_month_labels[app->current_local_tm.tm_mon % 12],
-                                center_x, month_y,
-                                NULL, NULL);
+    ck_clock_draw_centered_text(cr, month, center_x, month_y, NULL, NULL);
 }
 
 static bool time_calendar_redraw_needed(const CkClockApp *app)
@@ -493,10 +616,15 @@ void ck_time_view_render(cairo_t *cr,
     ck_clock_pixel_to_rgb(app, app->ts_pixel,  &ts_r,  &ts_g,  &ts_b);
     ck_clock_pixel_to_rgb(app, app->bs_pixel,  &bs_r,  &bs_g,  &bs_b);
 
-    double time_area_h = height / 3.0;
+    bool compact = width <= 128.0 && height <= 128.0;
+    bool tiny = width <= 48.0 && height <= 48.0;
+    double time_area_h = height * (tiny ? 0.42 :
+                                   (compact ? 0.28 : (1.0 / 3.0)));
     double cal_margin = width * 0.05;
-    if (cal_margin < 6.0) cal_margin = 6.0;
-    double cal_top = time_area_h + cal_margin * 0.4;
+    if (cal_margin < (tiny ? 1.5 : (compact ? 2.0 : 6.0))) {
+        cal_margin = tiny ? 1.5 : (compact ? 2.0 : 6.0);
+    }
+    double cal_top = time_area_h + cal_margin * (compact ? 0.2 : 0.4);
     bool calendar_needs_draw = force_calendar_draw ||
                                time_calendar_redraw_needed(app);
 
@@ -525,9 +653,13 @@ void ck_time_view_render(cairo_t *cr,
             display_hour -= 12;
         }
     }
-    const char *ampm_indicator = app->show_ampm_indicator ? app->current_ampm : NULL;
+    /* The compact icon follows the reference calendar design: the time strip
+       contains only HH:MM so the digits remain readable at 32/48/64 px. */
+    const char *ampm_indicator =
+        (!compact && app->show_ampm_indicator) ? app->current_ampm : NULL;
 
-    double time_pad = fmax(3.0, time_area_h * 0.08);
+    double time_pad = fmax(tiny ? 1.0 : (compact ? 1.5 : 3.0),
+                           time_area_h * 0.08);
     double indent_offset = time_pad * 0.25;
     double inner_x = time_pad;
     double inner_y = time_pad + indent_offset;
@@ -544,7 +676,7 @@ void ck_time_view_render(cairo_t *cr,
     cairo_rectangle(cr, inner_x, inner_y, inner_w, inner_h);
     cairo_fill(cr);
 
-    double frame_width = 2.0;
+    double frame_width = compact ? 1.0 : 2.0;
     cairo_set_line_width(cr, frame_width);
     cairo_set_source_rgb(cr, bs_r, bs_g, bs_b);
     cairo_move_to(cr, inner_x, inner_y);
@@ -569,17 +701,28 @@ void ck_time_view_render(cairo_t *cr,
         digit_x = inner_x + (inner_w - digit_w) / 2.0;
     }
 
-    draw_led_time(cr,
-                  display_hour,
-                  app->current_local_tm.tm_min,
-                  app->show_colon,
-                  digit_x,
-                  inner_y,
-                  digit_w,
-                  inner_h,
-                  led_on_r, led_on_g, led_on_b,
-                  led_off_r, led_off_g, led_off_b,
-                  ampm_indicator);
+    if (compact && width <= 64.0) {
+        draw_compact_digital_time(cr,
+                                  display_hour,
+                                  app->current_local_tm.tm_min,
+                                  digit_x,
+                                  inner_y,
+                                  digit_w,
+                                  inner_h,
+                                  led_on_r, led_on_g, led_on_b);
+    } else {
+        draw_led_time(cr,
+                      display_hour,
+                      app->current_local_tm.tm_min,
+                      app->show_colon,
+                      digit_x,
+                      inner_y,
+                      digit_w,
+                      inner_h,
+                      led_on_r, led_on_g, led_on_b,
+                      led_off_r, led_off_g, led_off_b,
+                      ampm_indicator);
+    }
 
     if (calendar_needs_draw) {
         double cal_height = height - cal_top - cal_margin;
@@ -587,19 +730,23 @@ void ck_time_view_render(cairo_t *cr,
         double cal_max_width = width - 2.0 * cal_margin;
         if (cal_max_width <= 12.0) return;
 
-        double weekday_font = cal_height * 0.1725;
-        if (weekday_font < 10.0) weekday_font = 10.0;
-        double day_font = cal_height * 0.55;
+        double weekday_font = cal_height * (compact ? 0.18 : 0.1725);
+        if (weekday_font < (compact ? 6.0 : 10.0)) {
+            weekday_font = compact ? 6.0 : 10.0;
+        }
+        double day_font = cal_height * (compact ? 0.75 : 0.55);
         if (day_font < weekday_font * 1.5) day_font = weekday_font * 1.5;
         if (day_font > cal_height * 0.7) day_font = cal_height * 0.7;
-        double desired_width = day_font * 2.0;
-        if (desired_width < 48.0) desired_width = 48.0;
+        double desired_width = compact ? cal_max_width : day_font * 2.0;
+        if (!compact && desired_width < 48.0) desired_width = 48.0;
         double cal_width = fmin(cal_max_width, desired_width);
         if (cal_width <= 12.0) return;
         double cal_left = (width - cal_width) / 2.0;
 
         double shadow_offset = width * 0.015;
-        if (shadow_offset < 2.0) shadow_offset = 2.0;
+        if (shadow_offset < (compact ? 1.0 : 2.0)) {
+            shadow_offset = compact ? 1.0 : 2.0;
+        }
         double shadow_offset_x = shadow_offset * 2.0;
         double shadow_offset_y = shadow_offset * 2.0;
         cairo_set_source_rgb(cr,

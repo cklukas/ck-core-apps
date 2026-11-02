@@ -526,6 +526,44 @@ static void update_wm_icon_pixmap(CkClockApp *app, Display *display)
     XSetWMHints(display, window, &local);
 }
 
+static void preferred_icon_size(Display *display, int *width, int *height)
+{
+    const int fallback = 48;
+    int best_w = fallback;
+    int best_h = fallback;
+    int found_w = 0;
+    int found_h = 0;
+    int count = 0;
+    XIconSize *sizes = NULL;
+
+    if (display &&
+        XGetIconSizes(display,
+                      RootWindow(display, DefaultScreen(display)),
+                      &sizes, &count) &&
+        sizes && count > 0) {
+        for (int i = 0; i < count; ++i) {
+            int w = sizes[i].max_width > 0
+                        ? sizes[i].max_width
+                        : sizes[i].min_width;
+            int h = sizes[i].max_height > 0
+                        ? sizes[i].max_height
+                        : sizes[i].min_height;
+            if (w > 0 && (!found_w || w > best_w)) {
+                best_w = w;
+                found_w = 1;
+            }
+            if (h > 0 && (!found_h || h > best_h)) {
+                best_h = h;
+                found_h = 1;
+            }
+        }
+    }
+    if (sizes) XFree(sizes);
+
+    *width = best_w;
+    *height = best_h;
+}
+
 static void refresh_icon_pixmap(CkClockApp *app)
 {
     if (!app || !app->top_widget || !XtIsRealized(app->top_widget) || !app->have_local_time) return;
@@ -533,8 +571,9 @@ static void refresh_icon_pixmap(CkClockApp *app)
     if (!display) return;
 
     int screen = DefaultScreen(display);
-    int icon_w = 96;
-    int icon_h = 96;
+    int icon_w;
+    int icon_h;
+    preferred_icon_size(display, &icon_w, &icon_h);
 
     Pixmap root = RootWindow(display, screen);
     Pixmap new_pixmap = XCreatePixmap(display, root, icon_w, icon_h,

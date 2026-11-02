@@ -188,12 +188,20 @@ static void update_icon_size_from_wm(Display *display)
 
     int best_w = ICON_SIZE_FALLBACK;
     int best_h = ICON_SIZE_FALLBACK;
+    int found_w = 0;
+    int found_h = 0;
 
     for (int i = 0; i < count; ++i) {
         int w = sizes[i].max_width  > 0 ? sizes[i].max_width  : sizes[i].min_width;
         int h = sizes[i].max_height > 0 ? sizes[i].max_height : sizes[i].min_height;
-        if (w > best_w) best_w = w;
-        if (h > best_h) best_h = h;
+        if (w > 0 && (!found_w || w > best_w)) {
+            best_w = w;
+            found_w = 1;
+        }
+        if (h > 0 && (!found_h || h > best_h)) {
+            best_h = h;
+            found_h = 1;
+        }
     }
 
     if (best_w > 0) g_icon_w = best_w;

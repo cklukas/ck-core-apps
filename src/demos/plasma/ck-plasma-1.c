@@ -32,7 +32,7 @@
 #define CK_PLASMA_TITLE "Plasma Animation"
 #define CK_PLASMA_MAX_FPS 30
 #define CK_PLASMA_MAX_PENDING 2
-#define CK_PLASMA_ICON_SIZE 96
+#define CK_PLASMA_ICON_SIZE_FALLBACK 48
 
 typedef enum {
     CK_PLASMA_FRAME_WINDOW = 0,
@@ -658,8 +658,8 @@ int main(int argc, char **argv)
     app.session_data = session_data_create(session_id);
     free(session_id);
     ck_plasma_init_exec_path(&app, argv[0]);
-    app.icon_w = CK_PLASMA_ICON_SIZE;
-    app.icon_h = CK_PLASMA_ICON_SIZE;
+    app.icon_w = CK_PLASMA_ICON_SIZE_FALLBACK;
+    app.icon_h = CK_PLASMA_ICON_SIZE_FALLBACK;
     app.generation = 1;
 
     app.toplevel = XtAppInitialize(&app.app_ctx, "CkPlasma",
@@ -667,6 +667,29 @@ int main(int argc, char **argv)
     if (!app.toplevel) {
         fprintf(stderr, "ck-plasma-1: XtAppInitialize failed\n");
         return 1;
+    }
+
+    {
+        Display *display = XtDisplay(app.toplevel);
+        XIconSize *sizes = NULL;
+        int count = 0;
+        int best_w = 0;
+        int best_h = 0;
+        if (XGetIconSizes(display,
+                          RootWindow(display, DefaultScreen(display)),
+                          &sizes, &count) && sizes && count > 0) {
+            for (int i = 0; i < count; ++i) {
+                int w = sizes[i].max_width > 0
+                            ? sizes[i].max_width : sizes[i].min_width;
+                int h = sizes[i].max_height > 0
+                            ? sizes[i].max_height : sizes[i].min_height;
+                if (w > best_w) best_w = w;
+                if (h > best_h) best_h = h;
+            }
+            if (best_w > 0) app.icon_w = best_w;
+            if (best_h > 0) app.icon_h = best_h;
+        }
+        if (sizes) XFree(sizes);
     }
 
     DtInitialize(XtDisplay(app.toplevel), app.toplevel, "CkPlasma", "CkPlasma");

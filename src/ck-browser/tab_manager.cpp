@@ -82,9 +82,27 @@ struct FaviconCacheEntry {
 std::unordered_map<std::string, FaviconCacheEntry> favicon_cache_;
 std::list<std::string> favicon_cache_order_;
 
-int desired_window_icon_size()
+int desired_window_icon_size(Display *display)
 {
-    return 96;
+    int best = 0;
+    XIconSize *sizes = nullptr;
+    int count = 0;
+    if (display &&
+        XGetIconSizes(display,
+                      RootWindow(display, DefaultScreen(display)),
+                      &sizes, &count) &&
+        sizes && count > 0) {
+        for (int i = 0; i < count; ++i) {
+            int width = sizes[i].max_width > 0
+                            ? sizes[i].max_width : sizes[i].min_width;
+            int height = sizes[i].max_height > 0
+                             ? sizes[i].max_height : sizes[i].min_height;
+            int size = std::min(width, height);
+            if (size > best) best = size;
+        }
+    }
+    if (sizes) XFree(sizes);
+    return best > 0 ? best : 48;
 }
 
 bool tab_is_alive(const BrowserTab *tab)
@@ -843,8 +861,9 @@ void TabManager::requestFaviconDownload(BrowserTab *tab, const char *reason)
     CefRefPtr<CefBrowserHost> host = tab->browser->GetHost();
     if (!host) return;
 
+    Display *display = get_browser_display();
     int toolbar_size = desired_favicon_size();
-    int window_size = desired_window_icon_size();
+    int window_size = desired_window_icon_size(display);
     int max_size = toolbar_size > window_size ? toolbar_size : window_size;
 
     Pixel bg_pixel = 0;

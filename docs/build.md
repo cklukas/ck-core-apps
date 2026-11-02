@@ -26,7 +26,8 @@ the selected toolkit.
 
 The CEF archive used by `ck-browser` is not stored in Git. Run
 `./download_cef.sh` before building the browser. Native applications other than
-the browser can be built as individual Make targets.
+the browser can be built as individual Make targets. Current CEF headers require
+a C++20 compiler; the project Makefile selects that language level by default.
 
 ## Useful variables
 

@@ -33,5 +33,5 @@
 - Publish rpi4 documentation before starting the longer native stack build.
 - Stage CDE under fakeroot so ownership-setting install hooks work in unprivileged
   GitHub and rpi4 CI jobs.
-- Preflight the ALSA development package on rpi4 CI runners before starting the
-  expensive native dependency build.
+- Preflight the ALSA and LMDB development packages on rpi4 CI runners before
+  starting the expensive native dependency build.

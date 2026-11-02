@@ -2,6 +2,8 @@
 
 ## 2026-11-02
 
+- Put related CK Core documentation links in the left-side site selector
+  rather than the right-side header links.
 - Make Clock query dtwm's advertised icon geometry and render responsive,
   readable layouts at both normal 48×48 and increased 96×96 sizes, including
   a compact pixel-digital time band and side-by-side small-date composition.

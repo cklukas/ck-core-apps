@@ -1,0 +1,55 @@
+name: Documentation
+
+on:
+  push:
+    branches: [main]
+    paths: ['docs/**', 'ckdocs.yml', 'scripts/build-docs.sh', '.ckgit/**', '.github/workflows/pages.yml']
+  pull_request:
+    branches: [main]
+    paths: ['docs/**', 'ckdocs.yml', 'scripts/build-docs.sh', '.ckgit/**', '.github/workflows/pages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: documentation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: cklukas/ck-git-hosting
+          ref: 1f46455b702bc955a2eab63824afe2e062fb04a4
+          path: .docs-tool
+          persist-credentials: false
+      - name: Build documentation
+        run: |
+          scripts/build-docs.sh "$GITHUB_WORKSPACE/.docs-tool" \
+            "$RUNNER_TEMP/apps-docs-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            "$RUNNER_TEMP/site-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            https://cklukas.github.io/ck-core-apps/
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: ${{ runner.temp }}/site-${{ github.run_id }}-${{ github.run_attempt }}
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy documentation
+        id: deployment
+        uses: actions/deploy-pages@v5

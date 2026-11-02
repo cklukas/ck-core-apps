@@ -1,0 +1,30 @@
+version: 1
+site:
+  title: CK Core Apps
+  brand: CK Core Apps
+  description: Native Motif applications for CK Core CDE.
+  url: https://cklukas.github.io/ck-core-apps/
+  logo: docs/images/ck-core-apps.png
+  favicon: docs/images/favicon.png
+  stylesheet: docs/styles/apps.css
+  links:
+    - title: Source
+      url: https://github.com/cklukas/ck-core-apps
+      icon: github
+    - title: CK Core CDE
+      url: https://cklukas.github.io/ck-core-cde/
+source: docs
+home: docs/index.md
+search: true
+toc:
+  max_level: 3
+nav:
+  - title: Apps
+    pages:
+      - docs/index.md
+      - docs/apps.md
+      - docs/dynamic-icons.md
+  - title: Development
+    pages:
+      - docs/build.md
+      - docs/ci.md

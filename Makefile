@@ -11,20 +11,25 @@ BUILD_DIR ?= build
 BIN_DIR := $(BUILD_DIR)/bin
 
 CEF_WRAPPER_SRC_DIR := third_party/cef/libcef_dll
-CEF_WRAPPER_SRCS := $(shell find $(CEF_WRAPPER_SRC_DIR) -name '*.cc' | sort)
+CEF_WRAPPER_SRCS := $(shell test ! -d $(CEF_WRAPPER_SRC_DIR) || find $(CEF_WRAPPER_SRC_DIR) -name '*.cc' | sort)
 CEF_WRAPPER_OBJS := $(patsubst $(CEF_WRAPPER_SRC_DIR)/%.cc,$(BUILD_DIR)/cef-wrapper/%.o,$(CEF_WRAPPER_SRCS))
 CEF_WRAPPER_LIB := $(BUILD_DIR)/libcef_dll_wrapper.a
 CEF_WRAPPER_CFLAGS := -I$(CEF_WRAPPER_SRC_DIR) -Ithird_party/cef -Wno-attributes
 
-# CDE include/lib paths (override on CLI if different on your system)
+# CK Core Motif and CDE include/lib paths (override on CLI if different).
+# Motif is deliberately separate: CDE and every app must use ABI 9 from the
+# current CK Core Motif build, never an arbitrary system libXm.
+MOTIF_PREFIX ?= /usr/local/ck-core-motif
+MOTIF_INC ?= $(MOTIF_PREFIX)/include
+MOTIF_LIB ?= $(MOTIF_PREFIX)/lib
 CDE_PREFIX ?= /usr/local/CDE
 CDE_INC ?= $(CDE_PREFIX)/include
 CDE_LIB ?= $(CDE_PREFIX)/lib
 # Optional CDE source tree include (for newer headers like Dt/WmSettings.h).
 CDE_SRC_INC ?= /home/klukas/git/cde/cde/include
 
-CDE_CFLAGS := -I$(CDE_INC) $(if $(wildcard $(CDE_SRC_INC)/Dt/WmSettings.h),-I$(CDE_SRC_INC),)
-CDE_LDFLAGS := -L$(CDE_LIB)
+CDE_CFLAGS := -I$(MOTIF_INC) -I$(CDE_INC) $(if $(wildcard $(CDE_SRC_INC)/Dt/WmSettings.h),-I$(CDE_SRC_INC),)
+CDE_LDFLAGS := -L$(MOTIF_LIB) -Wl,-rpath,$(MOTIF_LIB) -L$(CDE_LIB)
 CDE_LIBS := -lDtSvc -lDtXinerama -lDtWidget -ltt -lXm -lXt -lSM -lICE -lXinerama -lX11 -lXpm
 CEF_CFLAGS := -Ithird_party/cef/include -Ithird_party/cef/include/include
 CEF_LDFLAGS := -Lthird_party/cef/lib
@@ -67,9 +72,19 @@ PROGRAMS := $(BIN_DIR)/ck-about \
             $(BIN_DIR)/ck-mines \
             $(BIN_DIR)/ck-plasma-1
 
-.PHONY: all clean ck-about ck-load ck-tasks ck-mixer ck-clock ck-calc ck-character-map ck-grab ck-browser ck-eyes ck-coins ck-nibbles ck-mines ck-plasma-1
+.PHONY: all clean check-motif ck-about ck-load ck-tasks ck-mixer ck-clock ck-calc ck-character-map ck-grab ck-browser ck-eyes ck-coins ck-nibbles ck-mines ck-plasma-1
 
 all: $(PROGRAMS)
+
+$(PROGRAMS): | check-motif
+
+check-motif: $(BUILD_DIR)/motif-abi-check
+	LD_LIBRARY_PATH="$(MOTIF_LIB):$${LD_LIBRARY_PATH:-}" $<
+
+$(BUILD_DIR)/motif-abi-check: tests/motif_abi_check.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -I$(MOTIF_INC) $< -o $@ \
+		-L$(MOTIF_LIB) -Wl,-rpath,$(MOTIF_LIB) -lXm -lXt -lX11
 
 ck-about: $(BIN_DIR)/ck-about
 ck-load: $(BIN_DIR)/ck-load

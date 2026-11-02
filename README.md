@@ -19,7 +19,10 @@ Example desktop screenshot showing running CK-Core apps:
 
 * High-DPI is still a bit problematic. E.g., icons on desktop and start panel at bottom are too small. I can hopefully fix that one day in the project [ck-core-cde](https://github.com/cklukas/ck-core-cde). 
 
-* Some of the applications (currently `ck-clock` and `ck-load`) support dynamic icons, when used with the improved dtwm window manager from teh `ck-core-cde` project. The dynamic icon screenshots are shown with icons that use the newly introduced "double window icon size" setting in dtstyle.
+* `ck-clock`, `ck-load`, `ck-eyes`, `ck-browser`, and `ck-coins` support
+  high-resolution dynamic window icons when used with the improved dtwm window
+  manager from `ck-core-cde`; the `ck-plasma-1` demo exercises the same live
+  icon path. See the [dynamic-icon documentation](docs/dynamic-icons.md).
 
 ---
 
@@ -96,6 +99,13 @@ QBasic-style Nibbles (snake) clone with 1- or 2-player support and keyboard cont
 
 The game is currently a bit quick, speed options or progressing speed by level will be introduced a bit later.
 
+## Documentation
+
+The ckdocs source lives in [`docs/`](docs/index.md). It includes the complete
+[application catalogue](docs/apps.md), the
+[dynamic-icon contract](docs/dynamic-icons.md), and the matched
+[Motif/CDE build](docs/build.md).
+
 ## Build
 
 Prerequisites: a C compiler plus the development headers for Motif/X11, the CDE libraries, ALSA (`-lasound`), and cairo (for `ck-clock`).
@@ -106,11 +116,19 @@ Build everything into `build/bin`:
 make
 ```
 
-The Makefile assumes CDE is under `/usr/local/CDE`; override if needed:
+CK Core Apps requires CK Core Motif ABI 9. The toolkit and CDE prefixes are
+separate so an older system `libXm` cannot be selected accidentally:
 
 ```sh
-make CDE_PREFIX=/opt/cde
+make -j6 \
+  MOTIF_PREFIX=/opt/ck-core-motif \
+  CDE_PREFIX=/opt/cde \
+  CDE_SRC_INC=/path/to/ck-core-cde/cde/include
 ```
+
+The build compiles and runs an ABI preflight before producing applications.
+GitHub and rpi4 CI both build the latest CK Core Motif and CK Core CDE first,
+then verify that every native application depends on `libXm.so.9`.
 
 Other knobs:
 - `BUILD_DIR=out` changes the build output root.

@@ -1,0 +1,48 @@
+version: 1
+on:
+  branches: [main]
+sisters:
+  - name: ck-git-hosting
+    ref: 1f46455b702bc955a2eab63824afe2e062fb04a4
+  - name: ck-core-motif
+    ref: master
+  - name: ck-core-cde
+    ref: master
+jobs:
+  - name: build
+    steps:
+      - name: latest-motif-cde-native-apps
+        script: |
+          set -eu
+          test -n "$TMPDIR"
+          test -n "$CKGIT_SISTER_CK_CORE_MOTIF"
+          test -n "$CKGIT_SISTER_CK_CORE_CDE"
+          run_id="$(git rev-parse HEAD)"
+          scripts/build-native.sh \
+            "$CKGIT_SISTER_CK_CORE_MOTIF" \
+            "$CKGIT_SISTER_CK_CORE_CDE" \
+            "$TMPDIR/apps-native-$run_id" \
+            "$TMPDIR/apps-output-$run_id"
+          mkdir -p build-evidence
+          cp "$TMPDIR/apps-native-$run_id/receipt.txt" build-evidence/receipt.txt
+    artifacts:
+      name: native-build-evidence
+      paths: [build-evidence]
+  - name: documentation
+    steps:
+      - name: documentation-site
+        script: |
+          set -eu
+          test -n "$TMPDIR"
+          test -n "$CKGIT_SISTER_CK_GIT_HOSTING"
+          run_id="$(git rev-parse HEAD)"
+          scripts/build-docs.sh "$CKGIT_SISTER_CK_GIT_HOSTING" \
+            "$TMPDIR/apps-docs-$run_id" "$PWD/public" \
+            http://rpi4:8421/ck-core-apps/
+          mkdir -p docs-evidence
+          cp "$TMPDIR/apps-docs-$run_id/receipt.txt" docs-evidence/receipt.txt
+    artifacts:
+      name: documentation-evidence
+      paths: [docs-evidence]
+pages:
+  path: public

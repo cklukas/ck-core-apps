@@ -1,0 +1,33 @@
+.home-name {
+  color: #007f83;
+}
+
+.home-hero {
+  align-items: center;
+  gap: clamp(2rem, 6vw, 6rem);
+}
+
+.home-image {
+  background: linear-gradient(145deg, rgba(0, 127, 131, 0.2), rgba(239, 159, 40, 0.18));
+  border: 1px solid rgba(41, 30, 76, 0.28);
+  border-radius: 1rem;
+  box-shadow: 0 1.4rem 3.2rem rgba(34, 25, 62, 0.2);
+  padding: 0.65rem;
+}
+
+.home-image img {
+  border-radius: 0.45rem;
+  display: block;
+}
+
+.home-feature {
+  border-top: 0.22rem solid #00888d;
+}
+
+.home-feature:nth-child(3n + 2) {
+  border-top-color: #ef9f28;
+}
+
+.home-feature:nth-child(3n) {
+  border-top-color: #53347f;
+}

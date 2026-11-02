@@ -1,0 +1,65 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'ckdocs.yml'
+      - 'scripts/build-docs.sh'
+      - '.ckgit/**'
+      - '.github/workflows/pages.yml'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: apps-source
+      - uses: actions/checkout@v5
+        with:
+          repository: cklukas/ck-core-motif
+          ref: master
+          path: motif-source
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          repository: cklukas/ck-core-cde
+          ref: master
+          path: cde-source
+          persist-credentials: false
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf automake bison build-essential fakeroot flex ksh libasound2-dev \
+            libatspi2.0-dev libcairo2-dev libcurl4-openssl-dev libdbus-1-dev \
+            libfontconfig1-dev libfreetype-dev libharfbuzz-dev libicu-dev \
+            libjpeg-dev liblmdb-dev libpam0g-dev libpng-dev librsvg2-dev \
+            libssl-dev libtirpc-dev libtool libutempter-dev libxaw7-dev \
+            libxfixes-dev libxft-dev libxinerama-dev libxmu-dev libxpm-dev \
+            libxrender-dev libxss-dev m4 ncompress opensp pkg-config \
+            rpcsvc-proto tcl-dev x11-xserver-utils xbitmaps xfonts-utils xvfb
+      - name: Build latest Motif, CDE and native apps
+        run: |
+          apps-source/scripts/build-native.sh \
+            "$GITHUB_WORKSPACE/motif-source" \
+            "$GITHUB_WORKSPACE/cde-source" \
+            "$RUNNER_TEMP/native-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            "$RUNNER_TEMP/apps-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+      - name: Upload build receipt
+        uses: actions/upload-artifact@v5
+        with:
+          name: native-build-receipt
+          path: ${{ runner.temp }}/native-${{ github.run_id }}-${{ github.run_attempt }}/receipt.txt

@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: cklukas/ck-git-hosting
-          ref: 06e4e4bfbf65dddf4c8b88b991582eddc07fa6ea
+          ref: 7e3ee5eb57a2cef2e07f9e9fe5c4e2822502d322
           path: .docs-tool
           persist-credentials: false
       - name: Build documentation

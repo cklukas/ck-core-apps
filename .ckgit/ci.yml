@@ -4,7 +4,7 @@ on:
 sisters:
   - name: ck-git-hosting
     # ckdocs v0.10.1
-    ref: 06e4e4bfbf65dddf4c8b88b991582eddc07fa6ea
+    ref: 7e3ee5eb57a2cef2e07f9e9fe5c4e2822502d322
   - name: ck-core-motif
     ref: master
   - name: ck-core-cde

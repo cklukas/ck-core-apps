@@ -13,10 +13,10 @@ description: Cohort validation, release-based ckdocs v0.11.0 publishing, and nat
 Both [`.github/workflows/build.yml`](https://github.com/cklukas/ck-core-apps/blob/main/.github/workflows/build.yml) and [`.ckgit/ci.yml`](https://github.com/cklukas/ck-core-apps/blob/main/.ckgit/ci.yml) check out the latest `master` branch of [CK Core Motif](https://github.com/cklukas/ck-core-motif) and [CK Core CDE](https://github.com/cklukas/ck-core-cde) alongside `ck-core-apps`:
 
 1. Compiles CK Core Motif ABI 9 from a clean `git archive` snapshot with C23 (`gcc-14` / `g++-14`).
-2. Generates an isolated `en_US.UTF-8` locale (`LOCPATH`), builds CK Core CDE against the staged Motif prefix (`--disable-docs` to skip redundant SGML guide generation already covered by `ck-core-cde` CI), runs `make check`, and stages CDE under `fakeroot`.
+2. Generates an isolated `en_US.UTF-8` locale (`LOCPATH`), builds CK Core CDE against the staged Motif prefix (`--disable-docs` to skip redundant SGML guide generation already covered by `ck-core-cde` CI), runs `make check` (full ASan + UBSan on 48-bit VA `ubuntu-24.04-arm`, and runtime-probed UBSan + functional checks on `rpi4`'s 39-bit VA `rpt-rpi-v8` kernel), and stages CDE under `fakeroot`.
 3. Builds all 13 native non-CEF `ck-core-apps` binaries and executes `make check` (`ck-load-icon-label-state-test`).
 4. Verifies every native executable and `dtwm` carry `libXm.so.9` in `readelf -dW` and that `motif-abi-check` reports `CK Core Motif ABI 9` at runtime.
-5. Emits `receipt.txt` recording start/end UTC timestamps, elapsed seconds, exact `apps`, `motif`, and `cde` Git SHA-1 revisions, and SHA-256 digests of every built binary.
+5. Emits `receipt.txt` recording start/end UTC timestamps, elapsed seconds, host kernel, compiler toolchain, exact `apps`, `motif`, and `cde` Git SHA-1 revisions, and SHA-256 digests of every built binary.
 
 [`ck-browser`](companions/ck-browser.md) is omitted from the offline cohort job because its external CEF binary archive is fetched on demand via `./download_cef.sh` rather than stored in Git.
 

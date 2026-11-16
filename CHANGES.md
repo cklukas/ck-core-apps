@@ -21,7 +21,8 @@
   CK Core Motif and CK Core CDE stack (`gcc-14` / `g++-14`, isolated
   `en_US.UTF-8` `LOCPATH`, `rpcbind` / `rpcinfo` for ToolTalk `ttsession`
   checks, `dtksh` preflight, `--disable-docs` for the staged CDE dependency
-  build, and `make check` unit test execution).
+  build, `make check` unit test execution, and host kernel provenance in
+  `receipt.txt`).
 
 ## 2026-11-02
 

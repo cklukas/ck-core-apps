@@ -108,6 +108,7 @@ ended_epoch=$(date +%s)
     printf 'ended_utc=%s\n' "$ended"
     printf 'elapsed_seconds=%s\n' "$((ended_epoch - started_epoch))"
     printf 'target=linux-arm64-native\n'
+    printf 'kernel=%s\n' "$(uname -srm)"
     printf 'cc=%s\n' "$cc_bin"
     printf 'cxx=%s\n' "$cxx_bin"
     printf 'configuration=optimized-no-debug;motif-abi-9;cde-matched;c23\n'

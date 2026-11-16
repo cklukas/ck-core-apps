@@ -101,10 +101,15 @@ The game is currently a bit quick, speed options or progressing speed by level w
 
 ## Documentation
 
-The ckdocs source lives in [`docs/`](docs/index.md). It includes the complete
-[application catalogue](docs/apps.md), the
-[dynamic-icon contract](docs/dynamic-icons.md), and the matched
-[Motif/CDE build](docs/build.md).
+The `ckdocs` documentation source lives in [`docs/`](docs/index.md) and is
+published to [GitHub Pages](https://cklukas.github.io/ck-core-apps/) and `rpi4`
+Pages with `ckdocs v0.11.0`. It includes:
+
+- the complete [application catalogue](docs/apps.md) and dedicated reference
+  pages for all 14 tools (`docs/tools/`, `docs/companions/`, `docs/games/`);
+- [shared session and XDG configuration architecture](docs/architecture.md);
+- the [high-resolution dynamic-icon contract](docs/dynamic-icons.md);
+- the matched [Motif/CDE build](docs/build.md) and [CI/release pipeline](docs/ci.md).
 
 ## Build
 

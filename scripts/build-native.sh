@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+export GIT_CONFIG_NOSYSTEM=1
+
 if test "$#" -ne 4; then
     echo "usage: $0 MOTIF_SOURCE CDE_SOURCE WORK OUTPUT" >&2
     exit 2
@@ -13,15 +15,28 @@ output=$4
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 apps_source=$(dirname "$script_dir")
 
+cc_bin=${CC:-$(if command -v gcc-14 >/dev/null 2>&1; then printf 'gcc-14'; else printf 'cc'; fi)}
+cxx_bin=${CXX:-$(if command -v g++-14 >/dev/null 2>&1; then printf 'g++-14'; else printf 'c++'; fi)}
+command -v "$cc_bin" >/dev/null
+command -v "$cxx_bin" >/dev/null
+
 test ! -e "$work"
 test ! -e "$output"
 mkdir -p "$work/tmp" "$work/motif-source" "$work/motif-build" \
     "$work/motif-prefix" "$work/cde-source" "$work/cde-stage"
 export TMPDIR="$work/tmp"
 
+if command -v localedef >/dev/null 2>&1; then
+    mkdir -p "$work/locale"
+    localedef -i en_US -f UTF-8 "$work/locale/en_US.UTF-8"
+    export LOCPATH="$work/locale"
+    export LANG=en_US.UTF-8
+    export LC_ALL=en_US.UTF-8
+fi
+
 started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 started_epoch=$(date +%s)
-apps_revision=$(git -C "$apps_source" rev-parse HEAD)
+apps_revision=$(git -C "$apps_source" rev-parse HEAD 2>/dev/null || printf '%s' "${CKGIT_COMMIT:-unknown}")
 motif_revision=$(git -C "$motif_input" rev-parse HEAD)
 cde_revision=$(git -C "$cde_input" rev-parse HEAD)
 
@@ -36,7 +51,7 @@ cde_source="$work/cde-source"
 (cd "$work/motif-build" && "$motif_source/configure" \
     --prefix="$work/motif-prefix" --disable-demos --disable-static \
     --enable-xft --enable-unicode-text --enable-atspi --enable-svg \
-    CFLAGS='-O1 -g0' CXXFLAGS='-O1 -g0')
+    CC="$cc_bin" CXX="$cxx_bin" CFLAGS='-O1 -g0 -std=c23' CXXFLAGS='-O1 -g0')
 for component in bindings bitmaps config localized lib include tools/wml clients/uil; do
     make -j4 -C "$work/motif-build/$component"
     make -j1 -C "$work/motif-build/$component" install
@@ -49,7 +64,9 @@ export LDFLAGS="-L$work/motif-prefix/lib -Wl,-rpath,$work/motif-prefix/lib"
 export LD_LIBRARY_PATH="$work/motif-prefix/lib"
 
 (cd "$cde_source/cde" && ./autogen.sh && \
-    ./configure CFLAGS='-O1 -g0' CXXFLAGS='-O1 -g0' && \
+    ./configure --disable-docs CC="$cc_bin" CXX="$cxx_bin" \
+        CFLAGS='-O1 -g0 -std=c23' CXXFLAGS='-O1 -g0' && \
+    make -j1 -C programs/dtksh prepare-ksh && \
     make -j4 && make -j4 check && \
     fakeroot -- make -j1 install DESTDIR="$work/cde-stage")
 readelf -dW "$cde_source/cde/programs/dtwm/.libs/dtwm" | grep -F 'libXm.so.9'
@@ -70,9 +87,9 @@ $output/bin/ck-nibbles
 $output/bin/ck-mines
 $output/bin/ck-plasma-1
 "
-make -j4 -C "$apps_source" BUILD_DIR="$output" \
+make -j4 -C "$apps_source" CC="$cc_bin" CXX="$cxx_bin" BUILD_DIR="$output" \
     MOTIF_PREFIX="$work/motif-prefix" CDE_PREFIX="$cde_prefix" \
-    CDE_SRC_INC="$cde_source/cde/include" $native_targets
+    CDE_SRC_INC="$cde_source/cde/include" check $native_targets
 
 for executable in $native_targets; do
     test -x "$executable"
@@ -89,7 +106,9 @@ ended_epoch=$(date +%s)
     printf 'ended_utc=%s\n' "$ended"
     printf 'elapsed_seconds=%s\n' "$((ended_epoch - started_epoch))"
     printf 'target=linux-arm64-native\n'
-    printf 'configuration=optimized-no-debug;motif-abi-9;cde-matched\n'
+    printf 'cc=%s\n' "$cc_bin"
+    printf 'cxx=%s\n' "$cxx_bin"
+    printf 'configuration=optimized-no-debug;motif-abi-9;cde-matched;c23\n'
     printf 'output=%s\n' "$(realpath "$output")"
     printf 'apps_revision=%s\n' "$apps_revision"
     printf 'motif_revision=%s\n' "$motif_revision"

@@ -1,6 +1,7 @@
 ---
-title: High-resolution dynamic icons
-description: Live application state rendered into CK Core CDE desktop icons.
+title: High-resolution Dynamic Icons
+sidebar_label: Dynamic Icons
+description: Live application state rendered into CK Core CDE desktop icons across 32x32 to 96x96 geometries.
 ---
 
 # High-resolution dynamic icons
@@ -12,19 +13,19 @@ and its larger icon-size setting gives the live view enough space to remain
 legible.
 
 This is an X11 window-icon contract, not a separate widget layer or a Front
-Panel embedding mechanism. The owning application renders the pixels; dtwm
+Panel embedding mechanism. The owning application renders the pixels; `dtwm`
 places and refreshes the icon.
 
 ## Implemented applications
 
 | Application | Live icon content | Update trigger |
 | --- | --- | --- |
-| `ck-clock` | Analog clock face | Minute change and icon-state refresh, including open-window icons |
-| `ck-load` | CPU and RAM bars | Every second, including open-window icons |
-| `ck-eyes` | Eyes and pupils following the pointer | Every 50 ms while minimized |
-| `ck-browser` | Favicon of the active browser tab | Active tab or page favicon change, including open-window icons |
-| `ck-coins` | Selected coin symbol and price | Selection and market-data refresh, including open-window icons |
-| `ck-plasma-1` | Animated plasma frame | Each generated frame while minimized |
+| [`ck-clock`](companions/ck-clock.md) | Digital LED time band and tear-off calendar tile | Minute change while open, every second while minimized, and icon-state refresh |
+| [`ck-load`](companions/ck-load.md) | Dual vertical CPU and RAM bars with non-jittering label | Every second when minimized or when `dtwm` open-window icons are active |
+| [`ck-eyes`](companions/ck-eyes.md) | Shaped eyes and pupils following the pointer | Every `50 ms` while minimized |
+| [`ck-browser`](companions/ck-browser.md) | Scaled favicon of the active browser tab (with 1-bit alpha mask) | Active tab switch or page favicon change, including open-window icons |
+| [`ck-coins`](companions/ck-coins.md) | `Xft`-rendered coin symbol and formatted USD price | Coin selection and 15-minute market-data refresh, including open-window icons |
+| [`ck-plasma-1`](games/ck-plasma.md) | Multi-process animated plasma frame | Up to `30 FPS` while minimized |
 
 `ck-clock`, `ck-load`, `ck-eyes`, `ck-browser` and `ck-coins` are user-facing
 applications. `ck-plasma-1` is a demo of the same update contract.
@@ -52,16 +53,16 @@ frame through the minimized-window icon path.
 
 ## Normal and increased icon sizes
 
-Style Manager's **Increase Icon Size** setting doubles dtwm's advertised icon
-geometry. CDE uses a 32×32 / 64×64 pair on low-resolution displays and a
-48×48 / 96×96 pair on higher-resolution displays. Each app queries
-`WM_ICON_SIZE` and renders a new pixmap for the selected geometry; dtwm does not
+Style Manager's **Increase Icon Size** setting doubles `dtwm`'s advertised icon
+geometry. CDE uses a `32×32` / `64×64` pair on low-resolution displays and a
+`48×48` / `96×96` pair on higher-resolution displays. Each app queries
+`WM_ICON_SIZE` and renders a new pixmap for the selected geometry; `dtwm` does not
 crop a fixed-size source image.
 
-Clock uses two responsive arrangements. At 32×32 and 48×48, its readable
+Clock uses two responsive arrangements. At `32×32` and `48×48`, its readable
 pixel-digital time occupies the upper band while the date sits beside stacked
-weekday and month labels. At 64×64 and 96×96, it follows the full vertical
-calendar design; 96×96 uses the larger seven-segment time display.
+weekday and month labels. At `64×64` and `96×96`, it follows the full vertical
+calendar design; `96×96` uses the larger seven-segment time display.
 
 System Load keeps its icon label stable as the percentage changes. If the full
 `CPU N%` form becomes too wide, that icon-size setting switches to `N%` and
@@ -69,7 +70,7 @@ keeps the compact form until CDE advertises a different icon geometry.
 
 ### Low-resolution CDE pair
 
-| Application | Normal, 32×32 | Increased, 64×64 |
+| Application | Normal, `32×32` | Increased, `64×64` |
 | --- | --- | --- |
 | System Load | ![System Load dynamic icon at 32 by 32 pixels](images/icon-sizes/load-32.png) | ![System Load dynamic icon at 64 by 64 pixels](images/icon-sizes/load-64.png) |
 | Clock | ![Clock dynamic icon at 32 by 32 pixels](images/icon-sizes/clock-32.png) | ![Clock dynamic icon at 64 by 64 pixels](images/icon-sizes/clock-64.png) |
@@ -80,7 +81,7 @@ keeps the compact form until CDE advertises a different icon geometry.
 
 ### Higher-resolution CDE pair
 
-| Application | Normal, 48×48 | Increased, 96×96 |
+| Application | Normal, `48×48` | Increased, `96×96` |
 | --- | --- | --- |
 | System Load | ![System Load dynamic icon at 48 by 48 pixels](images/icon-sizes/load-48.png) | ![System Load dynamic icon at 96 by 96 pixels](images/icon-sizes/load-96.png) |
 | Clock | ![Clock dynamic icon at 48 by 48 pixels](images/icon-sizes/clock-48.png) | ![Clock dynamic icon at 96 by 96 pixels](images/icon-sizes/clock-96.png) |
@@ -90,26 +91,26 @@ keeps the compact form until CDE advertises a different icon geometry.
 | Browser | ![Browser active-tab favicon at 48 by 48 pixels](images/icon-sizes/browser-48.png) | ![Browser active-tab favicon at 96 by 96 pixels](images/icon-sizes/browser-96.png) |
 
 These screenshots come from four separate uConsole smoke sessions. Their root
-`WM_ICON_SIZE` properties reported 32×32, 48×48, 64×64 and 96×96 respectively,
+`WM_ICON_SIZE` properties reported `32×32`, `48×48`, `64×64` and `96×96` respectively,
 and every captured process resolved CK Core Motif `libXm.so.9` from the same
 toolkit cohort as CDE.
 
 The Browser row shows the favicon of its active Wikipedia tab. Changing tabs
 updates the same desktop icon to the newly active site's favicon.
 
-![Clock rendered as a live desktop icon](images/ck-clock-3.png)
-
-![CPU and memory rendered in the System Load desktop icon](images/ck-load-2.png)
+| Clock icon view | System Load icon view |
+| --- | --- |
+| ![Clock rendered as a live desktop icon](images/ck-clock-3.png) | ![CPU and memory rendered in the System Load desktop icon](images/ck-load-2.png) |
 
 ## CDE settings
 
 In CK Core CDE, enable **Show Icons for Open Windows** and select the larger
-window-icon size in Style Manager. The corresponding dtwm resource is
+window-icon size in Style Manager. The corresponding `dtwm` resource is
 `Dtwm*showOpenWindowIcons`.
 
-The implementation uses the icon geometry advertised by dtwm when available,
+The implementation uses the icon geometry advertised by `dtwm` when available,
 then publishes `IconPixmapHint` and, where needed, `IconMaskHint`. This keeps
-the apps independent of dtwm internals while allowing CK Core CDE to present
+the apps independent of `dtwm` internals while allowing CK Core CDE to present
 their high-resolution output.
 
 See [Window-aware desktop icons](https://cklukas.github.io/ck-core-cde/improvements/window-state.html)

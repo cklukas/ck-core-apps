@@ -6,7 +6,7 @@ hero:
   name: CK Core Apps
   text: Native tools for the maintained CDE desktop
   tagline: >
-    A growing suite of Motif utilities, desktop companions, games and demos,
+    Fourteen Motif utilities, live desktop companions, games and demos,
     built with CK Core Motif ABI 9 and integrated with CK Core CDE.
   image:
     src: images/desktop.png
@@ -22,31 +22,31 @@ hero:
 features:
   - icon: ":desktop_computer:"
     title: CDE-native interaction
-    details: Motif interfaces, CDE session handling and desktop-aware window behavior keep the suite at home in CDE.
-    link: apps.md
+    details: Motif interfaces, CDE palette awareness, session save/restore and desktop-aware window behavior keep the suite at home in CDE.
+    link: architecture.md
   - icon: ":bar_chart:"
     title: Live desktop information
-    details: Clock, load, eyes, market data, browser favicons and the plasma demo can update their high-resolution window icons.
+    details: Clock, System Load, Eyes, Coins, Browser favicons and the Plasma demo render responsive 32x32 to 96x96 window icons.
     link: dynamic-icons.md
   - icon: ":art:"
     title: One toolkit cohort
     details: Build preflight and CI require CK Core Motif ABI 9 and reject an accidental system libXm.
     link: build.md
   - icon: ":toolbox:"
-    title: Useful everyday tools
-    details: Calculator, character map, screen capture, mixer, task manager and browser complement the classic CDE tools.
-    link: apps.md
+    title: Everyday desktop tools
+    details: About, Calculator, Character Map, Screen Capture, Volume Control, Task Manager and Web Browser complement classic CDE utilities.
+    link: tools/ck-calc.md
   - icon: ":video_game:"
     title: Games and demos
-    details: Mines, Nibbles and animated plasma exercise the same native desktop stack.
-    link: apps.md
+    details: Mines, Nibbles and multi-process animated Plasma exercise the same native Motif/X11 desktop stack.
+    link: games/ck-mines.md
   - icon: ":desktop_computer:"
     title: CK Core CDE
     details: Explore the maintained desktop environment where the suite integrates with sessions, windows and desktop icons.
     link: https://cklukas.github.io/ck-core-cde/
   - icon: "🏗️"
     title: CK Core Motif
-    details: Explore the maintained native Xt toolkit that supplies the suite's widgets, resources and ABI.
+    details: Explore the maintained native Xt toolkit that supplies the suite's widgets, resources and ABI 9 contract.
     link: https://cklukas.github.io/ck-core-motif/
   - icon: ":file_folder:"
     title: ck-core-fs-lib
@@ -59,9 +59,10 @@ features:
 CK Core Apps is the optional application layer for
 [CK Core CDE](https://cklukas.github.io/ck-core-cde/). Keeping it in a separate
 repository lets the desktop environment and the application suite evolve and
-release independently, while CI verifies them against the same current
-CK Core Motif ABI 9 toolkit.
+release independently, while CI verifies them together against the current
+[CK Core Motif](https://cklukas.github.io/ck-core-motif/) ABI 9 toolkit.
 
-Start with the [application catalogue](apps.md), or see how
+Start with the [application catalogue](apps.md), explore the
+[shared session and configuration architecture](architecture.md), or see how
 [high-resolution dynamic icons](dynamic-icons.md) turn ordinary desktop icons
 into compact live views.

@@ -2,15 +2,20 @@ version: 1
 site:
   title: CK Core Apps
   brand: CK Core Apps
-  description: Native Motif applications for CK Core CDE.
+  description: Native Motif applications, live desktop companions, games and demos for CK Core CDE.
   url: https://cklukas.github.io/ck-core-apps/
   logo: docs/images/ck-core-apps.png
   favicon: docs/images/favicon.png
   stylesheet: docs/styles/apps.css
+  footer: "© 2025–2026 Dr. C. Klukas · GPL-2.0-only"
   links:
     - title: Source
       url: https://github.com/cklukas/ck-core-apps
       icon: github
+    - title: Releases
+      url: https://github.com/cklukas/ck-core-apps/releases
+    - title: Changes
+      url: https://github.com/cklukas/ck-core-apps/blob/main/CHANGES.md
   selector:
     links:
       - title: CK Core CDE
@@ -25,12 +30,33 @@ search: true
 toc:
   max_level: 3
 nav:
-  - title: Apps
+  - title: Overview
     pages:
       - docs/index.md
       - docs/apps.md
       - docs/dynamic-icons.md
+  - title: Desktop Tools
+    pages:
+      - docs/tools/ck-about.md
+      - docs/tools/ck-calc.md
+      - docs/tools/ck-character-map.md
+      - docs/tools/ck-grab.md
+      - docs/tools/ck-mixer.md
+      - docs/tools/ck-tasks.md
+  - title: Companions
+    pages:
+      - docs/companions/ck-clock.md
+      - docs/companions/ck-load.md
+      - docs/companions/ck-eyes.md
+      - docs/companions/ck-coins.md
+      - docs/companions/ck-browser.md
+  - title: Games & Demos
+    pages:
+      - docs/games/ck-mines.md
+      - docs/games/ck-nibbles.md
+      - docs/games/ck-plasma.md
   - title: Development
     pages:
+      - docs/architecture.md
       - docs/build.md
       - docs/ci.md

@@ -1,5 +1,27 @@
 # Changes
 
+## 2026-11-16
+
+- Add dedicated reference documentation pages for all 14 applications
+  (`ck-about`, `ck-calc`, `ck-character-map`, `ck-grab`, `ck-mixer`,
+  `ck-tasks`, `ck-clock`, `ck-load`, `ck-eyes`, `ck-coins`, `ck-browser`,
+  `ck-mines`, `ck-nibbles` and `ck-plasma-1`) covering command-line options,
+  keyboard shortcuts, UI modes, CDE session persistence, XDG configuration
+  files, and current limitations.
+- Add a shared architecture and persistence guide (`docs/architecture.md`)
+  documenting `src/shared/` modules, `dtsession` integration, and the suite's
+  `~/.config/ck-core/` and `~/.cache/ck-coins/` file layout.
+- Upgrade documentation builds and publication to `ckdocs v0.11.0`: install the
+  SHA-256-verified `ckdocs_0.11.0_amd64.deb` release package on GitHub Pages
+  and pin the `ck-git-hosting` `v0.11.0` sister revision on `rpi4`.
+- Support `v*` release tag runs and target the `primary` server runner in
+  `.ckgit/ci.yml`, and link GitHub Releases and `CHANGES.md` from the
+  documentation site header.
+- Align `scripts/build-native.sh` and GitHub/rpi4 CI with the current C23
+  CK Core Motif and CK Core CDE stack (`gcc-14` / `g++-14`, isolated
+  `en_US.UTF-8` `LOCPATH`, `dtksh` preflight, `--disable-docs` for the staged
+  CDE dependency build, and `make check` unit test execution).
+
 ## 2026-11-02
 
 - Interlink the CK Core Apps, CDE, Motif and ck-core-fs-lib documentation sites

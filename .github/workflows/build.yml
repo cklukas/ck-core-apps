@@ -43,14 +43,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            autoconf automake bison build-essential fakeroot flex ksh libasound2-dev \
-            libatspi2.0-dev libcairo2-dev libcurl4-openssl-dev libdbus-1-dev \
-            libfontconfig1-dev libfreetype-dev libharfbuzz-dev libicu-dev \
-            libjpeg-dev liblmdb-dev libpam0g-dev libpng-dev librsvg2-dev \
+            autoconf automake bison build-essential fakeroot flex gcc-14 g++-14 ksh \
+            libasound2-dev libatspi2.0-dev libcairo2-dev libcurl4-openssl-dev \
+            libdbus-1-dev libfontconfig1-dev libfreetype-dev libharfbuzz-dev \
+            libicu-dev libjpeg-dev liblmdb-dev libpam0g-dev libpng-dev librsvg2-dev \
             libssl-dev libtirpc-dev libtool libutempter-dev libxaw7-dev \
             libxfixes-dev libxft-dev libxinerama-dev libxmu-dev libxpm-dev \
-            libxrender-dev libxss-dev m4 ncompress opensp pkg-config \
-            rpcsvc-proto tcl-dev x11-xserver-utils xbitmaps xfonts-utils xvfb
+            libxrender-dev libxss-dev locales m4 ncompress opensp pkg-config \
+            python3 rpcsvc-proto tcl-dev x11-xserver-utils xbitmaps xfonts-utils xvfb
       - name: Build latest Motif, CDE and native apps
         run: |
           apps-source/scripts/build-native.sh \

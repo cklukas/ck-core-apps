@@ -16,23 +16,38 @@ concurrency:
   group: documentation-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CKDOCS_REPOSITORY: cklukas/ck-git-hosting
+  CKDOCS_VERSION: 0.11.0
+  CKDOCS_SHA256: f3166afa2f12b69503e248a08b8c0313a1331f3e481b7c5f380db03eef64c8a6
+
 jobs:
   build:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: write
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/checkout@v5
-        with:
-          repository: cklukas/ck-git-hosting
-          ref: 7e3ee5eb57a2cef2e07f9e9fe5c4e2822502d322
-          path: .docs-tool
-          persist-credentials: false
-      - name: Build documentation
+      - name: Install release ckdocs
         run: |
-          scripts/build-docs.sh "$GITHUB_WORKSPACE/.docs-tool" \
+          deb="$RUNNER_TEMP/ckdocs_${CKDOCS_VERSION}_amd64.deb"
+          curl --fail --location --silent --show-error --retry 3 --output "$deb" \
+            "https://github.com/$CKDOCS_REPOSITORY/releases/download/v$CKDOCS_VERSION/ckdocs_${CKDOCS_VERSION}_amd64.deb"
+          echo "$CKDOCS_SHA256  $deb" | sha256sum --check --strict
+          sudo dpkg --install "$deb"
+          ckdocs --version
+          ckdocs --version | grep -F "ckdocs $CKDOCS_VERSION"
+      - name: Build and verify documentation
+        run: |
+          scripts/build-docs.sh "$(command -v ckdocs)" \
             "$RUNNER_TEMP/apps-docs-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
             "$RUNNER_TEMP/site-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
             https://cklukas.github.io/ck-core-apps/
+          cat "$RUNNER_TEMP/apps-docs-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/receipt.txt"
+      - name: Configure Pages
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/configure-pages@v6
       - name: Upload Pages artifact
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v5

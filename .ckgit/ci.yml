@@ -20,7 +20,7 @@ jobs:
           export GIT_CONFIG_NOSYSTEM=1
           test -n "$TMPDIR"
           test -n "$CKGIT_SISTER_CK_GIT_HOSTING"
-          run_id="$(git rev-parse HEAD 2>/dev/null || printf '%s' "${CKGIT_COMMIT:-unknown}")"
+          run_id="$(git rev-parse --short=12 HEAD 2>/dev/null || printf '%.12s' "${CKGIT_COMMIT:-unknown}")"
           rm -rf "$TMPDIR/apps-docs-$run_id" public
           scripts/build-docs.sh "$CKGIT_SISTER_CK_GIT_HOSTING" \
             "$TMPDIR/apps-docs-$run_id" "$PWD/public" \
@@ -47,15 +47,15 @@ jobs:
             echo "runner needs gcc-14, g++-14, and locales (localedef) before the native build" >&2
             exit 1
           fi
-          run_id="$(git rev-parse HEAD 2>/dev/null || printf '%s' "${CKGIT_COMMIT:-unknown}")"
-          rm -rf "$TMPDIR/apps-native-$run_id" "$TMPDIR/apps-output-$run_id"
+          run_id="$(git rev-parse --short=12 HEAD 2>/dev/null || printf '%.12s' "${CKGIT_COMMIT:-unknown}")"
+          rm -rf "$TMPDIR/apps-$run_id" "$TMPDIR/apps-out-$run_id"
           scripts/build-native.sh \
             "$CKGIT_SISTER_CK_CORE_MOTIF" \
             "$CKGIT_SISTER_CK_CORE_CDE" \
-            "$TMPDIR/apps-native-$run_id" \
-            "$TMPDIR/apps-output-$run_id"
+            "$TMPDIR/apps-$run_id" \
+            "$TMPDIR/apps-out-$run_id"
           mkdir -p build-evidence
-          cp "$TMPDIR/apps-native-$run_id/receipt.txt" build-evidence/receipt.txt
+          cp "$TMPDIR/apps-$run_id/receipt.txt" build-evidence/receipt.txt
     artifacts:
       name: native-build-evidence
       paths: [build-evidence]

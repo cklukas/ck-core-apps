@@ -19,8 +19,9 @@
   documentation site header.
 - Align `scripts/build-native.sh` and GitHub/rpi4 CI with the current C23
   CK Core Motif and CK Core CDE stack (`gcc-14` / `g++-14`, isolated
-  `en_US.UTF-8` `LOCPATH`, `dtksh` preflight, `--disable-docs` for the staged
-  CDE dependency build, and `make check` unit test execution).
+  `en_US.UTF-8` `LOCPATH`, `rpcbind` / `rpcinfo` for ToolTalk `ttsession`
+  checks, `dtksh` preflight, `--disable-docs` for the staged CDE dependency
+  build, and `make check` unit test execution).
 
 ## 2026-11-02
 

@@ -58,7 +58,7 @@ for component in bindings bitmaps config localized lib include tools/wml clients
 done
 test -e "$work/motif-prefix/lib/libXm.so.9"
 
-export PATH="$work/motif-prefix/bin:$PATH"
+export PATH="$work/motif-prefix/bin:$PATH:/usr/sbin:/sbin"
 export CPPFLAGS="-I$work/motif-prefix/include $(pkg-config --cflags xft)"
 export LDFLAGS="-L$work/motif-prefix/lib -Wl,-rpath,$work/motif-prefix/lib"
 export LD_LIBRARY_PATH="$work/motif-prefix/lib"

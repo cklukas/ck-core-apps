@@ -19,6 +19,8 @@ cc_bin=${CC:-$(if command -v gcc-14 >/dev/null 2>&1; then printf 'gcc-14'; else 
 cxx_bin=${CXX:-$(if command -v g++-14 >/dev/null 2>&1; then printf 'g++-14'; else printf 'c++'; fi)}
 command -v "$cc_bin" >/dev/null
 command -v "$cxx_bin" >/dev/null
+export CC="$cc_bin"
+export CXX="$cxx_bin"
 
 test ! -e "$work"
 test ! -e "$output"

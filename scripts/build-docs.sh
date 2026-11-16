@@ -46,10 +46,12 @@ test -s "$output/sitemap.xml"
 grep -q 'CK Core Apps' "$output/index.html"
 grep -q 'High-resolution dynamic icons' "$output/dynamic-icons.html"
 ended=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+html_pages=$(find "$output" -name '*.html' | wc -l | tr -d ' ')
 {
     printf 'started_utc=%s\n' "$started"
     printf 'ended_utc=%s\n' "$ended"
     printf 'source_commit=%s\n' "$(git rev-parse HEAD 2>/dev/null || printf '%s' "${CKGIT_COMMIT:-unknown}")"
     printf 'tool_version=%s\n' "$("$ckdocs_bin" --version)"
+    printf 'html_pages=%s\n' "$html_pages"
     printf 'site_url=%s\n' "$site_url"
 } > "$work/receipt.txt"

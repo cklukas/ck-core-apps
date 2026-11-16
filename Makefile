@@ -72,7 +72,7 @@ PROGRAMS := $(BIN_DIR)/ck-about \
             $(BIN_DIR)/ck-mines \
             $(BIN_DIR)/ck-plasma-1
 
-.PHONY: all clean check check-motif ck-about ck-load ck-tasks ck-mixer ck-clock ck-calc ck-character-map ck-grab ck-browser ck-eyes ck-coins ck-nibbles ck-mines ck-plasma-1
+.PHONY: all clean check check-motif regen-grab-icon ck-about ck-load ck-tasks ck-mixer ck-clock ck-calc ck-character-map ck-grab ck-browser ck-eyes ck-coins ck-nibbles ck-mines ck-plasma-1
 
 all: $(PROGRAMS)
 
@@ -139,8 +139,11 @@ $(BIN_DIR)/ck-calc: src/ck-calc/ck-calc.c src/ck-calc/app_state_utils.c src/ck-c
 $(BIN_DIR)/ck-character-map: src/ck-character-map/ck-character-map.c src/shared/session_utils.c src/shared/session_utils.h src/shared/about_dialog.c src/shared/about_dialog.h | $(BIN_DIR)
 	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-character-map/ck-character-map.c src/shared/session_utils.c src/shared/about_dialog.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
 
-# ck-grab
-src/ck-grab/ck-grab-camera.pm: src/ck-grab/camera.png src/ck-grab/generate_xpm.py
+# ck-grab (ck-grab-camera.pm is committed; use `make regen-grab-icon` when updating camera.png)
+regen-grab-icon:
+	python3 src/ck-grab/generate_xpm.py src/ck-grab/camera.png src/ck-grab/ck-grab-camera.pm
+
+src/ck-grab/ck-grab-camera.pm: | src/ck-grab/camera.png src/ck-grab/generate_xpm.py
 	python3 src/ck-grab/generate_xpm.py src/ck-grab/camera.png src/ck-grab/ck-grab-camera.pm
 
 $(BIN_DIR)/ck-grab: src/ck-grab/ck-grab.c src/ck-grab/ck-grab-camera.pm src/shared/session_utils.c src/shared/session_utils.h src/shared/about_dialog.c src/shared/about_dialog.h src/shared/config_utils.c src/shared/config_utils.h src/shared/gridlayout/gridlayout.c src/shared/gridlayout/gridlayout.h | $(BIN_DIR)

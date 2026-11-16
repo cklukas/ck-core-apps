@@ -17,6 +17,9 @@
 - Support `v*` release tag runs and target the `primary` server runner in
   `.ckgit/ci.yml`, and link GitHub Releases and `CHANGES.md` from the
   documentation site header.
+- Avoid checkout-timestamp races on the committed `src/ck-grab/ck-grab-camera.pm`
+  XPM asset during read-only or CI builds (`make regen-grab-icon` regenerates it
+  explicitly when `camera.png` changes).
 - Align `scripts/build-native.sh` and GitHub/rpi4 CI with the current C23
   CK Core Motif and CK Core CDE stack (`gcc-14` / `g++-14`, isolated
   `en_US.UTF-8` `LOCPATH`, `rpcbind` / `rpcinfo` for ToolTalk `ttsession`

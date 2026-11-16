@@ -21,7 +21,7 @@ make -j6 \
 
 ## System prerequisites
 
-In addition to a C compiler (`gcc-14` / `clang`), C++20 compiler (`g++-14` / `clang++` for `ck-browser`), `python3` (for XPM asset generation in `ck-grab`), and the staged Motif/CDE prefixes, install the X11 and library development headers used by individual tools:
+In addition to a C compiler (`gcc-14` / `clang`), C++20 compiler (`g++-14` / `clang++` for `ck-browser`), and the staged Motif/CDE prefixes, install the X11 and library development headers used by individual tools:
 
 | Dependency | Used by |
 | --- | --- |

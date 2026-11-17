@@ -2,6 +2,16 @@
 
 ## 2026-11-17
 
+- Add `ck-status` (`src/ck-status/`, `docs/companions/ck-status.md`,
+  `tests/ck_status_test.c`) on the `x11_wayland` branch: a native CK Core Motif
+  ABI 9 workstation and laptop status console, FreeDesktop
+  `org.freedesktop.Notifications` banner/history server (with
+  `$HOME/.dt/notifications.unread` Front Panel Switch lamp sync and *Do Not
+  Disturb*), `org.kde`/`org.freedesktop.StatusNotifierWatcher` background system
+  tray host, Power/Battery fuel gauge, NetworkManager + `/sys/class/net` Wi-Fi
+  controls, BlueZ Bluetooth controls, responsive `48×48`/`96×96` dynamic window
+  icons, and a `54×48` interactive Front Panel `TYPE client` gauge
+  (`ck-status --gauge`).
 - Add a native Wayland `zwlr_screencopy_manager_v1` capture backend and direct
   `--capture <file>` CLI options (`--window`, `--full-screen`, `--no-frame`,
   `--no-cursor`, `--delay`, `--format png|xpm`) to `ck-grab` so full-screen and

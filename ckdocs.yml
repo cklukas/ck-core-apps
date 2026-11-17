@@ -45,6 +45,7 @@ nav:
       - docs/tools/ck-tasks.md
   - title: Companions
     pages:
+      - docs/companions/ck-status.md
       - docs/companions/ck-clock.md
       - docs/companions/ck-load.md
       - docs/companions/ck-eyes.md

@@ -65,6 +65,7 @@ PROGRAMS := $(BIN_DIR)/ck-about \
             $(BIN_DIR)/ck-calc \
             $(BIN_DIR)/ck-character-map \
             $(BIN_DIR)/ck-grab \
+            $(BIN_DIR)/ck-status \
             $(BIN_DIR)/ck-eyes \
             $(BIN_DIR)/ck-coins \
             $(BIN_DIR)/ck-browser \
@@ -72,7 +73,7 @@ PROGRAMS := $(BIN_DIR)/ck-about \
             $(BIN_DIR)/ck-mines \
             $(BIN_DIR)/ck-plasma-1
 
-.PHONY: all clean check check-motif regen-grab-icon ck-about ck-load ck-tasks ck-mixer ck-clock ck-calc ck-character-map ck-grab ck-browser ck-eyes ck-coins ck-nibbles ck-mines ck-plasma-1
+.PHONY: all clean check check-motif regen-grab-icon ck-about ck-load ck-tasks ck-mixer ck-clock ck-calc ck-character-map ck-grab ck-status ck-browser ck-eyes ck-coins ck-nibbles ck-mines ck-plasma-1
 
 all: $(PROGRAMS)
 
@@ -86,13 +87,25 @@ $(BUILD_DIR)/motif-abi-check: tests/motif_abi_check.c
 	$(CC) $(CFLAGS) -I$(MOTIF_INC) $< -o $@ \
 		-L$(MOTIF_LIB) -Wl,-rpath,$(MOTIF_LIB) -lXm -lXt -lX11
 
-check: $(BUILD_DIR)/ck-load-icon-label-state-test
-	$<
+DBUS_CFLAGS := $(shell pkg-config --cflags dbus-1 2>/dev/null)
+DBUS_LIBS := $(shell pkg-config --libs dbus-1 2>/dev/null)
+CAIRO_CFLAGS := $(shell pkg-config --cflags cairo 2>/dev/null)
+CAIRO_LIBS := $(shell pkg-config --libs cairo 2>/dev/null)
+
+check: $(BUILD_DIR)/ck-load-icon-label-state-test $(BUILD_DIR)/ck-status-test
+	$(BUILD_DIR)/ck-load-icon-label-state-test
+	$(BUILD_DIR)/ck-status-test
 
 $(BUILD_DIR)/ck-load-icon-label-state-test: tests/ck_load_icon_label_state_test.c src/ck-load/icon_label_state.c src/ck-load/icon_label_state.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) tests/ck_load_icon_label_state_test.c \
 		src/ck-load/icon_label_state.c -o $@
+
+$(BUILD_DIR)/ck-status-test: tests/ck_status_test.c src/ck-status/ck-status-hw.c src/ck-status/ck-status-dbus.c src/ck-status/ck-status.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(DBUS_CFLAGS) tests/ck_status_test.c \
+		src/ck-status/ck-status-hw.c src/ck-status/ck-status-dbus.c \
+		-o $@ $(if $(DBUS_LIBS),$(DBUS_LIBS),-ldbus-1)
 
 ck-about: $(BIN_DIR)/ck-about
 ck-load: $(BIN_DIR)/ck-load
@@ -101,6 +114,7 @@ ck-clock: $(BIN_DIR)/ck-clock
 ck-calc: $(BIN_DIR)/ck-calc
 ck-character-map: $(BIN_DIR)/ck-character-map
 ck-grab: $(BIN_DIR)/ck-grab
+ck-status: $(BIN_DIR)/ck-status
 ck-browser: $(BIN_DIR)/ck-browser
 ck-eyes: $(BIN_DIR)/ck-eyes
 ck-coins: $(BIN_DIR)/ck-coins
@@ -187,6 +201,10 @@ src/ck-grab/ck-grab-camera.pm: | src/ck-grab/camera.png src/ck-grab/generate_xpm
 
 $(BIN_DIR)/ck-grab: src/ck-grab/ck-grab.c src/ck-grab/ck-grab-wayland.c src/ck-grab/ck-grab-wayland.h src/ck-grab/ck-grab-camera.pm $(GRAB_WL_HDRS) $(GRAB_WL_SRCS) src/shared/session_utils.c src/shared/session_utils.h src/shared/about_dialog.c src/shared/about_dialog.h src/shared/config_utils.c src/shared/config_utils.h src/shared/gridlayout/gridlayout.c src/shared/gridlayout/gridlayout.h | $(BIN_DIR)
 	$(CC) $(CFLAGS) $(CDE_CFLAGS) $(GRAB_WL_FLAGS) src/ck-grab/ck-grab.c src/ck-grab/ck-grab-wayland.c $(GRAB_WL_SRCS) src/shared/session_utils.c src/shared/about_dialog.c src/shared/config_utils.c src/shared/gridlayout/gridlayout.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS) -lXfixes -lpng $(GRAB_WL_LIBS)
+
+# ck-status
+$(BIN_DIR)/ck-status: src/ck-status/ck-status.c src/ck-status/ck-status-hw.c src/ck-status/ck-status-dbus.c src/ck-status/ck-status.h src/shared/session_utils.c src/shared/session_utils.h src/shared/about_dialog.c src/shared/about_dialog.h src/shared/cde_palette.c src/shared/cde_palette.h | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) $(DBUS_CFLAGS) $(CAIRO_CFLAGS) src/ck-status/ck-status.c src/ck-status/ck-status-hw.c src/ck-status/ck-status-dbus.c src/shared/session_utils.c src/shared/about_dialog.c src/shared/cde_palette.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS) $(if $(CAIRO_LIBS),$(CAIRO_LIBS),-lcairo) $(if $(DBUS_LIBS),$(DBUS_LIBS),-ldbus-1) -lm
 
 # ck-eyes
 $(BIN_DIR)/ck-eyes: src/ck-eyes/ck-eyes.c src/shared/session_utils.c src/shared/session_utils.h | $(BIN_DIR)

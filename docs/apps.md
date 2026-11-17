@@ -6,7 +6,7 @@ description: Complete directory of desktop utilities, live companions, browser, 
 
 # Application catalogue
 
-`ck-core-apps` builds **14 native Motif programs** grouped into desktop tools, live desktop companions, and games/demos. Select any binary below for its full CLI options, keyboard shortcuts, configuration paths, and session behavior.
+`ck-core-apps` builds **15 native Motif programs** grouped into desktop tools, live desktop companions, and games/demos. Select any binary below for its full CLI options, keyboard shortcuts, configuration paths, and session behavior.
 
 ## Desktop tools
 
@@ -29,10 +29,11 @@ description: Complete directory of desktop utilities, live companions, browser, 
 
 ## Live desktop companions
 
-All five companions also render [high-resolution dynamic window icons](dynamic-icons.md) sized to `dtwm`'s advertised `WM_ICON_SIZE`.
+All six companions also render [high-resolution dynamic window icons](dynamic-icons.md) sized to `dtwm`'s advertised `WM_ICON_SIZE`.
 
 | Application | Summary | Dynamic icon mode |
 | --- | --- | --- |
+| [`ck-status`](companions/ck-status.md) | Workstation & laptop status console (Power/Battery, Wi-Fi/Network, Bluetooth, `org.freedesktop.Notifications` server, `StatusNotifier` tray host, and `54×48` Front Panel live gauge). | 4-quadrant Wi-Fi / Bluetooth+Alert / Battery fuel-gauge icon (`48×48` & `96×96`) |
 | [`ck-clock`](companions/ck-clock.md) | Cairo-rendered digital LED and tear-off day tile that expands into an ISO-week monthly calendar. | Open-window (per minute) & minimized (per second) |
 | [`ck-load`](companions/ck-load.md) | Six-column segmented meter for CPU, RAM, swap, and 1/5/15-minute load averages. | Minimized or when `dtwm` open-window icons are enabled (`1 s`) |
 | [`ck-eyes`](companions/ck-eyes.md) | Pointer-tracking eyes companion with elliptical and circular geometries. | Shaped 1-bit masked icon while minimized (`50 ms`) |

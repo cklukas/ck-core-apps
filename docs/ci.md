@@ -20,6 +20,14 @@ Both [`.github/workflows/build.yml`](https://github.com/cklukas/ck-core-apps/blo
 
 [`ck-browser`](companions/ck-browser.md) is omitted from the offline cohort job because its external CEF binary archive is fetched on demand via `./download_cef.sh` rather than stored in Git.
 
+### `rpi4` sandbox runtime characteristics
+
+On `rpi4`, `ck-ci-runnerd` executes each step inside unprivileged Linux `user`, `mnt`, and `net` namespaces (`runs_on: primary`):
+
+- **Read-only source checkouts:** `/mnt/src` (`ck-core-apps` and sister repositories) is mounted read-only; all scratch trees, staged SDK prefixes, and build outputs live under `/mnt/tmp`.
+- **Compact scratch paths:** `.ckgit/ci.yml` derives a short 12-character hex run suffix (`$TMPDIR/apps-<run>`) so ToolTalk `ttdbserverd` test paths stay well within its 120-byte ISAM `localhost:<path>` key limit.
+- **Namespace & resource isolation:** Steps run with single-UID user-namespace mapping (`0 -> ckgit`, `/proc/self/setgroups = deny`), loopback-only networking without a per-namespace TCP/UDP `rpcbind` listener on `127.0.0.1:111`, and bounded `RLIMIT_FSIZE` / wall-clock limits.
+
 ## Release-based `ckdocs v0.11.0` documentation publishing
 
 Documentation is built from `ckdocs.yml` and `docs/` with **`ckdocs v0.11.0`** in strict mode (`ckdocs build --strict`, failing on any broken link, heading fragment, unreferenced page, or invalid front matter) via `scripts/build-docs.sh`:
@@ -38,8 +46,17 @@ On `rpi4`, `.ckgit/ci.yml` triggers on both `branches: [main]` and `tags: [v*]`:
 - **`main` branch pushes:** Publish updated documentation to `ck-git` Pages and archive ephemeral build/documentation receipts.
 - **`v*` release tags:** Execute the full `documentation` and `build` verification jobs and store durable, non-expiring release evidence records on `rpi4` without overwriting default-branch Pages.
 
-Validate documentation locally before committing with:
+Validate documentation and the `ck-git` CI workflow locally before publishing:
 
 ```sh
 ckdocs check --config ckdocs.yml
+ckgit ci lint --rev HEAD
+```
+
+After publishing to `rpi4`, monitor runs and inspect receipts with:
+
+```sh
+ckgit ci status
+ckgit ci watch
+ckgit ci artifacts <run-id>
 ```

@@ -1,5 +1,10 @@
 # Changes
 
+## 2026-11-17
+
+- Document `rpi4` `ck-ci-runnerd` sandbox invariants and local `ckgit ci`
+  lint/monitoring commands in `docs/ci.md`.
+
 ## 2026-11-16
 
 - Add dedicated reference documentation pages for all 14 applications

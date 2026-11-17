@@ -1070,8 +1070,6 @@ static void build_ui(AppState *app)
     XtVaSetValues(main_form,
                   XmNmarginWidth,  0,
                   XmNmarginHeight, 0,
-                  XmNnoResize, True,
-                  XmNresizePolicy, XmRESIZE_NONE,
                   NULL);
     XtManageChild(main_form);
     app->main_form = main_form;
@@ -1103,6 +1101,7 @@ static void build_ui(AppState *app)
                   XmNleftAttachment,  XmATTACH_FORM,
                   XmNrightAttachment, XmATTACH_FORM,
                   NULL);
+    app->menubar = menubar;
 
     /* Content area with padding for display + keypad */
     Widget content_form = XmCreateForm(main_form, "contentForm", NULL, 0);

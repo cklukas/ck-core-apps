@@ -2,6 +2,12 @@
 
 ## 2026-11-17
 
+- Fix `ck-calc` window height calculation (`src/ck-calc/ck-calc.c`,
+  `src/ck-calc/app_state.h`, `src/ck-calc/ui/window_metrics.c`) so Basic and
+  Scientific modes size the shell directly to the live menubar, display, optional
+  angle bar, and 5-row keypad metrics with symmetric `12 px` outer margins
+  instead of falling back to a fixed `360 px` height when `mainForm` had
+  `XmRESIZE_NONE`.
 - Add `ck-status` (`src/ck-status/`, `docs/companions/ck-status.md`,
   `tests/ck_status_test.c`) on the `x11_wayland` branch: a native CK Core Motif
   ABI 9 workstation and laptop status console, FreeDesktop

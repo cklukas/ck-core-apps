@@ -24,6 +24,7 @@ typedef struct AppState {
     XtAppContext app_context;
     Widget       shell;
     Widget       main_form;
+    Widget       menubar;
     Widget       content_form;
     Widget       key_focus_proxy;
     Widget       display_label;

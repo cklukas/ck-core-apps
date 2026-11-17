@@ -140,14 +140,53 @@ $(BIN_DIR)/ck-character-map: src/ck-character-map/ck-character-map.c src/shared/
 	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-character-map/ck-character-map.c src/shared/session_utils.c src/shared/about_dialog.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS)
 
 # ck-grab (ck-grab-camera.pm is committed; use `make regen-grab-icon` when updating camera.png)
+WAYLAND_CLIENT_CFLAGS := $(shell pkg-config --cflags wayland-client 2>/dev/null)
+WAYLAND_CLIENT_LIBS := $(shell pkg-config --libs wayland-client 2>/dev/null)
+WAYLAND_SCANNER := $(shell command -v wayland-scanner 2>/dev/null)
+XDG_OUTPUT_XML := $(firstword $(wildcard /usr/share/wayland-protocols/unstable/xdg-output/xdg-output-unstable-v1.xml))
+GRAB_GEN_DIR := $(BUILD_DIR)/ck-grab-gen
+
+ifneq ($(and $(WAYLAND_CLIENT_LIBS),$(WAYLAND_SCANNER)),)
+  GRAB_WL_FLAGS := -DHAVE_WAYLAND_SCREENCOPY -I$(GRAB_GEN_DIR) $(WAYLAND_CLIENT_CFLAGS)
+  GRAB_WL_SRCS := $(GRAB_GEN_DIR)/wlr-screencopy-unstable-v1-protocol.c
+  GRAB_WL_HDRS := $(GRAB_GEN_DIR)/wlr-screencopy-unstable-v1-client-protocol.h
+  GRAB_WL_LIBS := $(WAYLAND_CLIENT_LIBS)
+  ifneq ($(XDG_OUTPUT_XML),)
+    GRAB_WL_FLAGS += -DHAVE_XDG_OUTPUT_PROTOCOL
+    GRAB_WL_SRCS += $(GRAB_GEN_DIR)/xdg-output-unstable-v1-protocol.c
+    GRAB_WL_HDRS += $(GRAB_GEN_DIR)/xdg-output-unstable-v1-client-protocol.h
+  endif
+else
+  GRAB_WL_FLAGS :=
+  GRAB_WL_SRCS :=
+  GRAB_WL_HDRS :=
+  GRAB_WL_LIBS :=
+endif
+
+$(GRAB_GEN_DIR)/wlr-screencopy-unstable-v1-client-protocol.h: src/ck-grab/protocols/wlr-screencopy-unstable-v1.xml
+	@mkdir -p $(GRAB_GEN_DIR)
+	$(WAYLAND_SCANNER) client-header $< $@
+
+$(GRAB_GEN_DIR)/wlr-screencopy-unstable-v1-protocol.c: src/ck-grab/protocols/wlr-screencopy-unstable-v1.xml
+	@mkdir -p $(GRAB_GEN_DIR)
+	$(WAYLAND_SCANNER) private-code $< $@
+
+$(GRAB_GEN_DIR)/xdg-output-unstable-v1-client-protocol.h: $(XDG_OUTPUT_XML)
+	@mkdir -p $(GRAB_GEN_DIR)
+	$(WAYLAND_SCANNER) client-header $< $@
+
+$(GRAB_GEN_DIR)/xdg-output-unstable-v1-protocol.c: $(XDG_OUTPUT_XML)
+	@mkdir -p $(GRAB_GEN_DIR)
+	$(WAYLAND_SCANNER) private-code $< $@
+
 regen-grab-icon:
 	python3 src/ck-grab/generate_xpm.py src/ck-grab/camera.png src/ck-grab/ck-grab-camera.pm
 
 src/ck-grab/ck-grab-camera.pm: | src/ck-grab/camera.png src/ck-grab/generate_xpm.py
 	python3 src/ck-grab/generate_xpm.py src/ck-grab/camera.png src/ck-grab/ck-grab-camera.pm
 
-$(BIN_DIR)/ck-grab: src/ck-grab/ck-grab.c src/ck-grab/ck-grab-camera.pm src/shared/session_utils.c src/shared/session_utils.h src/shared/about_dialog.c src/shared/about_dialog.h src/shared/config_utils.c src/shared/config_utils.h src/shared/gridlayout/gridlayout.c src/shared/gridlayout/gridlayout.h | $(BIN_DIR)
-	$(CC) $(CFLAGS) $(CDE_CFLAGS) src/ck-grab/ck-grab.c src/shared/session_utils.c src/shared/about_dialog.c src/shared/config_utils.c src/shared/gridlayout/gridlayout.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS) -lXfixes -lpng
+$(BIN_DIR)/ck-grab: src/ck-grab/ck-grab.c src/ck-grab/ck-grab-wayland.c src/ck-grab/ck-grab-wayland.h src/ck-grab/ck-grab-camera.pm $(GRAB_WL_HDRS) $(GRAB_WL_SRCS) src/shared/session_utils.c src/shared/session_utils.h src/shared/about_dialog.c src/shared/about_dialog.h src/shared/config_utils.c src/shared/config_utils.h src/shared/gridlayout/gridlayout.c src/shared/gridlayout/gridlayout.h | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(CDE_CFLAGS) $(GRAB_WL_FLAGS) src/ck-grab/ck-grab.c src/ck-grab/ck-grab-wayland.c $(GRAB_WL_SRCS) src/shared/session_utils.c src/shared/about_dialog.c src/shared/config_utils.c src/shared/gridlayout/gridlayout.c -o $@ $(CDE_LDFLAGS) $(CDE_LIBS) -lXfixes -lpng $(GRAB_WL_LIBS)
 
 # ck-eyes
 $(BIN_DIR)/ck-eyes: src/ck-eyes/ck-eyes.c src/shared/session_utils.c src/shared/session_utils.h | $(BIN_DIR)

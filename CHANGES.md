@@ -2,6 +2,13 @@
 
 ## 2026-11-17
 
+- Add a native Wayland `zwlr_screencopy_manager_v1` capture backend and direct
+  `--capture <file>` CLI options (`--window`, `--full-screen`, `--no-frame`,
+  `--no-cursor`, `--delay`, `--format png|xpm`) to `ck-grab` so full-screen and
+  active-window screenshots capture both native Wayland windows (including
+  `dtwm-wayland`'s server-side CDE bevel frames via `_DT_ACTIVE_WINDOW_BOX`) and
+  XWayland windows, while preserving the existing X11 `XGetImage` + `XFixes`
+  path when `WAYLAND_DISPLAY` is unset.
 - Update GitHub Actions workflows (`build.yml`, `pages.yml`) to Node 24
   `actions/checkout@v7` and `actions/upload-artifact@v7`.
 - Document `rpi4` `ck-ci-runnerd` sandbox invariants and local `ckgit ci`

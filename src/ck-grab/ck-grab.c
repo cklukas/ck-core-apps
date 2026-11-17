@@ -37,6 +37,7 @@
 #include "../shared/gridlayout/gridlayout.h"
 #include "../shared/session_utils.h"
 #include "ck-grab-camera.pm"
+#include "ck-grab-wayland.h"
 
 typedef enum {
     TARGET_FULL_SCREEN = 0,
@@ -512,6 +513,20 @@ static int capture_current_image(void)
     if (!dpy) return 0;
 
     free_capture_image();
+
+    /* Under Wayland (WAYLAND_DISPLAY set), prefer zwlr_screencopy_manager_v1
+     * so native Wayland windows, server-side CDE frames, backdrops, and cursor
+     * are captured alongside rootless XWayland windows. */
+    if (ck_grab_capture_wayland(
+            dpy,
+            (G.target == TARGET_WINDOW) ? 1 : 0,
+            G.include_frame,
+            G.include_cursor,
+            &G.capture_image,
+            &G.capture_width,
+            &G.capture_height)) {
+        return 1;
+    }
 
     Window target = None;
     if (G.target == TARGET_FULL_SCREEN) {
@@ -1370,10 +1385,54 @@ static void lock_shell_on_map(Widget w, XtPointer client, XEvent *event, Boolean
     G.shell_locked = 1;
 }
 
+static void strip_cli_capture_args(int *argc_p, char **argv,
+                                   const char **cli_out_path,
+                                   int *cli_target,
+                                   int *cli_frame,
+                                   int *cli_cursor,
+                                   int *cli_delay,
+                                   int *cli_fmt)
+{
+    int dst = 1;
+    int argc = *argc_p;
+    for (int i = 1; i < argc; ++i) {
+        if ((strcmp(argv[i], "--capture") == 0 || strcmp(argv[i], "-o") == 0) && i + 1 < argc) {
+            *cli_out_path = argv[++i];
+        } else if (strcmp(argv[i], "--window") == 0) {
+            *cli_target = (int)TARGET_WINDOW;
+        } else if (strcmp(argv[i], "--full-screen") == 0) {
+            *cli_target = (int)TARGET_FULL_SCREEN;
+        } else if (strcmp(argv[i], "--no-frame") == 0) {
+            *cli_frame = 0;
+        } else if (strcmp(argv[i], "--include-frame") == 0) {
+            *cli_frame = 1;
+        } else if (strcmp(argv[i], "--no-cursor") == 0) {
+            *cli_cursor = 0;
+        } else if (strcmp(argv[i], "--include-cursor") == 0) {
+            *cli_cursor = 1;
+        } else if (strcmp(argv[i], "--delay") == 0 && i + 1 < argc) {
+            *cli_delay = clamp_int(atoi(argv[++i]), 0, 10);
+        } else if (strcmp(argv[i], "--format") == 0 && i + 1 < argc) {
+            const char *f = argv[++i];
+            *cli_fmt = (strcasecmp(f, "xpm") == 0) ? (int)FORMAT_XPM : (int)FORMAT_PNG;
+        } else {
+            argv[dst++] = argv[i];
+        }
+    }
+    argv[dst] = NULL;
+    *argc_p = dst;
+}
+
 int main(int argc, char *argv[])
 {
     int session_loaded = 0;
+    const char *cli_out_path = NULL;
+    int cli_target = -1, cli_frame = -1, cli_cursor = -1, cli_delay = -1, cli_fmt = -1;
+
     XtSetLanguageProc(NULL, NULL, NULL);
+
+    strip_cli_capture_args(&argc, argv, &cli_out_path, &cli_target,
+                           &cli_frame, &cli_cursor, &cli_delay, &cli_fmt);
 
     char *session_id = session_parse_argument(&argc, argv);
     G.session_data = session_data_create(session_id);
@@ -1395,6 +1454,42 @@ int main(int argc, char *argv[])
         session_loaded = 1;
         grab_apply_session_settings();
     }
+
+    if (cli_target >= 0) G.target = (GrabTarget)cli_target;
+    if (cli_frame >= 0) G.include_frame = cli_frame;
+    if (cli_cursor >= 0) G.include_cursor = cli_cursor;
+    if (cli_delay >= 0) G.delay_seconds = cli_delay;
+    if (cli_fmt >= 0) G.format = (GrabFormat)cli_fmt;
+
+    if (cli_out_path && cli_out_path[0]) {
+        if (cli_fmt < 0) {
+            const char *dot = strrchr(cli_out_path, '.');
+            if (dot && strcasecmp(dot, ".xpm") == 0) {
+                G.format = FORMAT_XPM;
+            }
+        }
+        if (G.delay_seconds > 0) {
+            sleep((unsigned int)G.delay_seconds);
+        }
+        if (!capture_current_image()) {
+            fprintf(stderr, "ck-grab: failed to capture requested target\n");
+            session_data_free(G.session_data);
+            free(G.last_dir);
+            return 1;
+        }
+        int ok = (G.format == FORMAT_XPM)
+                     ? write_xpm_file(cli_out_path, G.capture_image)
+                     : write_png_file(cli_out_path, G.capture_image);
+        free_capture_image();
+        session_data_free(G.session_data);
+        free(G.last_dir);
+        if (!ok) {
+            fprintf(stderr, "ck-grab: failed to write %s\n", cli_out_path);
+            return 1;
+        }
+        return 0;
+    }
+
     grab_sync_settings_to_session();
 
     build_ui();

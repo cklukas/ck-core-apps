@@ -1,12 +1,12 @@
 ---
 title: Screen Capture (ck-grab)
 sidebar_label: Screen Capture
-description: X11 full-screen and active-window screenshot utility exporting PNG and XPM images with optional cursor and window-frame capture.
+description: X11 and Wayland full-screen and active-window screenshot utility exporting PNG and XPM images with optional cursor and window-frame capture.
 ---
 
 # Screen Capture (`ck-grab`)
 
-`ck-grab` (`CkGrab` X application class, window title **Grab**) is a compact Motif screenshot tool for capturing either the full X11 display or the currently active window, with optional capture delay, window manager frame inclusion, and XFixes cursor compositing.
+`ck-grab` (`CkGrab` X application class, window title **Grab**) is a compact Motif screenshot tool for capturing either the full desktop or the currently active window, with optional capture delay, window manager frame inclusion, and pointer cursor compositing across both **X11/XLibre** (`XGetImage` + `XFixesGetCursorImage`) and **Wayland** (`zwlr_screencopy_manager_v1` under `dtwm-wayland` when `WAYLAND_DISPLAY` is set).
 
 ## Capture options
 
@@ -36,8 +36,12 @@ Clicking **Create Screenshot** (or pressing `Return`) captures the target image 
 ## Command-line options and persistence
 
 ```sh
-ck-grab [-session <session_id>] [Xt options...]
+ck-grab [--capture <file> | -o <file>] [--window | --full-screen]
+        [--include-frame | --no-frame] [--include-cursor | --no-cursor]
+        [--delay <0..10>] [--format png|xpm] [-session <session_id>] [Xt options...]
 ```
+
+- **Direct CLI capture (`--capture <file>` / `-o <file>`):** Captures the requested target immediately (after any `--delay`) and writes the PNG or XPM file without opening the interactive window. Under Wayland (`WAYLAND_DISPLAY`), `Full Screen` composites all active outputs via `zwlr_screencopy_manager_v1` and `Active Window` (`--window`) crops to `dtwm-wayland`'s `_DT_ACTIVE_WINDOW_BOX` (with or without its server-side CDE 3D bevel frame), capturing both native Wayland and XWayland windows cleanly.
 
 - **User configuration:**
   - `$XDG_CONFIG_HOME/ck-core/ck-grab.view` (default `~/.config/ck-core/ck-grab.view`): persists `target`, `delay`, `include_frame`, `include_cursor`, `hide_window`, and `format`.

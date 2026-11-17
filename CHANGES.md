@@ -2,6 +2,8 @@
 
 ## 2026-11-17
 
+- Update GitHub Actions workflows (`build.yml`, `pages.yml`) to Node 24
+  `actions/checkout@v7` and `actions/upload-artifact@v7`.
 - Document `rpi4` `ck-ci-runnerd` sandbox invariants and local `ckgit ci`
   lint/monitoring commands in `docs/ci.md`.
 

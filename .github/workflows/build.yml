@@ -24,16 +24,16 @@ jobs:
   linux-arm64:
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           path: apps-source
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: cklukas/ck-core-motif
           ref: master
           path: motif-source
           persist-credentials: false
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: cklukas/ck-core-cde
           ref: master
@@ -60,7 +60,7 @@ jobs:
             "$RUNNER_TEMP/native-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
             "$RUNNER_TEMP/apps-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
       - name: Upload build receipt
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: native-build-receipt
           path: ${{ runner.temp }}/native-${{ github.run_id }}-${{ github.run_attempt }}/receipt.txt

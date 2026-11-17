@@ -1247,6 +1247,8 @@ static void gauge_button_eh(Widget w, XtPointer client_data, XEvent *ev, Boolean
             launch_status_tab("power");
         } else if (ev->xbutton.x < (int)ww / 2) {
             launch_status_tab("network");
+        } else if (ev->xbutton.x < ((int)ww * 3) / 4) {
+            launch_status_tab("bluetooth");
         } else {
             launch_status_tab("notifications");
         }

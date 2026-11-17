@@ -2,6 +2,10 @@
 
 ## 2026-11-17
 
+- Map left-clicks on the Bluetooth half of the top-right `ck-status --gauge`
+  quadrant (`src/ck-status/ck-status.c`) directly to `ck-status --tab bluetooth`
+  so all four visual regions of the Front Panel status gauge (Wi-Fi/Network,
+  Bluetooth, Notifications/Tray, and Power/Battery) open their matching tabs.
 - Fix `ck-calc` window height calculation (`src/ck-calc/ck-calc.c`,
   `src/ck-calc/app_state.h`, `src/ck-calc/ui/window_metrics.c`) so Basic and
   Scientific modes size the shell directly to the live menubar, display, optional

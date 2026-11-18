@@ -76,7 +76,18 @@ int about_get_cde_fields(AboutField fields[], int max_fields)
     snprintf(fields[2].value, sizeof(fields[2].value), "%d", DtVERSION_NUMBER);
 
     fields[3].label = "DtVersion (runtime)";
-    snprintf(fields[3].value, sizeof(fields[3].value), "%d", DtVERSION_NUMBER);
+    snprintf(fields[3].value, sizeof(fields[3].value), "%d", DtVersion);
+
+    if (max_fields >= 6) {
+        fields[4].label = "Copyright";
+        snprintf(fields[4].value, sizeof(fields[4].value),
+                 "(c) 2025-2026 Dr. Christian Klukas");
+
+        fields[5].label = "GitHub";
+        snprintf(fields[5].value, sizeof(fields[5].value),
+                 "https://github.com/cklukas/ck-core-cde");
+        return 6;
+    }
 
     return 4;
 }
@@ -584,6 +595,13 @@ Widget about_add_table_page(Widget notebook, int page_number,
         XmStringFree(value_xms);
         XtManageChild(value_label);
 
+        if (i == field_count - 1) {
+            XtVaSetValues(key_label,
+                          XmNbottomAttachment, XmATTACH_FORM,
+                          XmNbottomOffset,     32,
+                          NULL);
+        }
+
         prev_row = key_label;
     }
 
@@ -627,8 +645,8 @@ int about_add_standard_pages(Widget notebook, int start_page,
         about_add_ck_core_page(notebook, page++, "page_ckcore", "CK-Core");
     }
 
-    AboutField cde_fields[4];
-    int cde_count = about_get_cde_fields(cde_fields, 4);
+    AboutField cde_fields[6];
+    int cde_count = about_get_cde_fields(cde_fields, 6);
     about_add_table_page(notebook, page++, "page_cde", "CDE",
                          cde_fields, cde_count);
 

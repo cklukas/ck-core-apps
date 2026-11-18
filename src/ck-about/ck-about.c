@@ -224,8 +224,8 @@ int main(int argc, char *argv[])
     about_add_ck_core_page(notebook, 1, "page_app_about", "About");
 
     {
-        AboutField cde_fields[4];
-        int cde_count = about_get_cde_fields(cde_fields, 4);
+        AboutField cde_fields[6];
+        int cde_count = about_get_cde_fields(cde_fields, 6);
         about_add_table_page(notebook, 2, "page_cde", "CDE",
                              cde_fields, cde_count);
     }
@@ -260,7 +260,7 @@ int main(int argc, char *argv[])
                   XmNtitle,      "About CK-Core",
                   XmNminWidth,   400,
                   XmNmaxWidth,   850,
-                  XmNminHeight,  300,
+                  XmNminHeight,  320,
                   NULL);
 
     /* WM protocol handling: DELETE + SAVE_YOURSELF */
@@ -279,6 +279,10 @@ int main(int argc, char *argv[])
 
     /* Restore previous session state (geometry + current page), if any */
     if (g_session_data && session_load(toplevel, g_session_data)) {
+        int saved_h = session_data_get_int(g_session_data, "h", 0);
+        if (saved_h > 0 && saved_h < 320) {
+            session_data_set_int(g_session_data, "h", 320);
+        }
         restored_geometry = session_apply_geometry(toplevel, g_session_data,
                                                    "x", "y", "w", "h");
         int page = session_data_get_int(g_session_data, "page", 1);

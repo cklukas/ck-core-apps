@@ -2,6 +2,10 @@
 
 ## 2026-11-18
 
+- Include CK-Core CDE copyright, GitHub repository URL
+  (`https://github.com/cklukas/ck-core-cde`), and runtime `DtVersion` on the
+  *CDE* tab of shared About dialogs (`src/shared/about_dialog.c`,
+  `src/ck-about/ck-about.c`).
 - Redesign `ck-status` Front Panel gauge (`74×54`) and *Power & Battery* views
   for desktop AC workstations and AA-proportioned laptop batteries
   (`src/ck-status/ck-status.c`, `src/ck-status/ck-status-hw.c`,

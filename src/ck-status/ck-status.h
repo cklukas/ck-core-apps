@@ -108,7 +108,16 @@ typedef struct {
 } CkSniItem;
 
 typedef struct {
+    double load_1m;
+    double load_5m;
+    double load_15m;
+    int cpu_usage_pct;
+    int cpu_cores;
+} CkSystemLoadState;
+
+typedef struct {
     CkBatteryState battery;
+    CkSystemLoadState load;
     CkNetState net;
     CkBtState bt;
 

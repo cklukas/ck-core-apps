@@ -6,6 +6,7 @@
 
 #define _GNU_SOURCE
 #include "ck-status.h"
+#include "ck-ac-plug-icons.h"
 
 #include "../shared/about_dialog.h"
 #include "../shared/cde_palette.h"
@@ -172,31 +173,96 @@ static void draw_bevel_box(cairo_t *cr, double x, double y, double w, double h, 
     cairo_stroke(cr);
 }
 
+static void draw_ac_plug_sprite(cairo_t *cr, double x, double y, double target_sz, bool large) {
+    int sw = large ? CK_AC_PLUG_LARGE_W : CK_AC_PLUG_SMALL_W;
+    int sh = large ? CK_AC_PLUG_LARGE_H : CK_AC_PLUG_SMALL_H;
+    const uint32_t *src = large ? ck_ac_plug_40x40 : ck_ac_plug_18x18;
+    cairo_surface_t *img = cairo_image_surface_create_for_data(
+        (unsigned char *)src, CAIRO_FORMAT_ARGB32, sw, sh, sw * 4
+    );
+    cairo_save(cr);
+    cairo_translate(cr, floor(x), floor(y));
+    double sc = target_sz / (double)sw;
+    if (fabs(sc - 1.0) > 0.02) {
+        cairo_scale(cr, sc, sc);
+    }
+    cairo_set_source_surface(cr, img, 0.0, 0.0);
+    cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+    cairo_paint(cr);
+    cairo_restore(cr);
+    cairo_surface_destroy(img);
+}
+
+static void draw_aa_battery_cell(
+    cairo_t *cr, double x, double y, double body_w, double body_h,
+    int pct, bool ac_online
+) {
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    double cap_w = fmax(2.0, floor(body_h * 0.24));
+    double cap_h = fmax(4.0, floor(body_h * 0.46));
+
+    /* Metallic 3D AA shell + positive nub */
+    cairo_set_source_rgb(cr, 0.72, 0.76, 0.80);
+    cairo_set_line_width(cr, (body_h >= 24.0) ? 2.0 : 1.0);
+    cairo_rectangle(cr, x + 0.5, y + 0.5, body_w - 1.0, body_h - 1.0);
+    cairo_stroke(cr);
+
+    cairo_set_source_rgb(cr, 0.78, 0.82, 0.86);
+    cairo_rectangle(cr, x + body_w + 0.5, y + floor((body_h - cap_h) * 0.5), cap_w, cap_h);
+    cairo_fill(cr);
+
+    /* 4 compact segments inside the AA-proportioned body (~2.3:1 ratio) */
+    int cells = 4;
+    double pad = (body_h >= 24.0) ? 4.0 : 2.0;
+    double gap = (body_h >= 24.0) ? 3.0 : 1.5;
+    double inner_w = body_w - pad * 2.0;
+    double inner_h = body_h - pad * 2.0;
+    double cw = (inner_w - (cells - 1) * gap) / (double)cells;
+    for (int i = 0; i < cells; ++i) {
+        int thresh = i * 25 + 6;
+        if (pct >= thresh) {
+            if (pct <= 15 && !ac_online) cairo_set_source_rgb(cr, 0.92, 0.26, 0.26);
+            else if (pct <= 28 && !ac_online) cairo_set_source_rgb(cr, 0.95, 0.72, 0.20);
+            else cairo_set_source_rgb(cr, 0.24, 0.84, 0.48);
+        } else {
+            cairo_set_source_rgb(cr, 0.22, 0.26, 0.30);
+        }
+        cairo_rectangle(cr, x + pad + i * (cw + gap), y + pad, fmax(1.5, cw), fmax(2.0, inner_h));
+        cairo_fill(cr);
+    }
+}
+
 /* -------------------------------------------------------------------------
  * Shared 4-Quadrant Sun/IBM Instrument Cluster Renderer
- * Used by both Front Panel --gauge (54x48) and WM_HINTS dynamic icon (48/96)
+ * Used by both Front Panel --gauge (66x54, borderless) and WM_HINTS icon (48/96)
  * ------------------------------------------------------------------------- */
-static void render_instrument_cluster(cairo_t *cr, int w, int h) {
+static void render_instrument_cluster(cairo_t *cr, int w, int h, bool with_outer_bevel) {
     const CkStatusModel *m = &g_app.model;
     cairo_set_source_rgb(cr, g_app.bg_r, g_app.bg_g, g_app.bg_b);
     cairo_paint(cr);
-    draw_bevel_box(cr, 0, 0, w, h, false);
+    if (with_outer_bevel) {
+        draw_bevel_box(cr, 0, 0, w, h, false);
+    }
 
-    double pad = (w >= 72) ? 5.0 : 3.0;
-    double top_h = floor((h - pad * 3.0) * 0.48);
-    double bot_y = pad * 2.0 + top_h;
+    double pad = with_outer_bevel ? ((w >= 72) ? 5.0 : 3.0) : 2.0;
+    double gap_mid = 3.0;
+    double top_h = floor((h - pad * 2.0 - gap_mid) * 0.49);
+    double bot_y = pad + top_h + gap_mid;
     double bot_h = h - bot_y - pad;
-    double half_w = floor((w - pad * 3.0) * 0.5);
+    double half_w = floor((w - pad * 2.0 - gap_mid) * 0.5);
+    double q2_x = pad + half_w + gap_mid;
+    double q2_w = w - pad - q2_x;
 
     /* Dark recessed instrument wells (classic 1995 Sun/IBM dark slate meter face) */
     cairo_set_source_rgb(cr, 0.13, 0.16, 0.19);
     cairo_rectangle(cr, pad, pad, half_w, top_h);
-    cairo_rectangle(cr, pad * 2.0 + half_w, pad, w - (pad * 3.0 + half_w), top_h);
+    cairo_rectangle(cr, q2_x, pad, q2_w, top_h);
     cairo_rectangle(cr, pad, bot_y, w - pad * 2.0, bot_h);
     cairo_fill(cr);
 
     draw_bevel_box(cr, pad, pad, half_w, top_h, true);
-    draw_bevel_box(cr, pad * 2.0 + half_w, pad, w - (pad * 3.0 + half_w), top_h, true);
+    draw_bevel_box(cr, q2_x, pad, q2_w, top_h, true);
     draw_bevel_box(cr, pad, bot_y, w - pad * 2.0, bot_h, true);
 
     /* Quadrant 1 (Top-Left): 4-bar Wi-Fi / Network signal meter */
@@ -209,12 +275,12 @@ static void render_instrument_cluster(cairo_t *cr, int w, int h) {
             active_bars = 4;
         }
     }
-    double bw = fmax(2.0, floor((half_w - 8.0) / 5.5));
-    double gap = fmax(1.0, floor(bw * 0.4));
+    double bw = fmax(3.0, floor((half_w - 8.0) / 5.2));
+    double gap = fmax(1.5, floor(bw * 0.42));
     double bx0 = pad + floor((half_w - (4.0 * bw + 3.0 * gap)) * 0.5);
     for (int b = 0; b < 4; ++b) {
-        double bh = floor((top_h - 6.0) * (0.30 + 0.23 * b));
-        double by = pad + top_h - 3.0 - bh;
+        double bh = floor((top_h - 5.0) * (0.30 + 0.23 * b));
+        double by = pad + top_h - 2.5 - bh;
         if (b < active_bars) {
             cairo_set_source_rgb(cr, 0.22, 0.84, 0.58);
         } else {
@@ -225,18 +291,15 @@ static void render_instrument_cluster(cairo_t *cr, int w, int h) {
     }
 
     /* Quadrant 2 (Top-Right): Bluetooth + Unread Notification / SNI amber lamp */
-    double q2_x = pad * 2.0 + half_w;
-    double q2_w = w - (pad * 3.0 + half_w);
-    /* Bluetooth diamond/rune on left half of Q2 */
-    double bt_cx = q2_x + q2_w * 0.30;
+    double bt_cx = q2_x + q2_w * 0.31;
     double bt_cy = pad + top_h * 0.50;
-    double bt_r = fmin(q2_w * 0.22, top_h * 0.32);
+    double bt_r = fmin(q2_w * 0.24, top_h * 0.35);
     if (m->bt.adapter_present && m->bt.powered) {
         cairo_set_source_rgb(cr, 0.35, 0.68, 0.98);
     } else {
         cairo_set_source_rgb(cr, 0.35, 0.38, 0.42);
     }
-    cairo_set_line_width(cr, (w >= 72) ? 1.8 : 1.2);
+    cairo_set_line_width(cr, (w >= 64) ? 1.5 : 1.2);
     cairo_move_to(cr, bt_cx, bt_cy - bt_r);
     cairo_line_to(cr, bt_cx, bt_cy + bt_r);
     cairo_line_to(cr, bt_cx + bt_r * 0.75, bt_cy + bt_r * 0.45);
@@ -249,7 +312,7 @@ static void render_instrument_cluster(cairo_t *cr, int w, int h) {
     /* Notification / SNI indicator lamp on right half of Q2 */
     double lamp_cx = q2_x + q2_w * 0.72;
     double lamp_cy = bt_cy;
-    double lamp_r = fmin(q2_w * 0.20, top_h * 0.28);
+    double lamp_r = fmin(q2_w * 0.21, top_h * 0.30);
     if (m->unread_count > 0) {
         cairo_set_source_rgb(cr, 0.98, 0.66, 0.16); /* Lit Sun amber alert */
     } else if (m->sni_count > 0) {
@@ -260,48 +323,60 @@ static void render_instrument_cluster(cairo_t *cr, int w, int h) {
     cairo_arc(cr, lamp_cx, lamp_cy, lamp_r, 0, 2.0 * M_PI);
     cairo_fill(cr);
 
-    /* Bottom Half: Segmented Battery Fuel-Gauge (or AC Workstation bar) */
+    /* Bottom Well: AA-Proportioned Battery (+ AC plug & %) when battery present;
+     * Classic CDE AC Power Plug + live CPU % when no battery is present! */
     double gx = pad + 3.0;
-    double gy = bot_y + 3.0;
+    double gy = bot_y + 2.0;
     double gw = (w - pad * 2.0) - 6.0;
-    double gh = bot_h - 6.0;
-    int pct = m->battery.present ? m->battery.capacity_pct : 100;
-    if (pct < 0) pct = 100;
+    double gh = bot_h - 4.0;
 
-    int segs = 5;
-    double seg_gap = 1.5;
-    double bar_area_w = (w < 64) ? gw * 0.44 : gw * 0.54;
-    double seg_w = (bar_area_w - (segs - 1) * seg_gap) / segs;
-    for (int s = 0; s < segs; ++s) {
-        int thresh = s * 20 + 5;
-        if (pct >= thresh) {
-            if (m->battery.present && pct <= 15 && !m->battery.ac_online) {
-                cairo_set_source_rgb(cr, 0.92, 0.26, 0.26);
-            } else if (m->battery.present && pct <= 28 && !m->battery.ac_online) {
-                cairo_set_source_rgb(cr, 0.95, 0.72, 0.20);
-            } else {
-                cairo_set_source_rgb(cr, 0.24, 0.84, 0.48);
-            }
-        } else {
-            cairo_set_source_rgb(cr, 0.25, 0.29, 0.32);
-        }
-        cairo_rectangle(cr, gx + s * (seg_w + seg_gap), gy + 1.0, seg_w, fmax(3.0, gh - 2.0));
-        cairo_fill(cr);
-    }
-
-    char txt[16];
     if (m->battery.present) {
+        int pct = (m->battery.capacity_pct >= 0) ? m->battery.capacity_pct : 0;
+        double bat_h = fmax(9.0, fmin(13.0, floor(gh * 0.64)));
+        double bat_w = floor(bat_h * 2.25); /* Standard AA ~2.25:1 width:height ratio */
+        double bat_y = gy + floor((gh - bat_h) * 0.5);
+        draw_aa_battery_cell(cr, gx, bat_y, bat_w, bat_h, pct, m->battery.ac_online);
+
+        char txt[16];
         snprintf(txt, sizeof(txt), "%d%%", pct);
+        cairo_select_font_face(cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+        cairo_set_font_size(cr, (w < 60) ? 8.5 : 9.0);
+        cairo_text_extents_t ext;
+        cairo_text_extents(cr, txt, &ext);
+        double text_x = gx + gw - ext.width - 1.0;
+
+        double cur_x = gx + bat_w + fmax(3.0, floor(bat_h * 0.24)) + 2.0;
+        double p_sz = fmin(13.0, gh - 2.0);
+        if (m->battery.ac_online && (cur_x + p_sz + 2.0 <= text_x)) {
+            draw_ac_plug_sprite(cr, cur_x, gy + floor((gh - p_sz) * 0.5), p_sz, false);
+        }
+
+        cairo_set_source_rgb(cr, 0.92, 0.95, 0.94);
+        cairo_move_to(cr, text_x, gy + (gh + ext.height) * 0.5 - 0.5);
+        cairo_show_text(cr, txt);
     } else {
-        snprintf(txt, sizeof(txt), "AC");
+        /* Desktop workstation without battery: NEVER draw battery bars!
+         * Show the classic CDE 3D AC Power Plug icon + live CPU usage % */
+        double p_sz = fmin(18.0, gh);
+        draw_ac_plug_sprite(cr, gx + 1.0, gy + floor((gh - p_sz) * 0.5), p_sz, false);
+
+        char txt[24];
+        snprintf(txt, sizeof(txt), "%d%%", m->load.cpu_usage_pct);
+        cairo_select_font_face(cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+        cairo_set_font_size(cr, (w < 60) ? 8.5 : 9.5);
+        cairo_text_extents_t ext;
+        cairo_text_extents(cr, "CPU", &ext);
+        cairo_set_source_rgb(cr, 0.68, 0.76, 0.82);
+        cairo_set_font_size(cr, 7.5);
+        cairo_move_to(cr, gx + p_sz + 4.0, gy + gh * 0.44);
+        cairo_show_text(cr, "CPU");
+
+        cairo_set_font_size(cr, (w < 60) ? 8.5 : 9.5);
+        cairo_text_extents(cr, txt, &ext);
+        cairo_set_source_rgb(cr, 0.34, 0.90, 0.62);
+        cairo_move_to(cr, gx + gw - ext.width - 1.0, gy + gh * 0.84);
+        cairo_show_text(cr, txt);
     }
-    cairo_select_font_face(cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
-    cairo_set_font_size(cr, (w < 64) ? fmin(8.5, gh * 0.66) : fmax(9.0, gh * 0.72));
-    cairo_text_extents_t ext;
-    cairo_text_extents(cr, txt, &ext);
-    cairo_set_source_rgb(cr, 0.92, 0.95, 0.94);
-    cairo_move_to(cr, gx + gw - ext.width - 1.0, gy + (gh + ext.height) * 0.5 - 1.0);
-    cairo_show_text(cr, txt);
 }
 
 /* -------------------------------------------------------------------------
@@ -337,7 +412,7 @@ static void update_wm_icon_pixmap(void) {
         g_app.dpy, g_app.icon_pixmap, g_app.visual, iw, ih
     );
     cairo_t *cr = cairo_create(surf);
-    render_instrument_cluster(cr, iw, ih);
+    render_instrument_cluster(cr, iw, ih, true);
     cairo_destroy(cr);
     cairo_surface_flush(surf);
     cairo_surface_destroy(surf);
@@ -411,7 +486,7 @@ static void set_gauge_pinned_in_fp(bool pin) {
                 "  CONTAINER_TYPE  BOX\n"
                 "  POSITION_HINTS  8\n"
                 "  CLIENT_NAME     ck-status-gauge\n"
-                "  CLIENT_GEOMETRY 54x48\n"
+                "  CLIENT_GEOMETRY 74x54\n"
                 "  LABEL           System Status\n"
                 "}\n"
             );
@@ -642,13 +717,18 @@ static void draw_header_strip_cb(Widget w, XtPointer client_data, XtPointer call
     cairo_paint(cr);
 
     const CkStatusModel *m = &g_app.model;
-    const char *titles[4] = {"POWER / BATTERY", "NETWORK / WI-FI", "BLUETOOTH", "NOTIFICATIONS & TRAY"};
+    const char *titles[4] = {
+        m->battery.present ? "POWER / BATTERY" : "AC POWER / LOAD",
+        "NETWORK / WI-FI",
+        "BLUETOOTH",
+        "NOTIFICATIONS & TRAY"
+    };
     char vals[4][64];
 
     if (m->battery.present) {
         snprintf(vals[0], sizeof(vals[0]), "%d%%  (%s)", m->battery.capacity_pct, m->battery.status_text);
     } else {
-        snprintf(vals[0], sizeof(vals[0]), "AC Online (Workstation)");
+        snprintf(vals[0], sizeof(vals[0]), "AC  |  CPU %d%%", m->load.cpu_usage_pct);
     }
     if (m->net.connected) {
         if (m->net.ssid[0]) {
@@ -680,13 +760,17 @@ static void draw_header_strip_cb(Widget w, XtPointer client_data, XtPointer call
         cairo_fill(cr);
         draw_bevel_box(cr, cx, cy, card_w, card_h, true);
 
+        cairo_save(cr);
+        cairo_rectangle(cr, cx + 2.0, cy + 2.0, fmax(1.0, card_w - 4.0), fmax(1.0, card_h - 4.0));
+        cairo_clip(cr);
+
         cairo_select_font_face(cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
         cairo_set_font_size(cr, 10.0);
         cairo_set_source_rgb(cr, 0.72, 0.79, 0.84);
         cairo_move_to(cr, cx + 8.0, cy + 16.0);
         cairo_show_text(cr, titles[i]);
 
-        cairo_set_font_size(cr, 12.0);
+        cairo_set_font_size(cr, 11.5);
         if ((i == 3 && m->unread_count > 0)) {
             cairo_set_source_rgb(cr, 0.98, 0.72, 0.22);
         } else {
@@ -694,6 +778,7 @@ static void draw_header_strip_cb(Widget w, XtPointer client_data, XtPointer call
         }
         cairo_move_to(cr, cx + 8.0, cy + 36.0);
         cairo_show_text(cr, vals[i]);
+        cairo_restore(cr);
     }
 
     cairo_destroy(cr);
@@ -730,33 +815,60 @@ static void draw_power_gauge_cb(Widget w, XtPointer client_data, XtPointer call_
     draw_bevel_box(cr, 0, 0, ww, wh, true);
 
     const CkBatteryState *b = &g_app.model.battery;
-    int pct = b->present ? b->capacity_pct : 100;
-    if (pct < 0) pct = 100;
+    const CkSystemLoadState *ld = &g_app.model.load;
 
-    int cells = 10;
-    double pad = 12.0;
-    double cap_w = 10.0;
-    double body_w = (double)ww - pad * 2.0 - cap_w - 8.0;
-    double body_h = (double)wh - pad * 2.0;
-    cairo_set_source_rgb(cr, 0.62, 0.68, 0.72);
-    cairo_set_line_width(cr, 2.0);
-    cairo_rectangle(cr, pad, pad, body_w, body_h);
-    cairo_stroke(cr);
-    cairo_rectangle(cr, pad + body_w + 2.0, pad + body_h * 0.28, cap_w - 2.0, body_h * 0.44);
-    cairo_fill(cr);
+    if (b->present) {
+        /* Realistic AA-proportioned battery (~2.35:1 ratio) on the left + AC plug & load info on the right */
+        int pct = (b->capacity_pct >= 0) ? b->capacity_pct : 0;
+        double bat_h = fmax(28.0, fmin(38.0, (double)wh - 24.0));
+        double bat_w = floor(bat_h * 2.35);
+        double bx = 16.0;
+        double by = floor(((double)wh - bat_h) * 0.5);
+        draw_aa_battery_cell(cr, bx, by, bat_w, bat_h, pct, b->ac_online);
 
-    double gap = 4.0;
-    double cw = (body_w - 12.0 - (cells - 1) * gap) / cells;
-    for (int i = 0; i < cells; ++i) {
-        if (pct >= i * 10 + 5) {
-            if (b->present && pct <= 15 && !b->ac_online) cairo_set_source_rgb(cr, 0.92, 0.25, 0.25);
-            else if (b->present && pct <= 25 && !b->ac_online) cairo_set_source_rgb(cr, 0.96, 0.72, 0.18);
-            else cairo_set_source_rgb(cr, 0.24, 0.84, 0.48);
-        } else {
-            cairo_set_source_rgb(cr, 0.22, 0.26, 0.30);
+        double info_x = bx + bat_w + floor(bat_h * 0.24) + 16.0;
+        if (b->ac_online) {
+            draw_ac_plug_sprite(cr, info_x, floor(((double)wh - 40.0) * 0.5), 40.0, true);
+            info_x += 52.0;
         }
-        cairo_rectangle(cr, pad + 6.0 + i * (cw + gap), pad + 6.0, cw, body_h - 12.0);
-        cairo_fill(cr);
+
+        char line1[128], line2[160];
+        snprintf(line1, sizeof(line1), "%d%%  —  %s%s",
+                 pct, b->status_text, b->ac_online ? " (AC Mains)" : "");
+        snprintf(line2, sizeof(line2), "Draw: %.2f W   |   CPU: %d%%   |   Load: %.2f, %.2f, %.2f",
+                 (double)b->power_mw / 1000.0, ld->cpu_usage_pct,
+                 ld->load_1m, ld->load_5m, ld->load_15m);
+
+        cairo_select_font_face(cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+        cairo_set_font_size(cr, 14.0);
+        cairo_set_source_rgb(cr, 0.34, 0.90, 0.62);
+        cairo_move_to(cr, info_x, (double)wh * 0.43);
+        cairo_show_text(cr, line1);
+
+        cairo_set_font_size(cr, 11.5);
+        cairo_set_source_rgb(cr, 0.78, 0.84, 0.88);
+        cairo_move_to(cr, info_x, (double)wh * 0.74);
+        cairo_show_text(cr, line2);
+    } else {
+        /* Desktop workstation with NO battery: do NOT draw battery bars!
+         * Show the classic CDE 3D AC Power Plug icon + AC Mains & CPU/Load readout */
+        draw_ac_plug_sprite(cr, 16.0, floor(((double)wh - 40.0) * 0.5), 40.0, true);
+
+        char line1[128], line2[160];
+        snprintf(line1, sizeof(line1), "AC MAINS ONLINE  —  Desktop Workstation");
+        snprintf(line2, sizeof(line2), "CPU Activity: %d%% (%d cores)   |   Load Avg: %.2f, %.2f, %.2f",
+                 ld->cpu_usage_pct, ld->cpu_cores, ld->load_1m, ld->load_5m, ld->load_15m);
+
+        cairo_select_font_face(cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+        cairo_set_font_size(cr, 13.5);
+        cairo_set_source_rgb(cr, 0.34, 0.90, 0.62);
+        cairo_move_to(cr, 68.0, (double)wh * 0.43);
+        cairo_show_text(cr, line1);
+
+        cairo_set_font_size(cr, 11.5);
+        cairo_set_source_rgb(cr, 0.78, 0.84, 0.88);
+        cairo_move_to(cr, 68.0, (double)wh * 0.75);
+        cairo_show_text(cr, line2);
     }
 
     cairo_destroy(cr);
@@ -880,7 +992,7 @@ static void draw_gauge_cb(Widget w, XtPointer client_data, XtPointer call_data) 
     refresh_theme_colors(w);
     cairo_surface_t *surf = cairo_xlib_surface_create(g_app.dpy, XtWindow(w), g_app.visual, ww, wh);
     cairo_t *cr = cairo_create(surf);
-    render_instrument_cluster(cr, (int)ww, (int)wh);
+    render_instrument_cluster(cr, (int)ww, (int)wh, false);
     cairo_destroy(cr);
     cairo_surface_destroy(surf);
 }
@@ -978,7 +1090,10 @@ static void refresh_all_ui(void) {
             pwr, sizeof(pwr),
             "Power Configuration: Desktop Workstation (AC Mains Online)\n"
             "Battery Pack:        None detected under /sys/class/power_supply\n"
+            "CPU & System Load:   %d%% active across %d core(s)  |  Load avg %.2f, %.2f, %.2f\n"
             "Platform Profile:    %s",
+            m->load.cpu_usage_pct, m->load.cpu_cores,
+            m->load.load_1m, m->load.load_5m, m->load.load_15m,
             m->battery.power_profile
         );
     }
@@ -1258,8 +1373,8 @@ static void gauge_button_eh(Widget w, XtPointer client_data, XEvent *ev, Boolean
 static void build_gauge_ui(void) {
     Widget form = XtVaCreateManagedWidget(
         "gaugeForm", xmFormWidgetClass, g_app.toplevel,
-        XmNwidth, 54,
-        XmNheight, 48,
+        XmNwidth, 74,
+        XmNheight, 54,
         NULL
     );
     g_app.gauge_canvas = XtVaCreateManagedWidget(
@@ -1268,8 +1383,8 @@ static void build_gauge_ui(void) {
         XmNbottomAttachment, XmATTACH_FORM,
         XmNleftAttachment, XmATTACH_FORM,
         XmNrightAttachment, XmATTACH_FORM,
-        XmNwidth, 54,
-        XmNheight, 48,
+        XmNwidth, 74,
+        XmNheight, 54,
         NULL
     );
     XtAddCallback(g_app.gauge_canvas, XmNexposeCallback, draw_gauge_cb, NULL);

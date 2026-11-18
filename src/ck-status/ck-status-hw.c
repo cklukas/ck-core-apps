@@ -720,9 +720,55 @@ bool ck_status_bt_set_device_connected(const char *device_dbus_path, bool connec
     return true;
 }
 
+static void poll_system_load(CkSystemLoadState *load) {
+    if (!load) return;
+    static unsigned long long prev_total = 0;
+    static unsigned long long prev_idle = 0;
+
+    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
+    load->cpu_cores = (nprocs > 0) ? (int)nprocs : 1;
+
+    double avg[3] = {0.0, 0.0, 0.0};
+    if (getloadavg(avg, 3) > 0) {
+        load->load_1m = avg[0];
+        load->load_5m = avg[1];
+        load->load_15m = avg[2];
+    }
+
+    FILE *fp = fopen("/proc/stat", "r");
+    if (fp) {
+        char line[256];
+        if (fgets(line, sizeof(line), fp) && strncmp(line, "cpu ", 4) == 0) {
+            unsigned long long user = 0, nice = 0, sys = 0, idle = 0, iowait = 0, irq = 0, softirq = 0, steal = 0;
+            if (sscanf(line + 4, "%llu %llu %llu %llu %llu %llu %llu %llu",
+                       &user, &nice, &sys, &idle, &iowait, &irq, &softirq, &steal) >= 4) {
+                unsigned long long cur_idle = idle + iowait;
+                unsigned long long cur_total = user + nice + sys + cur_idle + irq + softirq + steal;
+                if (prev_total > 0 && cur_total > prev_total) {
+                    unsigned long long d_tot = cur_total - prev_total;
+                    unsigned long long d_idle = (cur_idle >= prev_idle) ? (cur_idle - prev_idle) : 0;
+                    int pct = (int)(((d_tot - d_idle) * 100ULL + d_tot / 2ULL) / d_tot);
+                    if (pct < 0) pct = 0;
+                    if (pct > 100) pct = 100;
+                    load->cpu_usage_pct = pct;
+                } else if (load->cpu_cores > 0) {
+                    int est = (int)((load->load_1m * 100.0) / (double)load->cpu_cores + 0.5);
+                    if (est < 0) est = 0;
+                    if (est > 100) est = 100;
+                    load->cpu_usage_pct = est;
+                }
+                prev_total = cur_total;
+                prev_idle = cur_idle;
+            }
+        }
+        fclose(fp);
+    }
+}
+
 void ck_status_hw_poll(CkStatusModel *model) {
     if (!model) return;
     poll_battery(&model->battery);
+    poll_system_load(&model->load);
     poll_network(&model->net);
     poll_bluetooth(&model->bt);
 }

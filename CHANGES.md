@@ -1,5 +1,27 @@
 # Changes
 
+## 2026-11-18
+
+- Redesign `ck-status` Front Panel gauge (`74×54`) and *Power & Battery* views
+  for desktop AC workstations and AA-proportioned laptop batteries
+  (`src/ck-status/ck-status.c`, `src/ck-status/ck-status-hw.c`,
+  `src/ck-status/ck-status.h`, `src/ck-status/ck-ac-plug-icons.h`,
+  `docs/companions/ck-status.md`):
+  - Expand `--gauge` / `--pin-gauge` (`CLIENT_GEOMETRY`) from `54×48` to `74×54`
+    and omit the redundant outer bevel frame in `--gauge` mode so the three
+    recessed instrument wells sit cleanly inside the Front Panel slot.
+  - Poll `/proc/stat` CPU activity percentage and `/proc/loadavg` (`1m`, `5m`,
+    `15m`) alongside CPU core count, and clip header strip cards so summary
+    labels never overflow card borders.
+  - Omit battery bars completely on desktop workstations without a battery
+    (`!battery.present`), displaying a period-correct 3D CDE AC mains power plug
+    icon alongside live CPU activity and system load in both `--gauge` and the
+    *Power & Battery* tab.
+  - When a battery is present, render a compact AA-proportioned 4-cell battery
+    with positive terminal nub on the left and show the AC mains plug icon (when
+    charging/AC online), percentage, watt draw, and CPU/load metrics on the
+    right.
+
 ## 2026-11-17
 
 - Map left-clicks on the Bluetooth half of the top-right `ck-status --gauge`
